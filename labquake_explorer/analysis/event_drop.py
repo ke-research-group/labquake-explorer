@@ -81,6 +81,52 @@ def calculate_2pt_trend_drop(
     return calculate_trend_drop(t_rel, y, points)
 
 
+def calculate_event_signal_drop(
+    time: Any,
+    signal: Any,
+    event_time: float,
+    half_win: float,
+    points: Sequence[float],
+    smooth_w: int | None = None,
+) -> dict[str, Any]:
+    """Calculate a signed event drop for one already-selected signal.
+
+    The event window includes both endpoints.  Its time values are made
+    relative to ``event_time``, the signal is optionally smoothed using
+    :func:`moving_average`, and its first selected value is subtracted before
+    the pre/post trends are fitted.  Channel selection and interpretation of
+    the signed result belong to the caller.
+    """
+    time_array = _coerce_1d_float_array(time, "time")
+    signal_array = _coerce_1d_float_array(signal, "signal")
+    if time_array.size != signal_array.size:
+        raise ValueError("time and signal must have the same length")
+
+    try:
+        trigger_time = float(event_time)
+        window = float(half_win)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("event_time and half_win must be finite numbers") from exc
+    if not np.isfinite(trigger_time) or not np.isfinite(window):
+        raise ValueError("event_time and half_win must be finite numbers")
+    if window < 0:
+        raise ValueError("half_win must be non-negative")
+
+    event_mask = (time_array >= trigger_time - window) & (
+        time_array <= trigger_time + window
+    )
+    if not np.any(event_mask):
+        return {"valid": False}
+
+    relative_time = time_array[event_mask] - trigger_time
+    event_signal = signal_array[event_mask].copy()
+    if smooth_w is not None:
+        event_signal = moving_average(event_signal, smooth_w)
+    event_signal = event_signal - event_signal[0]
+
+    return calculate_trend_drop(relative_time, event_signal, points)
+
+
 def calculate_trend_drop(
     t_rel: Any,
     y: Any,

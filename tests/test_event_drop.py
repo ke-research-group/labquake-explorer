@@ -6,6 +6,7 @@ import numpy as np
 
 from labquake_explorer.analysis.event_drop import (
     calculate_2pt_trend_drop,
+    calculate_event_signal_drop,
     calculate_trend_drop,
     compute_half_win,
     moving_average,
@@ -114,6 +115,175 @@ class CalculateTrendDropTests(unittest.TestCase):
         self.assertAlmostEqual(direct["delta"], compatible["delta"])
         np.testing.assert_allclose(direct["coeff_pre"], compatible["coeff_pre"])
         np.testing.assert_allclose(direct["coeff_post"], compatible["coeff_post"])
+
+
+class CalculateEventSignalDropTests(unittest.TestCase):
+    def test_absolute_time_is_converted_and_baseline_is_subtracted(self):
+        time = np.array([99.0, 99.5, 100.5, 101.0])
+        relative_time = time - 100.0
+        signal = np.where(
+            relative_time < 0,
+            relative_time + 12.0,
+            2.0 * relative_time + 7.0,
+        )
+
+        result = calculate_event_signal_drop(
+            time,
+            signal,
+            event_time=100.0,
+            half_win=1.0,
+            points=(-1.0, -0.5, 0.5, 1.0),
+        )
+
+        self.assertTrue(result["valid"])
+        self.assertAlmostEqual(result["val_pre_0"], 1.0)
+        self.assertAlmostEqual(result["val_post_0"], -4.0)
+        self.assertAlmostEqual(result["delta"], 5.0)
+
+    def test_event_mask_includes_both_endpoints(self):
+        time = np.array([-1.1, -1.0, -0.5, 0.5, 1.0, 1.1])
+        signal = np.array([1000.0, 9.0, 9.5, 5.5, 6.0, -1000.0])
+
+        result = calculate_event_signal_drop(
+            time,
+            signal,
+            event_time=0.0,
+            half_win=1.0,
+            points=(-1.0, -0.5, 0.5, 1.0),
+        )
+
+        self.assertTrue(result["valid"])
+        self.assertAlmostEqual(result["delta"], 5.0)
+
+    def test_smoothing_matches_existing_moving_average_pipeline(self):
+        time = np.array([-2.0, -1.5, -1.0, -0.5, 0.5, 1.0, 1.5, 2.0])
+        signal = np.array([10.0, 12.0, 11.0, 13.0, 5.0, 7.0, 6.0, 8.0])
+        points = (-2.0, -0.5, 0.5, 2.0)
+        smoothed = moving_average(signal, 3)
+        expected = calculate_trend_drop(time, smoothed - smoothed[0], points)
+
+        result = calculate_event_signal_drop(
+            time,
+            signal,
+            event_time=0.0,
+            half_win=2.0,
+            points=points,
+            smooth_w=3,
+        )
+
+        self.assertTrue(result["valid"])
+        self.assertAlmostEqual(result["delta"], expected["delta"])
+        np.testing.assert_allclose(result["coeff_pre"], expected["coeff_pre"])
+        np.testing.assert_allclose(result["coeff_post"], expected["coeff_post"])
+
+    def test_no_smoothing_preserves_negative_signed_drop(self):
+        time = np.array([-2.0, -1.0, 1.0, 2.0])
+        signal = np.where(time < 0, time + 3.0, -time + 8.0)
+
+        result = calculate_event_signal_drop(
+            time,
+            signal,
+            event_time=0.0,
+            half_win=2.0,
+            points=(-2.0, -1.0, 1.0, 2.0),
+            smooth_w=None,
+        )
+
+        self.assertTrue(result["valid"])
+        self.assertAlmostEqual(result["delta"], -5.0)
+
+    def test_empty_event_window_returns_invalid(self):
+        result = calculate_event_signal_drop(
+            np.array([0.0, 1.0]),
+            np.array([2.0, 3.0]),
+            event_time=10.0,
+            half_win=1.0,
+            points=(-1.0, -0.5, 0.5, 1.0),
+        )
+
+        self.assertEqual(result, {"valid": False})
+
+    def test_insufficient_fitting_samples_return_invalid(self):
+        result = calculate_event_signal_drop(
+            np.array([-1.0, 0.5, 1.0]),
+            np.array([2.0, 1.0, 1.5]),
+            event_time=0.0,
+            half_win=1.0,
+            points=(-1.0, -0.5, 0.5, 1.0),
+        )
+
+        self.assertEqual(result, {"valid": False})
+
+    def test_mismatched_lengths_raise_value_error(self):
+        with self.assertRaises(ValueError):
+            calculate_event_signal_drop(
+                [0.0, 1.0],
+                [1.0],
+                event_time=0.0,
+                half_win=1.0,
+                points=(-1.0, -0.5, 0.5, 1.0),
+            )
+
+    def test_non_one_dimensional_inputs_raise_value_error(self):
+        with self.assertRaises(ValueError):
+            calculate_event_signal_drop(
+                [[-1.0, 1.0]],
+                [[2.0, 1.0]],
+                event_time=0.0,
+                half_win=1.0,
+                points=(-1.0, -0.5, 0.5, 1.0),
+            )
+
+    def test_nan_and_infinity_follow_trend_fit_validation(self):
+        time = np.array([-2.0, -1.5, -1.0, -0.5, 0.5, 1.0, 1.5, 2.0])
+        signal = np.where(time < 0, time + 10.0, -time + 6.0)
+        signal[1] = np.nan
+        signal[6] = np.inf
+
+        result = calculate_event_signal_drop(
+            time,
+            signal,
+            event_time=0.0,
+            half_win=2.0,
+            points=(-2.0, -0.5, 0.5, 2.0),
+        )
+
+        self.assertTrue(result["valid"])
+        self.assertAlmostEqual(result["delta"], 4.0)
+
+    def test_input_arrays_are_not_modified(self):
+        time = np.array([-1.0, -0.5, 0.5, 1.0])
+        signal = np.array([4.0, 5.0, 1.0, 2.0])
+        original_time = time.copy()
+        original_signal = signal.copy()
+
+        calculate_event_signal_drop(
+            time,
+            signal,
+            event_time=0.0,
+            half_win=1.0,
+            points=(-1.0, -0.5, 0.5, 1.0),
+            smooth_w=2,
+        )
+
+        np.testing.assert_array_equal(time, original_time)
+        np.testing.assert_array_equal(signal, original_signal)
+
+    def test_two_signals_are_analyzed_by_separate_calls(self):
+        time = np.array([-2.0, -1.0, 1.0, 2.0])
+        falling_signal = np.where(time < 0, time + 8.0, time + 3.0)
+        rising_signal = np.where(time < 0, -time + 2.0, -time + 6.0)
+        points = (-2.0, -1.0, 1.0, 2.0)
+
+        falling_result = calculate_event_signal_drop(
+            time, falling_signal, 0.0, 2.0, points
+        )
+        rising_result = calculate_event_signal_drop(
+            time, rising_signal, 0.0, 2.0, points
+        )
+
+        self.assertAlmostEqual(falling_result["delta"], 5.0)
+        self.assertAlmostEqual(rising_result["delta"], -4.0)
 
 
 class MovingAverageTests(unittest.TestCase):
