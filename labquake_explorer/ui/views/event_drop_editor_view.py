@@ -22,6 +22,72 @@ from labquake_explorer.analysis.event_drop import (
 DEFAULT_POINTS = (-1.0, -0.5, 0.5, 1.0)
 
 
+class _DraggableVerticalLine:
+    """Make one Matplotlib vertical line horizontally draggable."""
+
+    def __init__(
+        self,
+        line,
+        on_changed,
+        on_released,
+        constrain,
+        hit_tolerance: float = 7.0,
+        on_started=None,
+    ):
+        self.line = line
+        self.axes = line.axes
+        self.canvas = line.figure.canvas
+        self.on_changed = on_changed
+        self.on_released = on_released
+        self.constrain = constrain
+        self.hit_tolerance = hit_tolerance
+        self.on_started = on_started
+        self.dragging = False
+        self._connection_ids = [
+            self.canvas.mpl_connect("button_press_event", self._on_press),
+            self.canvas.mpl_connect("motion_notify_event", self._on_motion),
+            self.canvas.mpl_connect("button_release_event", self._on_release),
+        ]
+
+    @property
+    def connected(self) -> bool:
+        return bool(self._connection_ids)
+
+    def _is_near_line(self, event) -> bool:
+        if event.inaxes is not self.axes or event.xdata is None or event.x is None:
+            return False
+        line_x = float(self.line.get_xdata()[0])
+        line_pixel_x = self.axes.transData.transform((line_x, 0.0))[0]
+        return abs(float(event.x) - line_pixel_x) <= self.hit_tolerance
+
+    def _on_press(self, event) -> None:
+        if getattr(event, "button", 1) != 1 or not self._is_near_line(event):
+            return
+        if self.on_started is not None and not self.on_started():
+            return
+        self.dragging = True
+
+    def _on_motion(self, event) -> None:
+        if not self.dragging or event.inaxes is not self.axes or event.xdata is None:
+            return
+        position = self.constrain(float(event.xdata))
+        self.line.set_xdata([position, position])
+        self.on_changed(position)
+        self.canvas.draw_idle()
+
+    def _on_release(self, event) -> None:
+        if not self.dragging:
+            return
+        self.dragging = False
+        self.on_released()
+
+    def disconnect(self) -> None:
+        for connection_id in self._connection_ids:
+            self.canvas.mpl_disconnect(connection_id)
+        self._connection_ids.clear()
+        self.dragging = False
+
+
 def find_signal_candidates(event: Mapping[str, Any]) -> dict[str, np.ndarray]:
     """Return top-level numeric 1-D signals aligned with ``event['time']``.
 
@@ -163,6 +229,8 @@ class EventDropEditorView(tk.Toplevel):
         self.signal_candidates: dict[str, np.ndarray] = {}
         self.preview_result: dict[str, Any] | None = None
         self.preview_parameters: dict[str, Any] | None = None
+        self._endpoint_draggables: dict[str, _DraggableVerticalLine] = {}
+        self._active_endpoint: str | None = None
 
         self._set_event(event_idx)
         self._create_controls()
@@ -285,6 +353,12 @@ class EventDropEditorView(tk.Toplevel):
         for variable in self.result_vars.values():
             variable.set("—")
 
+    def _invalidate_preview(self) -> None:
+        self.preview_result = None
+        self.preview_parameters = None
+        self._clear_result_display()
+        self.status_var.set("Fitting windows changed — recompute preview")
+
     def on_event_changed(self, event=None) -> None:
         try:
             event_idx = int(self.event_combobox.get())
@@ -365,12 +439,89 @@ class EventDropEditorView(tk.Toplevel):
 
     def _current_points(self) -> tuple[float, float, float, float] | None:
         try:
-            return self._read_parameters()["points"]
-        except ValueError:
+            points = tuple(
+                float(self.parameter_vars[key].get())
+                for key in ("pre_start", "pre_end", "post_start", "post_end")
+            )
+        except (TypeError, ValueError):
             return None
+        if not all(math.isfinite(point) for point in points):
+            return None
+        return points
+
+    def _constrain_endpoint(self, endpoint: str, position: float) -> float:
+        try:
+            half_win = float(self.parameter_vars["half_win"].get())
+            if not math.isfinite(half_win) or half_win < 0:
+                raise ValueError
+            lower_bound, upper_bound = -half_win, half_win
+        except (TypeError, ValueError):
+            lower_bound, upper_bound = self.raw_ax.get_xlim()
+
+        constrained = min(max(position, lower_bound), upper_bound)
+        if endpoint.startswith("pre_"):
+            constrained = min(constrained, 0.0)
+        else:
+            constrained = max(constrained, 0.0)
+        return constrained
+
+    def _on_endpoint_changed(self, endpoint: str, position: float) -> None:
+        self.parameter_vars[endpoint].set(f"{position:.6g}")
+        self._invalidate_preview()
+
+    def _begin_endpoint_drag(self, endpoint: str) -> bool:
+        if self._active_endpoint is not None:
+            return False
+        self._active_endpoint = endpoint
+        return True
+
+    def _on_endpoint_released(self, endpoint: str) -> None:
+        if self._active_endpoint == endpoint:
+            self._active_endpoint = None
+        self._plot_preview()
+
+    def _disconnect_endpoint_lines(self) -> None:
+        for draggable in getattr(self, "_endpoint_draggables", {}).values():
+            draggable.disconnect()
+        self._endpoint_draggables = {}
+        self._active_endpoint = None
+
+    def _create_endpoint_lines(
+        self, points: tuple[float, float, float, float]
+    ) -> None:
+        endpoint_values = dict(zip(
+            ("pre_start", "pre_end", "post_start", "post_end"),
+            points,
+        ))
+        styles = {
+            "pre_start": ("C0", "-"),
+            "pre_end": ("C0", "--"),
+            "post_start": ("C1", "-"),
+            "post_end": ("C1", "--"),
+        }
+        for endpoint, position in endpoint_values.items():
+            color, linestyle = styles[endpoint]
+            line = self.raw_ax.axvline(
+                position,
+                color=color,
+                linestyle=linestyle,
+                linewidth=1.5,
+            )
+            self._endpoint_draggables[endpoint] = _DraggableVerticalLine(
+                line=line,
+                on_changed=lambda value, key=endpoint: self._on_endpoint_changed(
+                    key, value
+                ),
+                on_released=lambda key=endpoint: self._on_endpoint_released(key),
+                constrain=lambda value, key=endpoint: self._constrain_endpoint(
+                    key, value
+                ),
+                on_started=lambda key=endpoint: self._begin_endpoint_drag(key),
+            )
 
     def _plot_preview(self) -> None:
         """Plot raw selected data and the helper's baseline-relative fit lines."""
+        self._disconnect_endpoint_lines()
         self.raw_ax.clear()
         self.fit_ax.clear()
 
@@ -401,6 +552,7 @@ class EventDropEditorView(tk.Toplevel):
                     alpha=0.12,
                     label="Post window" if axis is self.raw_ax else None,
                 )
+            self._create_endpoint_lines(points)
 
         for axis in (self.raw_ax, self.fit_ax):
             axis.axvline(0.0, color="gray", linestyle=":", linewidth=1)
@@ -435,6 +587,8 @@ class EventDropEditorView(tk.Toplevel):
         self.canvas.draw_idle()
 
     def on_close(self) -> None:
+        self._disconnect_endpoint_lines()
+        self._active_endpoint = None
         if self in self.parent.child_windows:
             self.parent.child_windows.remove(self)
         self.destroy()

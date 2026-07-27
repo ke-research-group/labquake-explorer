@@ -11,6 +11,7 @@ from labquake_explorer.ui.labquake_explorer import LabquakeExplorer
 from labquake_explorer.ui.views import EventDropEditorView as ExportedEventDropEditorView
 from labquake_explorer.ui.views.event_drop_editor_view import (
     EventDropEditorView,
+    _DraggableVerticalLine,
     find_signal_candidates,
     format_preview_result,
     parse_preview_parameters,
@@ -394,6 +395,296 @@ class FakeVariable:
 
     def get(self):
         return self.value
+
+
+class DraggableWindowTests(unittest.TestCase):
+    def make_plot_view(self):
+        view = EventDropEditorView.__new__(EventDropEditorView)
+        view.figure = Figure()
+        view.raw_ax = view.figure.add_subplot(211)
+        view.fit_ax = view.figure.add_subplot(212, sharex=view.raw_ax)
+        view.canvas = mock.Mock()
+        view.event = {
+            "time": np.array([-2.0, -1.0, 1.0, 2.0]),
+            "event_time": 0.0,
+        }
+        view.signal_candidates = {
+            "signal": np.array([5.0, 6.0, 1.0, 2.0]),
+        }
+        view.signal_combobox = FakeWidget("signal")
+        view.parameter_vars = {
+            "half_win": FakeVariable("2"),
+            "pre_start": FakeVariable("-0.5"),
+            "pre_end": FakeVariable("-1.5"),
+            "post_start": FakeVariable("1.5"),
+            "post_end": FakeVariable("0.5"),
+            "smooth_w": FakeVariable(""),
+        }
+        view.result_vars = {
+            key: FakeVariable("old")
+            for key in ("valid", "delta", "magnitude", "val_pre_0", "val_post_0")
+        }
+        view.status_var = FakeVariable()
+        view.preview_result = None
+        view.preview_parameters = None
+        view._endpoint_draggables = {}
+        view._active_endpoint = None
+        return view
+
+    def test_four_endpoint_lines_follow_controls_without_reordering(self):
+        view = self.make_plot_view()
+
+        view._plot_preview()
+
+        self.assertEqual(
+            list(view._endpoint_draggables),
+            ["pre_start", "pre_end", "post_start", "post_end"],
+        )
+        positions = {
+            key: float(draggable.line.get_xdata()[0])
+            for key, draggable in view._endpoint_draggables.items()
+        }
+        self.assertEqual(
+            positions,
+            {
+                "pre_start": -0.5,
+                "pre_end": -1.5,
+                "post_start": 1.5,
+                "post_end": 0.5,
+            },
+        )
+        view._disconnect_endpoint_lines()
+
+    def test_zero_width_controls_keep_overlapping_lines_available(self):
+        view = self.make_plot_view()
+        view.parameter_vars["pre_start"].set("-1")
+        view.parameter_vars["pre_end"].set("-1")
+
+        view._plot_preview()
+
+        self.assertEqual(
+            float(view._endpoint_draggables["pre_start"].line.get_xdata()[0]),
+            -1.0,
+        )
+        self.assertEqual(
+            float(view._endpoint_draggables["pre_end"].line.get_xdata()[0]),
+            -1.0,
+        )
+        view._disconnect_endpoint_lines()
+
+    def test_pre_post_and_half_window_constraints(self):
+        view = self.make_plot_view()
+
+        self.assertEqual(view._constrain_endpoint("pre_start", 1.0), 0.0)
+        self.assertEqual(view._constrain_endpoint("post_end", -1.0), 0.0)
+        self.assertEqual(view._constrain_endpoint("pre_end", -3.0), -2.0)
+        self.assertEqual(view._constrain_endpoint("post_start", 3.0), 2.0)
+
+    @mock.patch(
+        "labquake_explorer.ui.views.event_drop_editor_view."
+        "calculate_event_signal_drop"
+    )
+    def test_endpoint_change_updates_control_and_invalidates_without_analysis(
+        self, calculator
+    ):
+        view = self.make_plot_view()
+        view.preview_result = {"valid": True}
+        view.preview_parameters = {"half_win": 2.0}
+        view.data_manager = mock.Mock()
+
+        view._on_endpoint_changed("pre_start", -0.83456789)
+
+        self.assertEqual(view.parameter_vars["pre_start"].get(), "-0.834568")
+        self.assertIsNone(view.preview_result)
+        self.assertIsNone(view.preview_parameters)
+        self.assertEqual(
+            view.status_var.get(),
+            "Fitting windows changed — recompute preview",
+        )
+        self.assertTrue(
+            all(variable.get() == "—" for variable in view.result_vars.values())
+        )
+        calculator.assert_not_called()
+        view.data_manager.set_data.assert_not_called()
+
+    def test_redraw_disconnects_old_callbacks_before_recreating_lines(self):
+        view = self.make_plot_view()
+
+        view._plot_preview()
+        old_draggables = list(view._endpoint_draggables.values())
+        view._plot_preview()
+
+        self.assertTrue(all(not draggable.connected for draggable in old_draggables))
+        self.assertEqual(len(view._endpoint_draggables), 4)
+        self.assertTrue(
+            all(draggable.connected for draggable in view._endpoint_draggables.values())
+        )
+        view._disconnect_endpoint_lines()
+
+    def test_event_redraw_uses_current_controls(self):
+        view = self.make_plot_view()
+        view.parameter_vars["pre_start"].set("-0.75")
+        view.parameter_vars["post_end"].set("1.25")
+
+        view._plot_preview()
+
+        self.assertEqual(
+            float(view._endpoint_draggables["pre_start"].line.get_xdata()[0]),
+            -0.75,
+        )
+        self.assertEqual(
+            float(view._endpoint_draggables["post_end"].line.get_xdata()[0]),
+            1.25,
+        )
+        view._disconnect_endpoint_lines()
+
+    def test_event_switch_keeps_controls_and_rebuilds_endpoint_lines(self):
+        view = self.make_plot_view()
+        view.run_idx = 4
+        view.preview_button = FakeWidget()
+        view.data_manager = mock.Mock()
+        view.data_manager.get_data.return_value = {
+            "time": np.array([-3.0, -1.0, 1.0, 3.0]),
+            "event_time": 0.0,
+            "new_signal": np.array([8.0, 9.0, 2.0, 3.0]),
+        }
+        original_controls = {
+            key: variable.get()
+            for key, variable in view.parameter_vars.items()
+        }
+
+        view._set_event(2)
+        view._refresh_event_widgets()
+
+        self.assertEqual(
+            {
+                key: variable.get()
+                for key, variable in view.parameter_vars.items()
+            },
+            original_controls,
+        )
+        self.assertEqual(view.signal_combobox.get(), "")
+        self.assertEqual(view.preview_button.options["state"], "disabled")
+        self.assertEqual(
+            float(view._endpoint_draggables["pre_start"].line.get_xdata()[0]),
+            -0.5,
+        )
+        self.assertEqual(
+            float(view._endpoint_draggables["post_end"].line.get_xdata()[0]),
+            0.5,
+        )
+        view.data_manager.set_data.assert_not_called()
+        view._disconnect_endpoint_lines()
+
+    def test_signal_switch_keeps_fitting_window_controls(self):
+        view = self.make_plot_view()
+        view.preview_button = FakeWidget()
+        view._plot_preview = mock.Mock()
+        original = {
+            key: variable.get()
+            for key, variable in view.parameter_vars.items()
+        }
+
+        view.on_signal_changed()
+
+        self.assertEqual(
+            {
+                key: variable.get()
+                for key, variable in view.parameter_vars.items()
+            },
+            original,
+        )
+
+    def test_close_disconnects_callbacks_and_removes_view(self):
+        view = EventDropEditorView.__new__(EventDropEditorView)
+        draggable = mock.Mock()
+        view._endpoint_draggables = {"pre_start": draggable}
+        view.parent = mock.Mock()
+        view.parent.child_windows = [view]
+        view.destroy = mock.Mock()
+
+        view.on_close()
+
+        draggable.disconnect.assert_called_once_with()
+        self.assertEqual(view.parent.child_windows, [])
+        view.destroy.assert_called_once_with()
+
+    def test_mouse_must_be_in_axes_and_near_line_to_start_drag(self):
+        figure = Figure()
+        axes = figure.add_subplot(111)
+        line = axes.axvline(-0.5)
+        figure.canvas.draw()
+        changed = mock.Mock()
+        released = mock.Mock()
+        draggable = _DraggableVerticalLine(
+            line,
+            on_changed=changed,
+            on_released=released,
+            constrain=lambda value: value,
+        )
+        line_pixel_x = axes.transData.transform((-0.5, 0.0))[0]
+
+        outside_axes = mock.Mock(
+            inaxes=None,
+            xdata=-0.5,
+            x=line_pixel_x,
+            button=1,
+        )
+        draggable._on_press(outside_axes)
+        self.assertFalse(draggable.dragging)
+
+        far_from_line = mock.Mock(
+            inaxes=axes,
+            xdata=0.5,
+            x=line_pixel_x + 100,
+            button=1,
+        )
+        draggable._on_press(far_from_line)
+        self.assertFalse(draggable.dragging)
+
+        near_line = mock.Mock(
+            inaxes=axes,
+            xdata=-0.5,
+            x=line_pixel_x + 3,
+            button=1,
+        )
+        draggable._on_press(near_line)
+        self.assertTrue(draggable.dragging)
+        draggable.disconnect()
+
+    def test_motion_updates_line_and_release_calls_once(self):
+        figure = Figure()
+        axes = figure.add_subplot(111)
+        line = axes.axvline(-0.5)
+        changed = mock.Mock()
+        released = mock.Mock()
+        draggable = _DraggableVerticalLine(
+            line,
+            on_changed=changed,
+            on_released=released,
+            constrain=lambda value: min(value, 0.0),
+        )
+        draggable.dragging = True
+        motion = mock.Mock(inaxes=axes, xdata=0.75)
+
+        draggable._on_motion(motion)
+        draggable._on_release(mock.Mock())
+        draggable._on_release(mock.Mock())
+
+        self.assertEqual(float(line.get_xdata()[0]), 0.0)
+        changed.assert_called_once_with(0.0)
+        released.assert_called_once_with()
+        draggable.disconnect()
+
+    def test_only_one_overlapping_line_can_own_a_drag(self):
+        view = self.make_plot_view()
+
+        self.assertTrue(view._begin_endpoint_drag("pre_start"))
+        self.assertFalse(view._begin_endpoint_drag("pre_end"))
+        view._plot_preview = mock.Mock()
+        view._on_endpoint_released("pre_start")
+        self.assertIsNone(view._active_endpoint)
+        view._plot_preview.assert_called_once_with()
 
 
 class SignalSelectionStateTests(unittest.TestCase):
