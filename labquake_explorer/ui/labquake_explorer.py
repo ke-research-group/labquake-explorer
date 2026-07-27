@@ -3,16 +3,17 @@ import sys
 import tkinter as tk
 import numpy as np
 import os
+import re
 from tkinter import ttk, filedialog, simpledialog, messagebox
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 from labquake_explorer.data.data_manager import DataManager
 from labquake_explorer.utils.config import LabquakeExplorerConfig
 from labquake_explorer.ui.views import (
     SimplePlotView, PointsSelectorView, IndexPickerView,
     SlopeAnalyzerView, DynamicStrainArrivalPickerView, CZMFitterView,
-    EventAnalyzerView
+    EventAnalyzerView, EventDropEditorView
 )
 
 class LabquakeExplorer:
@@ -65,6 +66,7 @@ class LabquakeExplorer:
 
         self.event_menu = tk.Menu(self.root, tearoff=0)
         self.event_menu.add_command(label="Analyze Event", command=self.analyze_event)
+        self.event_menu.add_command(label="Analyze Event Drop", command=self.analyze_event_drop)
         self.event_menu.add_command(label="Pick Arrivals", command=self.pick_strain_array_arrivals)
         self.event_menu.add_command(label="Fit Cohesive Zone Model", command=self.fit_cohesive_zone_model)
 
@@ -318,6 +320,29 @@ class LabquakeExplorer:
         view = EventAnalyzerView(self, run_idx, event_idx)
         self.set_window_icon(view)
         self.child_windows.append(view)
+
+    def analyze_event_drop(self):
+        path, item = self.get_full_path()
+        run_idx, event_idx = self._extract_run_event_indices(path)
+
+        view = EventDropEditorView(self, run_idx, event_idx)
+        self.set_window_icon(view)
+        self.child_windows.append(view)
+
+    @staticmethod
+    def _extract_run_event_indices(path: str) -> Tuple[int, int]:
+        """Extract run and event indices from a separator-neutral tree path."""
+        match = re.search(
+            r"(?:^|[\\/])runs[\\/]\[(\d+)\][\\/]events[\\/]\[(\d+)\]"
+            r"(?:[\\/]|$)",
+            path,
+        )
+        if match is None:
+            raise ValueError(
+                "Expected a tree path containing "
+                "'runs/[run_index]/events/[event_index]'"
+            )
+        return int(match.group(1)), int(match.group(2))
 
     def pick_indices(self):
         item = self.data_tree.selection()[0]
