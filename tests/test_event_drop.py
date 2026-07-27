@@ -1,16 +1,197 @@
 """Deterministic tests for the pure event-drop calculation helpers."""
 
 import unittest
+from unittest import mock
 
 import numpy as np
 
 from labquake_explorer.analysis.event_drop import (
     calculate_2pt_trend_drop,
+    calculate_event_drop_metrics,
     calculate_event_signal_drop,
     calculate_trend_drop,
     compute_half_win,
     moving_average,
 )
+
+
+class CalculateEventDropMetricsTests(unittest.TestCase):
+    def setUp(self):
+        self.time = np.array([-2.0, -1.0, 1.0, 2.0])
+        self.points = (-2.0, -1.0, 1.0, 2.0)
+
+    def test_single_signal(self):
+        signals = {
+            "tau": np.where(self.time < 0, self.time + 8.0, self.time + 3.0)
+        }
+        parameters = {
+            "tau": {"half_win": 2.0, "points": self.points, "smooth_w": None}
+        }
+
+        result = calculate_event_drop_metrics(
+            self.time, 0.0, signals, parameters
+        )
+
+        self.assertEqual(list(result), ["tau"])
+        self.assertTrue(result["tau"]["valid"])
+        self.assertAlmostEqual(result["tau"]["delta"], 5.0)
+
+    def test_multiple_signals_keep_input_order(self):
+        signals = {
+            "eddy_2": np.where(self.time < 0, self.time + 9.0, self.time + 4.0),
+            "tau": np.where(self.time < 0, self.time + 8.0, self.time + 3.0),
+            "mu": np.where(self.time < 0, -self.time + 2.0, -self.time + 6.0),
+        }
+        parameters = {
+            name: {"half_win": 2.0, "points": self.points}
+            for name in signals
+        }
+
+        result = calculate_event_drop_metrics(
+            self.time, 0.0, signals, parameters
+        )
+
+        self.assertEqual(list(result), ["eddy_2", "tau", "mu"])
+        self.assertAlmostEqual(result["eddy_2"]["delta"], 5.0)
+        self.assertAlmostEqual(result["tau"]["delta"], 5.0)
+        self.assertAlmostEqual(result["mu"]["delta"], -4.0)
+
+    def test_one_invalid_signal_does_not_stop_other_signals(self):
+        signals = {
+            "invalid": np.array([1.0]),
+            "valid": np.where(self.time < 0, self.time + 8.0, self.time + 3.0),
+        }
+        parameters = {
+            name: {"half_win": 2.0, "points": self.points}
+            for name in signals
+        }
+
+        result = calculate_event_drop_metrics(
+            self.time, 0.0, signals, parameters
+        )
+
+        self.assertEqual(result["invalid"], {"valid": False})
+        self.assertTrue(result["valid"]["valid"])
+        self.assertAlmostEqual(result["valid"]["delta"], 5.0)
+
+    def test_all_invalid(self):
+        signals = {
+            "short": np.array([1.0]),
+            "missing_parameters": np.array([1.0, 2.0, 3.0, 4.0]),
+        }
+        parameters = {
+            "short": {"half_win": 2.0, "points": self.points},
+        }
+
+        result = calculate_event_drop_metrics(
+            self.time, 0.0, signals, parameters
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "short": {"valid": False},
+                "missing_parameters": {"valid": False},
+            },
+        )
+
+    def test_each_signal_uses_its_own_smoothing_and_fitting_windows(self):
+        time = np.array([-3.0, -2.0, -1.0, -0.5, 0.5, 1.0, 2.0, 3.0])
+        signals = {
+            "smoothed": np.array([8.0, 10.0, 9.0, 11.0, 4.0, 6.0, 5.0, 7.0]),
+            "windowed": np.where(time < 0, 2.0 * time + 12.0, time + 5.0),
+        }
+        parameters = {
+            "smoothed": {
+                "half_win": 3.0,
+                "points": (-3.0, -1.0, 1.0, 3.0),
+                "smooth_w": 3,
+            },
+            "windowed": {
+                "half_win": 2.0,
+                "points": (-2.0, -0.5, 0.5, 2.0),
+                "smooth_w": None,
+            },
+        }
+
+        result = calculate_event_drop_metrics(
+            time, 0.0, signals, parameters
+        )
+        expected_smoothed = calculate_event_signal_drop(
+            time, signals["smoothed"], 0.0, **parameters["smoothed"]
+        )
+        expected_windowed = calculate_event_signal_drop(
+            time, signals["windowed"], 0.0, **parameters["windowed"]
+        )
+
+        self.assertAlmostEqual(
+            result["smoothed"]["delta"], expected_smoothed["delta"]
+        )
+        self.assertAlmostEqual(
+            result["windowed"]["delta"], expected_windowed["delta"]
+        )
+
+    def test_calls_single_signal_helper_once_per_configured_signal(self):
+        signals = {
+            "tau": np.ones(4),
+            "mu": np.ones(4),
+            "eddy_1": np.ones(4),
+        }
+        parameters = {
+            name: {"half_win": 2.0, "points": self.points}
+            for name in signals
+        }
+        returned_results = [
+            {"valid": True, "delta": float(index)}
+            for index in range(len(signals))
+        ]
+
+        with mock.patch(
+            "labquake_explorer.analysis.event_drop.calculate_event_signal_drop",
+            side_effect=returned_results,
+        ) as helper:
+            result = calculate_event_drop_metrics(
+                self.time, 0.0, signals, parameters
+            )
+
+        self.assertEqual(helper.call_count, len(signals))
+        self.assertEqual(
+            [result[name]["delta"] for name in signals],
+            [0.0, 1.0, 2.0],
+        )
+
+    def test_inputs_are_not_modified_and_outputs_do_not_share_objects(self):
+        shared_signal = np.where(
+            self.time < 0, self.time + 8.0, self.time + 3.0
+        )
+        signals = {"tau": shared_signal, "mu": shared_signal}
+        shared_parameters = {
+            "half_win": 2.0,
+            "points": list(self.points),
+            "smooth_w": None,
+        }
+        parameters = {"tau": shared_parameters, "mu": shared_parameters}
+        original_time = self.time.copy()
+        original_signal = shared_signal.copy()
+        original_points = shared_parameters["points"].copy()
+
+        result = calculate_event_drop_metrics(
+            self.time, 0.0, signals, parameters
+        )
+        result["tau"]["coeff_pre"][0] = 999.0
+
+        np.testing.assert_array_equal(self.time, original_time)
+        np.testing.assert_array_equal(shared_signal, original_signal)
+        self.assertEqual(shared_parameters["points"], original_points)
+        self.assertNotEqual(result["mu"]["coeff_pre"][0], 999.0)
+        self.assertIsNot(result["tau"], result["mu"])
+        self.assertIsNot(result["tau"]["coeff_pre"], result["mu"]["coeff_pre"])
+
+    def test_top_level_inputs_must_be_mappings(self):
+        with self.assertRaises(ValueError):
+            calculate_event_drop_metrics(self.time, 0.0, [], {})
+        with self.assertRaises(ValueError):
+            calculate_event_drop_metrics(self.time, 0.0, {}, [])
 
 
 class CalculateTrendDropTests(unittest.TestCase):

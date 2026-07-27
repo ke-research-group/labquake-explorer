@@ -127,6 +127,46 @@ def calculate_event_signal_drop(
     return calculate_trend_drop(relative_time, event_signal, points)
 
 
+def calculate_event_drop_metrics(
+    time: Any,
+    event_time: float,
+    signals: Mapping[str, Any],
+    parameters: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Calculate event drops for caller-classified, independently configured signals.
+
+    Signal names are opaque identifiers and retain the insertion order supplied
+    by ``signals``.  Each corresponding parameter mapping must provide
+    ``half_win`` and ``points`` and may provide ``smooth_w``.  A signal or its
+    parameters being invalid does not prevent the remaining signals from being
+    analyzed.
+    """
+    if not isinstance(signals, Mapping):
+        raise ValueError("signals must be a mapping")
+    if not isinstance(parameters, Mapping):
+        raise ValueError("parameters must be a mapping")
+
+    results: dict[str, dict[str, Any]] = {}
+    for name, signal in signals.items():
+        signal_parameters = parameters.get(name)
+        if not isinstance(signal_parameters, Mapping):
+            results[name] = {"valid": False}
+            continue
+        try:
+            result = calculate_event_signal_drop(
+                time=time,
+                signal=signal,
+                event_time=event_time,
+                half_win=signal_parameters["half_win"],
+                points=signal_parameters["points"],
+                smooth_w=signal_parameters.get("smooth_w"),
+            )
+        except (KeyError, TypeError, ValueError):
+            result = {"valid": False}
+        results[name] = result
+    return results
+
+
 def calculate_trend_drop(
     t_rel: Any,
     y: Any,
