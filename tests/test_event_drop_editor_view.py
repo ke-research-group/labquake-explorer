@@ -902,7 +902,12 @@ class EventSwitchingTests(unittest.TestCase):
             "event_time": 3.0,
             "second": [4.0, 5.0, 6.0],
         }
-        events = {0: first_event, 1: second_event}
+        events = [first_event, second_event]
+        run_data = {
+            "time": np.array([0.0, 1.0, 2.0, 3.0, 4.0]),
+            "events": events,
+            "second": np.arange(5.0),
+        }
 
         class FakeDataManager:
             def __init__(self):
@@ -910,6 +915,8 @@ class EventSwitchingTests(unittest.TestCase):
 
             def get_data(self, path):
                 self.paths.append(path)
+                if path == "runs/[2]":
+                    return run_data
                 index = int(path.rsplit("[", 1)[1][:-1])
                 return events[index]
 
@@ -938,8 +945,399 @@ class EventSwitchingTests(unittest.TestCase):
         self.assertIsNone(view.active_metric_role)
         self.assertEqual(
             view.data_manager.paths,
-            ["runs/[2]/events/[1]"],
+            ["runs/[2]/events/[1]", "runs/[2]"],
         )
+        self.assertIs(view.run_data, run_data)
+        self.assertEqual(view.current_event_time, 3.0)
+        self.assertEqual(view.previous_event_time, 0.5)
+        self.assertEqual(view.full_run_signal_candidates, ["second"])
+
+
+class IntereventContextResolutionTests(unittest.TestCase):
+    @staticmethod
+    def make_view(
+        *,
+        event=None,
+        events=None,
+        event_idx=0,
+        run_data=None,
+    ):
+        view = EventDropEditorView.__new__(EventDropEditorView)
+        view.run_idx = 3
+        view.event_idx = event_idx
+        view.event = event if event is not None else {}
+        view.events = events
+        view.run_data = run_data
+        view.metric_bindings = {"tau": "kept", "mu": None, "lvdt": None}
+        view.slip_bindings = ["also_kept"]
+        view.preview_results = {"tau": {"valid": True}}
+        view.preview_parameters = {"tau": {"half_win": 1.5}}
+        return view
+
+    def test_event_time_coercion_accepts_real_scalars(self):
+        for value, expected in (
+            (1.25, 1.25),
+            (2, 2.0),
+            (np.float32(3.5), 3.5),
+            (np.int64(4), 4.0),
+        ):
+            with self.subTest(value=value):
+                result = EventDropEditorView._coerce_finite_event_time(value)
+                self.assertEqual(result, expected)
+                self.assertIsInstance(result, float)
+
+    def test_event_time_coercion_rejects_invalid_values(self):
+        invalid = (
+            True,
+            np.bool_(False),
+            np.array(1.0),
+            np.array([1.0]),
+            np.nan,
+            np.inf,
+            -np.inf,
+            "1.0",
+            None,
+        )
+        for value in invalid:
+            with self.subTest(value=value):
+                self.assertIsNone(
+                    EventDropEditorView._coerce_finite_event_time(value)
+                )
+
+    def test_current_event_time_uses_only_top_level_event_time(self):
+        view = self.make_view(
+            event={"event_time": np.float64(7.0), "time": np.array([99.0])}
+        )
+        self.assertEqual(view._get_current_event_time(), 7.0)
+
+        for event in (
+            {"time": np.array([99.0])},
+            {"event_time": np.array([7.0]), "time": np.array([99.0])},
+            "not an event",
+        ):
+            with self.subTest(event=event):
+                view.event = event
+                self.assertIsNone(view._get_current_event_time())
+
+    def test_previous_event_time_searches_list_positions_without_sorting(self):
+        events = [
+            {"event_time": 100.0},
+            {"event_time": 300.0, "skip": True},
+            {"event_time": 200.0},
+        ]
+        view = self.make_view(events=events, event_idx=2)
+
+        self.assertEqual(view._find_previous_event_time(), 300.0)
+        self.assertIsInstance(view._find_previous_event_time(), float)
+
+    def test_previous_event_time_skips_only_invalid_event_times(self):
+        events = [
+            {"event_time": np.int64(5)},
+            {"event_time": np.nan},
+            {"missing": 1},
+            "not an event",
+            {"event_time": np.array([8.0])},
+            {"event_time": np.bool_(True)},
+            {"event_time": "9.0"},
+            {"event_time": 10.0},
+        ]
+        view = self.make_view(events=events, event_idx=len(events))
+        self.assertIsNone(view._find_previous_event_time())
+
+        view.event_idx = 7
+        self.assertEqual(view._find_previous_event_time(), 5.0)
+
+    def test_previous_event_time_handles_no_usable_position(self):
+        cases = (
+            ([], 0),
+            ([{"event_time": 1.0}], 0),
+            ([{"event_time": 1.0}], 2),
+            ([{"event_time": 1.0}], True),
+            ([{"event_time": 1.0}], 0.5),
+            ("events", 1),
+            ({"0": {"event_time": 1.0}}, 1),
+            (None, 1),
+        )
+        for events, event_idx in cases:
+            with self.subTest(events=events, event_idx=event_idx):
+                view = self.make_view(events=events, event_idx=event_idx)
+                self.assertIsNone(view._find_previous_event_time())
+
+    def test_previous_event_search_does_not_modify_events(self):
+        events = [
+            {"event_time": 1.0, "payload": [1, 2]},
+            {"event_time": np.nan},
+            {"event_time": 3.0},
+        ]
+        original = copy.deepcopy(events)
+        view = self.make_view(events=events, event_idx=2)
+
+        self.assertEqual(view._find_previous_event_time(), 1.0)
+        self.assertEqual(events, original)
+
+    def test_full_run_time_returns_same_object_without_event_fallback(self):
+        full_time = np.arange(5.0)
+        view = self.make_view(
+            event={"time": np.array([99.0])},
+            run_data={"time": full_time},
+        )
+        self.assertIs(view._get_full_run_time(), full_time)
+
+        view.run_data = {}
+        self.assertIsNone(view._get_full_run_time())
+        view.run_data = None
+        self.assertIsNone(view._get_full_run_time())
+
+    def test_full_run_signal_resolution_is_exact_and_identity_preserving(self):
+        signal = np.arange(4.0)
+        fallback = np.arange(4.0) + 10
+        nested = {"inside": signal}
+        view = self.make_view(
+            event={"chosen": np.array([99.0])},
+            run_data={
+                "chosen": signal,
+                "LP_displacement": fallback,
+                "nested": nested,
+            },
+        )
+
+        self.assertIs(view._resolve_full_run_signal("chosen"), signal)
+        for name in (None, "", 3, "missing", "inside"):
+            with self.subTest(name=name):
+                self.assertIsNone(view._resolve_full_run_signal(name))
+
+    def test_candidate_discovery_filters_shape_dtype_length_and_finiteness(self):
+        full_time = np.array([0.0, 1.0, 2.0])
+        good_int = np.array([1, 2, 3])
+        good_float = np.array([1.5, 2.5, 3.5])
+        run_data = {
+            "metadata": 4.0,
+            "good_int": good_int,
+            "time": full_time,
+            "good_float": good_float,
+            "zero_dim": np.array(1.0),
+            "two_dim": np.ones((3, 1)),
+            "length_mismatch": np.ones(2),
+            "empty": np.array([]),
+            "bool": np.array([True, False, True]),
+            "string": np.array(["1", "2", "3"]),
+            "nan": np.array([1.0, np.nan, 3.0]),
+            "inf": np.array([1.0, np.inf, 3.0]),
+            "nested": {"signal": np.ones(3)},
+        }
+        view = self.make_view(run_data=run_data)
+        originals = {
+            key: value.copy()
+            for key, value in run_data.items()
+            if isinstance(value, np.ndarray)
+        }
+
+        self.assertEqual(
+            view._find_full_run_signal_candidates(),
+            ["good_int", "good_float"],
+        )
+        self.assertIs(run_data["time"], full_time)
+        self.assertIs(run_data["good_int"], good_int)
+        self.assertIs(run_data["good_float"], good_float)
+        for key, original in originals.items():
+            np.testing.assert_array_equal(run_data[key], original)
+
+    def test_invalid_full_run_time_produces_no_candidates(self):
+        invalid_times = (
+            None,
+            1.0,
+            np.array([]),
+            np.ones((2, 2)),
+            np.array([True, False]),
+            np.array(["0", "1"]),
+            np.array([0.0, np.nan]),
+            np.array([0.0, np.inf]),
+        )
+        for invalid_time in invalid_times:
+            with self.subTest(time=invalid_time):
+                run_data = {"signal": np.ones(2)}
+                if invalid_time is not None:
+                    run_data["time"] = invalid_time
+                view = self.make_view(run_data=run_data)
+                self.assertEqual(view._find_full_run_signal_candidates(), [])
+
+    def test_candidate_discovery_allows_non_increasing_finite_time(self):
+        for full_time in (
+            np.array([0.0, 0.0, 1.0]),
+            np.array([2.0, 1.0, 0.0]),
+        ):
+            with self.subTest(time=full_time):
+                view = self.make_view(
+                    run_data={"time": full_time, "signal": np.ones(3)}
+                )
+                self.assertEqual(
+                    view._find_full_run_signal_candidates(), ["signal"]
+                )
+
+    def test_refresh_updates_context_without_touching_event_local_state(self):
+        events = [
+            {"event_time": 2.0},
+            {"event_time": np.float64(4.0)},
+        ]
+        full_time = np.arange(5.0)
+        run_data = {
+            "time": full_time,
+            "events": events,
+            "candidate": np.arange(5.0),
+        }
+
+        class FakeDataManager:
+            def __init__(self):
+                self.calls = []
+
+            def get_data(self, path):
+                self.calls.append(path)
+                return run_data
+
+            def set_data(self, *args, **kwargs):
+                raise AssertionError("write API must not be called")
+
+            def save_file(self, *args, **kwargs):
+                raise AssertionError("save API must not be called")
+
+        view = self.make_view(event=events[1], events=None, event_idx=1)
+        view.data_manager = FakeDataManager()
+        bindings = view.metric_bindings.copy()
+        slips = view.slip_bindings.copy()
+        results = view.preview_results.copy()
+        parameters = view.preview_parameters.copy()
+
+        view._refresh_interevent_context()
+
+        self.assertIs(view.run_data, run_data)
+        self.assertIs(view.events, events)
+        self.assertEqual(view.current_event_time, 4.0)
+        self.assertEqual(view.previous_event_time, 2.0)
+        self.assertEqual(view.full_run_signal_candidates, ["candidate"])
+        self.assertEqual(view.metric_bindings, bindings)
+        self.assertEqual(view.slip_bindings, slips)
+        self.assertEqual(view.preview_results, results)
+        self.assertEqual(view.preview_parameters, parameters)
+        self.assertEqual(view.data_manager.calls, ["runs/[3]"])
+
+    def test_refresh_failure_sets_run_context_unavailable(self):
+        class FailingDataManager:
+            def get_data(self, path):
+                raise KeyError(path)
+
+        view = self.make_view(event={"event_time": 8.0}, event_idx=0)
+        view.data_manager = FailingDataManager()
+        view.run_data = {"stale": True}
+        view.full_run_signal_candidates = ["stale"]
+
+        view._refresh_interevent_context()
+
+        self.assertIsNone(view.run_data)
+        self.assertIsNone(view.events)
+        self.assertEqual(view.current_event_time, 8.0)
+        self.assertIsNone(view.previous_event_time)
+        self.assertEqual(view.full_run_signal_candidates, [])
+
+    def test_set_event_continues_when_run_context_is_not_a_mapping(self):
+        event = {"event_time": 2.0, "time": np.array([1.0, 2.0])}
+
+        class FakeDataManager:
+            def __init__(self):
+                self.calls = []
+
+            def get_data(self, path):
+                self.calls.append(path)
+                if path.endswith("/events/[0]"):
+                    return event
+                return ["not", "a", "run mapping"]
+
+        view = self.make_view()
+        view.data_manager = FakeDataManager()
+        view._set_event(0)
+
+        self.assertIs(view.event, event)
+        self.assertIsNone(view.run_data)
+        self.assertEqual(view.current_event_time, 2.0)
+        self.assertIsNone(view.previous_event_time)
+        self.assertEqual(view.full_run_signal_candidates, [])
+        self.assertEqual(
+            view.data_manager.calls,
+            ["runs/[3]/events/[0]", "runs/[3]"],
+        )
+
+    def test_each_event_switch_reloads_all_derived_context(self):
+        first = {"event_time": 1.0, "time": np.array([0.0, 1.0])}
+        second = {"event_time": 3.0, "time": np.array([2.0, 3.0])}
+        events = [first, second]
+        runs = [
+            {
+                "time": np.arange(4.0),
+                "events": events,
+                "first_full": np.arange(4.0),
+            },
+            {
+                "time": np.arange(5.0),
+                "events": events,
+                "second_full": np.arange(5.0),
+            },
+        ]
+
+        class FakeDataManager:
+            def __init__(self):
+                self.run_calls = 0
+
+            def get_data(self, path):
+                if "/events/" in path:
+                    index = int(path.rsplit("[", 1)[1][:-1])
+                    return events[index]
+                run = runs[self.run_calls]
+                self.run_calls += 1
+                return run
+
+        view = self.make_view()
+        view.data_manager = FakeDataManager()
+
+        view._set_event(0)
+        self.assertIs(view.run_data, runs[0])
+        self.assertEqual(view.current_event_time, 1.0)
+        self.assertIsNone(view.previous_event_time)
+        self.assertEqual(
+            view.full_run_signal_candidates, ["first_full"]
+        )
+
+        view._set_event(1)
+        self.assertIs(view.run_data, runs[1])
+        self.assertEqual(view.current_event_time, 3.0)
+        self.assertEqual(view.previous_event_time, 1.0)
+        self.assertEqual(
+            view.full_run_signal_candidates, ["second_full"]
+        )
+        self.assertEqual(
+            view.metric_bindings, {"tau": None, "mu": None, "lvdt": None}
+        )
+        self.assertEqual(view.slip_bindings, [])
+        self.assertEqual(view.preview_results, {})
+
+    @mock.patch(
+        "labquake_explorer.analysis.event_drop."
+        "calculate_interevent_displacement_metrics"
+    )
+    def test_context_resolution_does_not_call_analysis(self, calculator):
+        run_data = {
+            "time": np.arange(3.0),
+            "events": [{"event_time": 1.0}],
+            "signal": np.arange(3.0),
+        }
+
+        class FakeDataManager:
+            def get_data(self, path):
+                return run_data
+
+        view = self.make_view(event=run_data["events"][0])
+        view.data_manager = FakeDataManager()
+        view._refresh_interevent_context()
+
+        calculator.assert_not_called()
 
 
 class FakeWidget:

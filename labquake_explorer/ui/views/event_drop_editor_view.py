@@ -5,7 +5,8 @@ from __future__ import annotations
 import math
 import re
 import tkinter as tk
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from numbers import Integral, Real
 from tkinter import messagebox, ttk
 from typing import Any
 
@@ -226,7 +227,12 @@ class EventDropEditorView(tk.Toplevel):
         self.event_idx = event_idx
         self.data_manager = self.parent.data_manager
         self.event: Mapping[str, Any] = {}
+        self.events: Any = None
         self.signal_candidates: dict[str, np.ndarray] = {}
+        self.run_data: Mapping[str, Any] | None = None
+        self.current_event_time: float | None = None
+        self.previous_event_time: float | None = None
+        self.full_run_signal_candidates: list[str] = []
         self.metric_bindings: dict[str, str | None] = {
             "tau": None,
             "mu": None,
@@ -419,6 +425,130 @@ class EventDropEditorView(tk.Toplevel):
         self.preview_results = {}
         self.active_metric_role = None
         self.preview_parameters = None
+        self._refresh_interevent_context()
+
+    @staticmethod
+    def _coerce_finite_event_time(value: Any) -> float | None:
+        """Return a finite real scalar as a Python float, otherwise ``None``."""
+        if isinstance(value, (bool, np.bool_, np.ndarray)):
+            return None
+        if not isinstance(value, (Real, np.integer, np.floating)):
+            return None
+        try:
+            event_time = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return event_time if math.isfinite(event_time) else None
+
+    def _get_current_event_time(self) -> float | None:
+        """Resolve only the current event's top-level ``event_time``."""
+        if not isinstance(self.event, Mapping):
+            return None
+        return self._coerce_finite_event_time(self.event.get("event_time"))
+
+    def _find_previous_event_time(self) -> float | None:
+        """Find the first finite event time before the current list position."""
+        events = self.events
+        is_sequence = isinstance(events, Sequence) and not isinstance(
+            events, (str, bytes)
+        )
+        is_one_dimensional_array = (
+            isinstance(events, np.ndarray) and events.ndim == 1
+        )
+        if not (is_sequence or is_one_dimensional_array):
+            return None
+        event_idx = self.event_idx
+        if isinstance(event_idx, (bool, np.bool_)) or not isinstance(
+            event_idx, (Integral, np.integer)
+        ):
+            return None
+        event_idx = int(event_idx)
+        if event_idx <= 0 or event_idx >= len(events):
+            return None
+        for previous_idx in range(event_idx - 1, -1, -1):
+            previous_event = events[previous_idx]
+            if not isinstance(previous_event, Mapping):
+                continue
+            previous_time = self._coerce_finite_event_time(
+                previous_event.get("event_time")
+            )
+            if previous_time is not None:
+                return previous_time
+        return None
+
+    def _get_full_run_time(self) -> Any | None:
+        """Return the full-run top-level time object without copying it."""
+        if not isinstance(self.run_data, Mapping):
+            return None
+        return self.run_data.get("time")
+
+    def _resolve_full_run_signal(self, signal_name: str | None) -> Any | None:
+        """Resolve an explicit top-level run key without inference or copying."""
+        if (
+            not isinstance(signal_name, str)
+            or not signal_name
+            or not isinstance(self.run_data, Mapping)
+            or signal_name not in self.run_data
+        ):
+            return None
+        return self.run_data[signal_name]
+
+    @staticmethod
+    def _is_finite_real_run_array(value: Any) -> tuple[bool, int]:
+        """Check the minimum one-dimensional candidate array contract."""
+        try:
+            raw = np.asarray(value)
+        except (TypeError, ValueError):
+            return False, 0
+        if (
+            raw.ndim != 1
+            or raw.size == 0
+            or raw.dtype.kind not in "iuf"
+        ):
+            return False, 0
+        try:
+            numeric = np.asarray(value, dtype=float)
+        except (TypeError, ValueError, OverflowError):
+            return False, 0
+        if not np.all(np.isfinite(numeric)):
+            return False, 0
+        return True, raw.size
+
+    def _find_full_run_signal_candidates(self) -> list[str]:
+        """List aligned finite real run arrays in mapping insertion order."""
+        if not isinstance(self.run_data, Mapping):
+            return []
+        full_time = self._get_full_run_time()
+        valid_time, time_size = self._is_finite_real_run_array(full_time)
+        if not valid_time:
+            return []
+
+        candidates = []
+        for key, value in self.run_data.items():
+            if not isinstance(key, str) or key == "time":
+                continue
+            valid_signal, signal_size = self._is_finite_real_run_array(value)
+            if valid_signal and signal_size == time_size:
+                candidates.append(key)
+        return candidates
+
+    def _refresh_interevent_context(self) -> None:
+        """Refresh read-only run and event context for future D previews."""
+        try:
+            run_data = self.data_manager.get_data(f"runs/[{self.run_idx}]")
+        except (KeyError, IndexError, TypeError, ValueError):
+            run_data = None
+        self.run_data = run_data if isinstance(run_data, Mapping) else None
+        self.events = (
+            self.run_data.get("events")
+            if isinstance(self.run_data, Mapping)
+            else None
+        )
+        self.current_event_time = self._get_current_event_time()
+        self.previous_event_time = self._find_previous_event_time()
+        self.full_run_signal_candidates = (
+            self._find_full_run_signal_candidates()
+        )
 
     def _refresh_event_widgets(self) -> None:
         names = list(self.signal_candidates)
