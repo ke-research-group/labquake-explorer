@@ -197,9 +197,9 @@ class PreviewCallTests(unittest.TestCase):
 
     @mock.patch(
         "labquake_explorer.ui.views.event_drop_editor_view."
-        "calculate_event_signal_drop"
+        "calculate_event_drop_metrics"
     )
-    def test_helper_receives_explicit_preview_arguments(self, calculator):
+    def test_orchestrator_receives_single_selected_signal(self, calculator):
         event = {
             "time": np.array([9.0, 9.5, 10.5, 11.0]),
             "event_time": 10.0,
@@ -211,30 +211,44 @@ class PreviewCallTests(unittest.TestCase):
             "val_pre_0": 5.0,
             "val_post_0": 1.0,
         }
-        calculator.return_value = expected_result
+        calculator.return_value = {"selected": expected_result}
         view = self.make_view(event)
 
-        result = view.calculate_preview(
-            "selected",
-            half_win=1.5,
-            points=(-1.0, -0.5, 0.5, 1.0),
-            smooth_w=9,
-        )
+        with mock.patch(
+            "labquake_explorer.analysis.event_drop.calculate_event_signal_drop"
+        ) as direct_calculator:
+            result = view.calculate_preview(
+                "selected",
+                half_win=1.5,
+                points=(-1.0, -0.5, 0.5, 1.0),
+                smooth_w=9,
+            )
 
         calculator.assert_called_once()
         call = calculator.call_args.kwargs
         self.assertIs(call["time"], event["time"])
-        self.assertIs(call["signal"], view.signal_candidates["selected"])
         self.assertEqual(call["event_time"], 10.0)
-        self.assertEqual(call["half_win"], 1.5)
-        self.assertEqual(call["points"], (-1.0, -0.5, 0.5, 1.0))
-        self.assertEqual(call["smooth_w"], 9)
+        self.assertEqual(list(call["signals"]), ["selected"])
+        self.assertIs(
+            call["signals"]["selected"], view.signal_candidates["selected"]
+        )
+        self.assertEqual(
+            call["parameters"],
+            {
+                "selected": {
+                    "half_win": 1.5,
+                    "points": (-1.0, -0.5, 0.5, 1.0),
+                    "smooth_w": 9,
+                }
+            },
+        )
+        direct_calculator.assert_not_called()
         self.assertIs(result, expected_result)
         self.assertIs(view.preview_result, expected_result)
 
     @mock.patch(
         "labquake_explorer.ui.views.event_drop_editor_view."
-        "calculate_event_signal_drop"
+        "calculate_event_drop_metrics"
     )
     def test_preview_does_not_modify_event(self, calculator):
         event = {
@@ -243,7 +257,7 @@ class PreviewCallTests(unittest.TestCase):
             "signal": np.array([4.0, 5.0, 1.0, 2.0]),
         }
         original = copy.deepcopy(event)
-        calculator.return_value = {"valid": False}
+        calculator.return_value = {"signal": {"valid": False}}
         view = self.make_view(event)
 
         view.calculate_preview(
@@ -482,7 +496,7 @@ class DraggableWindowTests(unittest.TestCase):
 
     @mock.patch(
         "labquake_explorer.ui.views.event_drop_editor_view."
-        "calculate_event_signal_drop"
+        "calculate_event_drop_metrics"
     )
     def test_endpoint_change_updates_control_and_invalidates_without_analysis(
         self, calculator

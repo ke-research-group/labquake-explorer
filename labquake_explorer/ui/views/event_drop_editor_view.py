@@ -14,7 +14,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 from matplotlib.figure import Figure
 
 from labquake_explorer.analysis.event_drop import (
-    calculate_event_signal_drop,
+    calculate_event_drop_metrics,
     compute_half_win,
 )
 
@@ -397,17 +397,22 @@ class EventDropEditorView(tk.Toplevel):
         points: tuple[float, float, float, float],
         smooth_w: int | None,
     ) -> dict[str, Any]:
-        """Call the schema-neutral helper and keep its result in this view."""
+        """Call the in-memory metric orchestrator and keep the selected result."""
         if signal_name not in self.signal_candidates:
             raise ValueError("Select an available signal")
-        result = calculate_event_signal_drop(
+        results = calculate_event_drop_metrics(
             time=self.event["time"],
-            signal=self.signal_candidates[signal_name],
             event_time=self.event["event_time"],
-            half_win=half_win,
-            points=points,
-            smooth_w=smooth_w,
+            signals={signal_name: self.signal_candidates[signal_name]},
+            parameters={
+                signal_name: {
+                    "half_win": half_win,
+                    "points": points,
+                    "smooth_w": smooth_w,
+                }
+            },
         )
+        result = results[signal_name]
         self.preview_result = result
         self.preview_parameters = {
             "half_win": half_win,
