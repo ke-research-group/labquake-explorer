@@ -9,10 +9,136 @@ from labquake_explorer.analysis.event_drop import (
     calculate_2pt_trend_drop,
     calculate_event_drop_metrics,
     calculate_event_signal_drop,
+    calculate_interevent_displacement_metrics,
     calculate_trend_drop,
     compute_half_win,
     moving_average,
 )
+
+
+class CalculateIntereventDisplacementMetricsTests(unittest.TestCase):
+    def test_positive_signed_d_push(self):
+        result = calculate_interevent_displacement_metrics(
+            current_event_time=12.0,
+            previous_event_time=10.0,
+            push_speed=3.5,
+        )
+
+        self.assertEqual(
+            result, {"D_Push": {"valid": True, "value": 7.0}}
+        )
+        self.assertIsInstance(result["D_Push"]["value"], float)
+
+    def test_negative_and_zero_time_differences_remain_valid(self):
+        negative = calculate_interevent_displacement_metrics(
+            current_event_time=8.0,
+            previous_event_time=10.0,
+            push_speed=3.5,
+        )
+        zero = calculate_interevent_displacement_metrics(
+            current_event_time=10.0,
+            previous_event_time=10.0,
+            push_speed=-3.5,
+        )
+
+        self.assertEqual(negative["D_Push"]["value"], -7.0)
+        self.assertEqual(zero["D_Push"], {"valid": True, "value": 0.0})
+
+    def test_missing_previous_event_is_unavailable_without_value(self):
+        result = calculate_interevent_displacement_metrics(
+            current_event_time=12.0,
+            previous_event_time=None,
+            push_speed=3.5,
+        )
+
+        self.assertEqual(result, {"D_Push": {"valid": False}})
+
+    def test_python_integer_and_numpy_scalar_inputs_return_python_float(self):
+        integer_result = calculate_interevent_displacement_metrics(
+            current_event_time=12,
+            previous_event_time=10,
+            push_speed=3,
+        )
+        numpy_result = calculate_interevent_displacement_metrics(
+            current_event_time=np.float64(12),
+            previous_event_time=np.int64(10),
+            push_speed=np.float32(3.5),
+        )
+
+        self.assertEqual(integer_result["D_Push"]["value"], 6.0)
+        self.assertEqual(numpy_result["D_Push"]["value"], 7.0)
+        self.assertIsInstance(integer_result["D_Push"]["value"], float)
+        self.assertIsInstance(numpy_result["D_Push"]["value"], float)
+
+    def test_nonfinite_inputs_name_the_invalid_argument(self):
+        cases = (
+            ("current_event_time", np.nan),
+            ("current_event_time", np.inf),
+            ("previous_event_time", np.nan),
+            ("previous_event_time", -np.inf),
+            ("push_speed", np.nan),
+            ("push_speed", np.inf),
+        )
+        for name, value in cases:
+            arguments = {
+                "current_event_time": 12.0,
+                "previous_event_time": 10.0,
+                "push_speed": 3.5,
+            }
+            arguments[name] = value
+            with self.subTest(name=name, value=value):
+                with self.assertRaisesRegex(ValueError, name):
+                    calculate_interevent_displacement_metrics(**arguments)
+
+    def test_bool_inputs_are_rejected_for_each_argument(self):
+        for name in (
+            "current_event_time",
+            "previous_event_time",
+            "push_speed",
+        ):
+            arguments = {
+                "current_event_time": 12.0,
+                "previous_event_time": 10.0,
+                "push_speed": 3.5,
+            }
+            arguments[name] = True
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, name):
+                    calculate_interevent_displacement_metrics(**arguments)
+
+    def test_length_one_arrays_are_not_treated_as_scalars(self):
+        for name in (
+            "current_event_time",
+            "previous_event_time",
+            "push_speed",
+        ):
+            arguments = {
+                "current_event_time": 12.0,
+                "previous_event_time": 10.0,
+                "push_speed": 3.5,
+            }
+            value = np.array([arguments[name]])
+            arguments[name] = value
+            original = value.copy()
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, name):
+                    calculate_interevent_displacement_metrics(**arguments)
+                np.testing.assert_array_equal(value, original)
+
+    def test_each_call_creates_new_result_dictionaries(self):
+        first = calculate_interevent_displacement_metrics(
+            current_event_time=12.0,
+            previous_event_time=10.0,
+            push_speed=3.5,
+        )
+        second = calculate_interevent_displacement_metrics(
+            current_event_time=12.0,
+            previous_event_time=10.0,
+            push_speed=3.5,
+        )
+
+        self.assertIsNot(first, second)
+        self.assertIsNot(first["D_Push"], second["D_Push"])
 
 
 class CalculateEventDropMetricsTests(unittest.TestCase):

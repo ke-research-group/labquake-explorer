@@ -167,6 +167,38 @@ def calculate_event_drop_metrics(
     return results
 
 
+def calculate_interevent_displacement_metrics(
+    *,
+    current_event_time: float,
+    previous_event_time: float | None,
+    push_speed: float,
+) -> dict[str, dict[str, Any]]:
+    """Calculate schema-neutral metrics between two explicitly chosen events.
+
+    The caller is responsible for selecting the previous event; this function
+    does not understand a run or event schema.  ``D_Push`` preserves the signed
+    event-time difference.  If ``previous_event_time`` is ``None``, the metric
+    is unavailable and ``{"valid": False}`` is returned for it.
+
+    The output unit is the event-time unit multiplied by the push-speed unit.
+    """
+    current_time = _coerce_finite_scalar(
+        current_event_time, "current_event_time"
+    )
+    speed = _coerce_finite_scalar(push_speed, "push_speed")
+    if previous_event_time is None:
+        return {"D_Push": {"valid": False}}
+    previous_time = _coerce_finite_scalar(
+        previous_event_time, "previous_event_time"
+    )
+    return {
+        "D_Push": {
+            "valid": True,
+            "value": float((current_time - previous_time) * speed),
+        }
+    }
+
+
 def calculate_trend_drop(
     t_rel: Any,
     y: Any,
@@ -223,6 +255,20 @@ def _coerce_1d_float_array(values: Any, name: str) -> np.ndarray:
     if array.ndim != 1:
         raise ValueError(f"{name} must be one-dimensional")
     return array
+
+
+def _coerce_finite_scalar(value: Any, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)) or isinstance(value, np.ndarray):
+        raise ValueError(f"{name} must be a finite numeric scalar")
+    if not np.isscalar(value):
+        raise ValueError(f"{name} must be a finite numeric scalar")
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be a finite numeric scalar") from exc
+    if not math.isfinite(result):
+        raise ValueError(f"{name} must be a finite numeric scalar")
+    return result
 
 
 def _coerce_window(values: Sequence[float], name: str) -> tuple[float, float]:
