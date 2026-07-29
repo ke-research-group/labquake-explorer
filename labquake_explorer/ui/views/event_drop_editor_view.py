@@ -227,6 +227,7 @@ class EventDropEditorView(tk.Toplevel):
         self.data_manager = self.parent.data_manager
         self.event: Mapping[str, Any] = {}
         self.signal_candidates: dict[str, np.ndarray] = {}
+        self.metric_bindings: dict[str, str | None] = {"preview": None}
         self.preview_result: dict[str, Any] | None = None
         self.preview_parameters: dict[str, Any] | None = None
         self._endpoint_draggables: dict[str, _DraggableVerticalLine] = {}
@@ -332,11 +333,13 @@ class EventDropEditorView(tk.Toplevel):
             f"runs/[{self.run_idx}]/events/[{self.event_idx}]"
         )
         self.signal_candidates = find_signal_candidates(self.event)
+        self.metric_bindings["preview"] = None
         self.preview_result = None
         self.preview_parameters = None
 
     def _refresh_event_widgets(self) -> None:
         names = list(self.signal_candidates)
+        self.metric_bindings["preview"] = None
         self.signal_combobox.configure(values=names)
         if names:
             self.signal_combobox.set("")
@@ -372,13 +375,22 @@ class EventDropEditorView(tk.Toplevel):
         self.preview_result = None
         self.preview_parameters = None
         self._clear_result_display()
-        if self.signal_combobox.get() in self.signal_candidates:
+        signal_name = self.signal_combobox.get()
+        if signal_name in self.signal_candidates:
+            self.metric_bindings["preview"] = signal_name
             self.preview_button.configure(state="normal")
             self.status_var.set("Preview only — not saved")
         else:
+            self.metric_bindings["preview"] = None
             self.preview_button.configure(state="disabled")
             self.status_var.set("Select a signal to enable preview")
         self._plot_preview()
+
+    def _resolve_metric_signal(self, role: str) -> tuple[str, np.ndarray]:
+        signal_name = self.metric_bindings.get(role)
+        if not signal_name or signal_name not in self.signal_candidates:
+            raise ValueError(f"No available signal is bound to {role}")
+        return signal_name, self.signal_candidates[signal_name]
 
     def _read_parameters(self) -> dict[str, Any]:
         return parse_preview_parameters(
@@ -398,21 +410,22 @@ class EventDropEditorView(tk.Toplevel):
         smooth_w: int | None,
     ) -> dict[str, Any]:
         """Call the in-memory metric orchestrator and keep the selected result."""
-        if signal_name not in self.signal_candidates:
-            raise ValueError("Select an available signal")
+        bound_name, bound_signal = self._resolve_metric_signal("preview")
+        if signal_name != bound_name:
+            raise ValueError("Selected signal does not match preview binding")
         results = calculate_event_drop_metrics(
             time=self.event["time"],
             event_time=self.event["event_time"],
-            signals={signal_name: self.signal_candidates[signal_name]},
+            signals={bound_name: bound_signal},
             parameters={
-                signal_name: {
+                bound_name: {
                     "half_win": half_win,
                     "points": points,
                     "smooth_w": smooth_w,
                 }
             },
         )
-        result = results[signal_name]
+        result = results[bound_name]
         self.preview_result = result
         self.preview_parameters = {
             "half_win": half_win,

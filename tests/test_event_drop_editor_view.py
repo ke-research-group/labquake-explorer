@@ -191,9 +191,19 @@ class PreviewCallTests(unittest.TestCase):
         view = EventDropEditorView.__new__(EventDropEditorView)
         view.event = event
         view.signal_candidates = find_signal_candidates(event)
+        view.metric_bindings = {"preview": None}
         view.preview_result = None
         view.preview_parameters = None
         return view
+
+    def test_headless_view_has_preview_metric_binding(self):
+        view = self.make_view({
+            "time": np.array([0.0, 1.0]),
+            "event_time": 0.5,
+            "signal": np.array([1.0, 2.0]),
+        })
+
+        self.assertEqual(view.metric_bindings, {"preview": None})
 
     @mock.patch(
         "labquake_explorer.ui.views.event_drop_editor_view."
@@ -213,6 +223,7 @@ class PreviewCallTests(unittest.TestCase):
         }
         calculator.return_value = {"selected": expected_result}
         view = self.make_view(event)
+        view.metric_bindings["preview"] = "selected"
 
         with mock.patch(
             "labquake_explorer.analysis.event_drop.calculate_event_signal_drop"
@@ -250,6 +261,57 @@ class PreviewCallTests(unittest.TestCase):
         "labquake_explorer.ui.views.event_drop_editor_view."
         "calculate_event_drop_metrics"
     )
+    def test_stale_binding_is_rejected_before_orchestration(self, calculator):
+        event = {
+            "time": np.array([-1.0, -0.5, 0.5, 1.0]),
+            "event_time": 0.0,
+            "signal": np.array([4.0, 5.0, 1.0, 2.0]),
+        }
+        view = self.make_view(event)
+        view.metric_bindings["preview"] = "removed"
+
+        with self.assertRaisesRegex(
+            ValueError, "No available signal is bound to preview"
+        ):
+            view.calculate_preview(
+                "removed",
+                half_win=1.0,
+                points=(-1.0, -0.5, 0.5, 1.0),
+                smooth_w=None,
+            )
+
+        calculator.assert_not_called()
+
+    @mock.patch(
+        "labquake_explorer.ui.views.event_drop_editor_view."
+        "calculate_event_drop_metrics"
+    )
+    def test_argument_must_match_preview_binding(self, calculator):
+        event = {
+            "time": np.array([-1.0, -0.5, 0.5, 1.0]),
+            "event_time": 0.0,
+            "first": np.array([4.0, 5.0, 1.0, 2.0]),
+            "second": np.array([3.0, 4.0, 2.0, 3.0]),
+        }
+        view = self.make_view(event)
+        view.metric_bindings["preview"] = "first"
+
+        with self.assertRaisesRegex(
+            ValueError, "Selected signal does not match preview binding"
+        ):
+            view.calculate_preview(
+                "second",
+                half_win=1.0,
+                points=(-1.0, -0.5, 0.5, 1.0),
+                smooth_w=None,
+            )
+
+        calculator.assert_not_called()
+
+    @mock.patch(
+        "labquake_explorer.ui.views.event_drop_editor_view."
+        "calculate_event_drop_metrics"
+    )
     def test_preview_does_not_modify_event(self, calculator):
         event = {
             "time": np.array([-1.0, -0.5, 0.5, 1.0]),
@@ -259,6 +321,7 @@ class PreviewCallTests(unittest.TestCase):
         original = copy.deepcopy(event)
         calculator.return_value = {"signal": {"valid": False}}
         view = self.make_view(event)
+        view.metric_bindings["preview"] = "signal"
 
         view.calculate_preview(
             "signal",
@@ -280,6 +343,7 @@ class PreviewCallTests(unittest.TestCase):
         }
         view = self.make_view(event)
         view.data_manager = mock.Mock()
+        view.metric_bindings["preview"] = "signal"
 
         view.calculate_preview(
             "signal",
@@ -372,6 +436,7 @@ class EventSwitchingTests(unittest.TestCase):
         view.data_manager = FakeDataManager()
         view.preview_result = {"valid": True}
         view.preview_parameters = {"half_win": 1.0}
+        view.metric_bindings = {"preview": "first"}
 
         view._set_event(1)
 
@@ -379,6 +444,7 @@ class EventSwitchingTests(unittest.TestCase):
         self.assertEqual(list(view.signal_candidates), ["second"])
         self.assertIsNone(view.preview_result)
         self.assertIsNone(view.preview_parameters)
+        self.assertIsNone(view.metric_bindings["preview"])
         self.assertEqual(
             view.data_manager.paths,
             ["runs/[2]/events/[1]"],
@@ -425,6 +491,7 @@ class DraggableWindowTests(unittest.TestCase):
         view.signal_candidates = {
             "signal": np.array([5.0, 6.0, 1.0, 2.0]),
         }
+        view.metric_bindings = {"preview": "signal"}
         view.signal_combobox = FakeWidget("signal")
         view.parameter_vars = {
             "half_win": FakeVariable("2"),
@@ -579,6 +646,7 @@ class DraggableWindowTests(unittest.TestCase):
         )
         self.assertEqual(view.signal_combobox.get(), "")
         self.assertEqual(view.preview_button.options["state"], "disabled")
+        self.assertIsNone(view.metric_bindings["preview"])
         self.assertEqual(
             float(view._endpoint_draggables["pre_start"].line.get_xdata()[0]),
             -0.5,
@@ -708,6 +776,7 @@ class SignalSelectionStateTests(unittest.TestCase):
             "first": np.array([1.0, 2.0]),
             "second": np.array([3.0, 4.0]),
         }
+        view.metric_bindings = {"preview": None}
         view.signal_combobox = FakeWidget()
         view.preview_button = FakeWidget()
         view.status_var = FakeVariable()
@@ -728,6 +797,7 @@ class SignalSelectionStateTests(unittest.TestCase):
         self.assertEqual(view.signal_combobox.options["values"], ["first", "second"])
         self.assertEqual(view.signal_combobox.get(), "")
         self.assertEqual(view.preview_button.options["state"], "disabled")
+        self.assertIsNone(view.metric_bindings["preview"])
 
     def test_explicit_valid_selection_enables_preview_and_clears_old_result(self):
         view = self.make_view()
@@ -736,6 +806,19 @@ class SignalSelectionStateTests(unittest.TestCase):
         view.on_signal_changed()
 
         self.assertEqual(view.preview_button.options["state"], "normal")
+        self.assertEqual(view.metric_bindings["preview"], "second")
+        self.assertIsNone(view.preview_result)
+        self.assertIsNone(view.preview_parameters)
+
+    def test_blank_or_invalid_selection_clears_binding_and_disables_preview(self):
+        view = self.make_view()
+        view.metric_bindings["preview"] = "first"
+        view.signal_combobox.set("missing")
+
+        view.on_signal_changed()
+
+        self.assertIsNone(view.metric_bindings["preview"])
+        self.assertEqual(view.preview_button.options["state"], "disabled")
         self.assertIsNone(view.preview_result)
         self.assertIsNone(view.preview_parameters)
 
