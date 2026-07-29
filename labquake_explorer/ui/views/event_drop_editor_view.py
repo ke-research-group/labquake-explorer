@@ -214,7 +214,7 @@ def format_preview_result(result: Mapping[str, Any]) -> dict[str, str]:
 
 
 class EventDropEditorView(tk.Toplevel):
-    """Preview event-drop fitting for explicitly bound tau and mu signals."""
+    """Preview event-drop fitting for explicitly bound tau, mu, and LVDT signals."""
 
     def __init__(self, parent, run_idx: int, event_idx: int):
         self.parent = parent
@@ -227,7 +227,11 @@ class EventDropEditorView(tk.Toplevel):
         self.data_manager = self.parent.data_manager
         self.event: Mapping[str, Any] = {}
         self.signal_candidates: dict[str, np.ndarray] = {}
-        self.metric_bindings: dict[str, str | None] = {"tau": None, "mu": None}
+        self.metric_bindings: dict[str, str | None] = {
+            "tau": None,
+            "mu": None,
+            "lvdt": None,
+        }
         self.preview_results: dict[str, dict[str, Any]] = {}
         self.active_metric_role: str | None = None
         self.preview_parameters: dict[str, Any] | None = None
@@ -266,6 +270,14 @@ class EventDropEditorView(tk.Toplevel):
         self.mu_signal_combobox.bind(
             "<<ComboboxSelected>>", self.on_mu_signal_changed
         )
+        ttk.Label(controls, text="LVDT signal:").grid(row=0, column=6, sticky="e")
+        self.lvdt_signal_combobox = ttk.Combobox(
+            controls, width=20, state="readonly"
+        )
+        self.lvdt_signal_combobox.grid(row=0, column=7, padx=(3, 10), sticky="w")
+        self.lvdt_signal_combobox.bind(
+            "<<ComboboxSelected>>", self.on_lvdt_signal_changed
+        )
 
         defaults = {
             "half_win": str(compute_half_win()),
@@ -275,6 +287,9 @@ class EventDropEditorView(tk.Toplevel):
             "post_end": str(DEFAULT_POINTS[3]),
             "smooth_w": "",
         }
+        ttk.Label(controls, text="Tau / Mu fitting").grid(
+            row=1, column=0, columnspan=6, sticky="w", pady=(4, 0)
+        )
         self.parameter_vars: dict[str, tk.StringVar] = {}
         labels = (
             ("Half window", "half_win"),
@@ -285,17 +300,29 @@ class EventDropEditorView(tk.Toplevel):
             ("Smooth window", "smooth_w"),
         )
         for column, (label, key) in enumerate(labels):
-            ttk.Label(controls, text=label).grid(row=1, column=column, padx=3)
+            ttk.Label(controls, text=label).grid(row=2, column=column, padx=3)
             variable = tk.StringVar(value=defaults[key])
             self.parameter_vars[key] = variable
             ttk.Entry(controls, textvariable=variable, width=11).grid(
-                row=2, column=column, padx=3
+                row=3, column=column, padx=3
+            )
+
+        ttk.Label(controls, text="LVDT fitting").grid(
+            row=4, column=0, columnspan=6, sticky="w", pady=(4, 0)
+        )
+        self.lvdt_parameter_vars: dict[str, tk.StringVar] = {}
+        for column, (label, key) in enumerate(labels):
+            ttk.Label(controls, text=label).grid(row=5, column=column, padx=3)
+            variable = tk.StringVar(value=defaults[key])
+            self.lvdt_parameter_vars[key] = variable
+            ttk.Entry(controls, textvariable=variable, width=11).grid(
+                row=6, column=column, padx=3
             )
 
         self.preview_button = ttk.Button(
             controls, text="Preview / Recompute", command=self.recompute_preview
         )
-        self.preview_button.grid(row=2, column=6, padx=(10, 3))
+        self.preview_button.grid(row=6, column=6, padx=(10, 3))
 
         results = ttk.LabelFrame(self, text="Preview Result")
         results.pack(side=tk.TOP, fill=tk.X, padx=6)
@@ -310,7 +337,7 @@ class EventDropEditorView(tk.Toplevel):
                     "val_post_0",
                 )
             }
-            for role in ("tau", "mu")
+            for role in ("tau", "mu", "lvdt")
         }
         result_labels = (
             ("Valid", "valid"),
@@ -319,8 +346,9 @@ class EventDropEditorView(tk.Toplevel):
             ("Pre fit at t=0", "val_pre_0"),
             ("Post fit at t=0", "val_post_0"),
         )
-        for row, role in enumerate(("tau", "mu")):
-            ttk.Label(results, text=role.capitalize()).grid(
+        for row, role in enumerate(("tau", "mu", "lvdt")):
+            display_name = "LVDT" if role == "lvdt" else role.capitalize()
+            ttk.Label(results, text=display_name).grid(
                 row=row, column=0, padx=(6, 10), pady=3, sticky="w"
             )
             for column, (label, key) in enumerate(result_labels):
@@ -334,7 +362,7 @@ class EventDropEditorView(tk.Toplevel):
                 )
         self.status_var = tk.StringVar(value="Preview only — not saved")
         ttk.Label(results, textvariable=self.status_var).grid(
-            row=2, column=0, columnspan=11, padx=6, pady=(0, 3), sticky="w"
+            row=3, column=0, columnspan=11, padx=6, pady=(0, 3), sticky="w"
         )
 
     def _create_figure(self) -> None:
@@ -362,16 +390,20 @@ class EventDropEditorView(tk.Toplevel):
             f"runs/[{self.run_idx}]/events/[{self.event_idx}]"
         )
         self.signal_candidates = find_signal_candidates(self.event)
-        self.metric_bindings = {"tau": None, "mu": None}
+        self.metric_bindings = {"tau": None, "mu": None, "lvdt": None}
         self.preview_results = {}
         self.active_metric_role = None
         self.preview_parameters = None
 
     def _refresh_event_widgets(self) -> None:
         names = list(self.signal_candidates)
-        self.metric_bindings = {"tau": None, "mu": None}
+        self.metric_bindings = {"tau": None, "mu": None, "lvdt": None}
         self.active_metric_role = None
-        for combobox in (self.tau_signal_combobox, self.mu_signal_combobox):
+        for combobox in (
+            self.tau_signal_combobox,
+            self.mu_signal_combobox,
+            self.lvdt_signal_combobox,
+        ):
             combobox.configure(values=names)
             combobox.set("")
         if names:
@@ -384,15 +416,18 @@ class EventDropEditorView(tk.Toplevel):
         self._plot_preview()
 
     def _clear_result_display(self, role: str | None = None) -> None:
-        roles = (role,) if role else ("tau", "mu")
+        roles = (role,) if role else ("tau", "mu", "lvdt")
         for metric_role in roles:
             for variable in self.result_vars[metric_role].values():
                 variable.set("—")
 
     def _invalidate_preview(self) -> None:
-        self.preview_results = {}
+        roles = ("lvdt",) if self.active_metric_role == "lvdt" else ("tau", "mu")
+        for role in roles:
+            self.preview_results.pop(role, None)
         self.preview_parameters = None
-        self._clear_result_display()
+        for role in roles:
+            self._clear_result_display(role)
         self.status_var.set("Fitting windows changed — recompute preview")
 
     def on_event_changed(self, event=None) -> None:
@@ -419,7 +454,7 @@ class EventDropEditorView(tk.Toplevel):
                 self.active_metric_role = next(
                     (
                         other_role
-                        for other_role in ("tau", "mu")
+                        for other_role in ("tau", "mu", "lvdt")
                         if self.metric_bindings[other_role]
                     ),
                     None,
@@ -436,6 +471,9 @@ class EventDropEditorView(tk.Toplevel):
     def on_mu_signal_changed(self, event=None) -> None:
         self._on_metric_signal_changed("mu", self.mu_signal_combobox)
 
+    def on_lvdt_signal_changed(self, event=None) -> None:
+        self._on_metric_signal_changed("lvdt", self.lvdt_signal_combobox)
+
     def _resolve_metric_signal(self, role: str) -> np.ndarray:
         signal_name = self.metric_bindings.get(role)
         if not signal_name or signal_name not in self.signal_candidates:
@@ -444,39 +482,40 @@ class EventDropEditorView(tk.Toplevel):
 
     def _resolve_bound_metrics(self) -> dict[str, np.ndarray]:
         signals = {}
-        for role in ("tau", "mu"):
+        for role in ("tau", "mu", "lvdt"):
             if self.metric_bindings[role] is not None:
                 signals[role] = self._resolve_metric_signal(role)
         if not signals:
             raise ValueError("Select at least one signal to enable preview")
         return signals
 
-    def _read_parameters(self) -> dict[str, Any]:
+    def _read_parameter_group(self, variables) -> dict[str, Any]:
         return parse_preview_parameters(
-            self.parameter_vars["half_win"].get(),
-            self.parameter_vars["pre_start"].get(),
-            self.parameter_vars["pre_end"].get(),
-            self.parameter_vars["post_start"].get(),
-            self.parameter_vars["post_end"].get(),
-            self.parameter_vars["smooth_w"].get(),
+            variables["half_win"].get(),
+            variables["pre_start"].get(),
+            variables["pre_end"].get(),
+            variables["post_start"].get(),
+            variables["post_end"].get(),
+            variables["smooth_w"].get(),
         )
 
-    def calculate_preview(
-        self,
-        half_win: float,
-        points: tuple[float, float, float, float],
-        smooth_w: int | None,
-    ) -> dict[str, dict[str, Any]]:
+    def _read_bound_metric_parameters(self) -> dict[str, dict[str, Any]]:
+        parameters = {}
+        if self.metric_bindings["tau"] or self.metric_bindings["mu"]:
+            shared = self._read_parameter_group(self.parameter_vars)
+            for role in ("tau", "mu"):
+                if self.metric_bindings[role]:
+                    parameters[role] = dict(shared)
+        if self.metric_bindings["lvdt"]:
+            parameters["lvdt"] = dict(
+                self._read_parameter_group(self.lvdt_parameter_vars)
+            )
+        return parameters
+
+    def calculate_preview(self) -> dict[str, dict[str, Any]]:
         """Calculate all explicitly bound event-drop metrics in memory."""
         signals = self._resolve_bound_metrics()
-        parameters = {
-            role: {
-                "half_win": half_win,
-                "points": points,
-                "smooth_w": smooth_w,
-            }
-            for role in signals
-        }
+        parameters = self._read_bound_metric_parameters()
         results = calculate_event_drop_metrics(
             time=self.event["time"],
             event_time=self.event["event_time"],
@@ -484,21 +523,12 @@ class EventDropEditorView(tk.Toplevel):
             parameters=parameters,
         )
         self.preview_results = results
-        self.preview_parameters = {
-            "half_win": half_win,
-            "points": points,
-            "smooth_w": smooth_w,
-        }
+        self.preview_parameters = parameters
         return results
 
     def recompute_preview(self) -> None:
         try:
-            parameters = self._read_parameters()
-            results = self.calculate_preview(
-                parameters["half_win"],
-                parameters["points"],
-                parameters["smooth_w"],
-            )
+            results = self.calculate_preview()
             self._clear_result_display()
             for role, result in results.items():
                 display = format_preview_result(result)
@@ -514,9 +544,10 @@ class EventDropEditorView(tk.Toplevel):
             messagebox.showerror("Event Drop Preview", str(exc))
 
     def _current_points(self) -> tuple[float, float, float, float] | None:
+        variables = self._active_parameter_vars()
         try:
             points = tuple(
-                float(self.parameter_vars[key].get())
+                float(variables[key].get())
                 for key in ("pre_start", "pre_end", "post_start", "post_end")
             )
         except (TypeError, ValueError):
@@ -526,8 +557,9 @@ class EventDropEditorView(tk.Toplevel):
         return points
 
     def _constrain_endpoint(self, endpoint: str, position: float) -> float:
+        variables = self._active_parameter_vars()
         try:
-            half_win = float(self.parameter_vars["half_win"].get())
+            half_win = float(variables["half_win"].get())
             if not math.isfinite(half_win) or half_win < 0:
                 raise ValueError
             lower_bound, upper_bound = -half_win, half_win
@@ -542,8 +574,13 @@ class EventDropEditorView(tk.Toplevel):
         return constrained
 
     def _on_endpoint_changed(self, endpoint: str, position: float) -> None:
-        self.parameter_vars[endpoint].set(f"{position:.6g}")
+        self._active_parameter_vars()[endpoint].set(f"{position:.6g}")
         self._invalidate_preview()
+
+    def _active_parameter_vars(self):
+        if self.active_metric_role == "lvdt":
+            return self.lvdt_parameter_vars
+        return self.parameter_vars
 
     def _begin_endpoint_drag(self, endpoint: str) -> bool:
         if self._active_endpoint is not None:
