@@ -174,6 +174,7 @@ def calculate_interevent_displacement_metrics(
     push_speed: float,
     time: Any | None = None,
     lvdt_signal: Any | None = None,
+    reference_displacement_signal: Any | None = None,
     delay_sec: float = 0.05,
     lvdt_smooth_w: int = 100,
 ) -> dict[str, dict[str, Any]]:
@@ -183,8 +184,12 @@ def calculate_interevent_displacement_metrics(
     does not understand a run or event schema. ``D_Push`` preserves the signed
     event-time difference. ``D_max`` uses an explicitly supplied full-run LVDT
     signal: the complete signal is smoothed first, then delayed nearest samples
-    are selected and their absolute difference is returned. If
-    ``previous_event_time`` is ``None``, both metrics are unavailable.
+    are selected and their absolute difference is returned. ``D_reference``
+    uses a caller-selected full-run displacement signal without inferring its
+    identity or smoothing it, and returns the absolute difference at the same
+    delayed nearest samples. The caller supplies the previous event and signal
+    selection. If ``previous_event_time`` is ``None``, all metrics are
+    unavailable.
 
     Time, signal, and output units are defined by the caller's input contract.
     """
@@ -195,6 +200,7 @@ def calculate_interevent_displacement_metrics(
     results = {
         "D_Push": {"valid": False},
         "D_max": {"valid": False},
+        "D_reference": {"valid": False},
     }
     if previous_event_time is None:
         return results
@@ -206,31 +212,59 @@ def calculate_interevent_displacement_metrics(
         "value": float((current_time - previous_time) * speed),
     }
 
-    if time is None and lvdt_signal is None:
+    has_lvdt = lvdt_signal is not None
+    has_reference = reference_displacement_signal is not None
+    has_run_signal = has_lvdt or has_reference
+    if time is None and not has_run_signal:
         return results
-    if time is None or lvdt_signal is None:
-        raise ValueError("time and lvdt_signal must be provided together")
+    if time is None:
+        raise ValueError(
+            "time must be provided with run-level displacement signals"
+        )
+    if not has_run_signal:
+        raise ValueError(
+            "time must be accompanied by at least one run-level displacement signal"
+        )
 
     time_array = _coerce_interevent_array(time, "time")
-    lvdt_array = _coerce_interevent_array(lvdt_signal, "lvdt_signal")
-    if time_array.size != lvdt_array.size:
-        raise ValueError("time and lvdt_signal must have the same length")
     if time_array.size == 0:
-        raise ValueError("time and lvdt_signal must not be empty")
+        raise ValueError("time must not be empty")
     if not np.all(np.diff(time_array) > 0):
         raise ValueError("time must be strictly increasing")
 
     delay = _coerce_finite_scalar(delay_sec, "delay_sec")
-    if isinstance(lvdt_smooth_w, (bool, np.bool_)) or not isinstance(
-        lvdt_smooth_w, (int, np.integer)
-    ):
-        raise ValueError("lvdt_smooth_w must be a positive integer")
-    try:
-        smoothed_lvdt = moving_average(lvdt_array, lvdt_smooth_w)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            "lvdt_smooth_w is not supported for lvdt_signal"
-        ) from exc
+    smoothed_lvdt = None
+    if has_lvdt:
+        lvdt_array = _coerce_interevent_array(lvdt_signal, "lvdt_signal")
+        if time_array.size != lvdt_array.size:
+            raise ValueError("time and lvdt_signal must have the same length")
+        if lvdt_array.size == 0:
+            raise ValueError("lvdt_signal must not be empty")
+        if isinstance(lvdt_smooth_w, (bool, np.bool_)) or not isinstance(
+            lvdt_smooth_w, (int, np.integer)
+        ):
+            raise ValueError("lvdt_smooth_w must be a positive integer")
+        try:
+            smoothed_lvdt = moving_average(lvdt_array, lvdt_smooth_w)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "lvdt_smooth_w is not supported for lvdt_signal"
+            ) from exc
+
+    reference_array = None
+    if has_reference:
+        reference_array = _coerce_interevent_array(
+            reference_displacement_signal,
+            "reference_displacement_signal",
+        )
+        if time_array.size != reference_array.size:
+            raise ValueError(
+                "time and reference_displacement_signal must have the same length"
+            )
+        if reference_array.size == 0:
+            raise ValueError(
+                "reference_displacement_signal must not be empty"
+            )
 
     current_target = current_time + delay
     previous_target = previous_time + delay
@@ -244,12 +278,26 @@ def calculate_interevent_displacement_metrics(
 
     current_index = int(np.argmin(np.abs(time_array - current_target)))
     previous_index = int(np.argmin(np.abs(time_array - previous_target)))
-    results["D_max"] = {
-        "valid": True,
-        "value": float(
-            abs(smoothed_lvdt[current_index] - smoothed_lvdt[previous_index])
-        ),
-    }
+    if smoothed_lvdt is not None:
+        results["D_max"] = {
+            "valid": True,
+            "value": float(
+                abs(
+                    smoothed_lvdt[current_index]
+                    - smoothed_lvdt[previous_index]
+                )
+            ),
+        }
+    if reference_array is not None:
+        results["D_reference"] = {
+            "valid": True,
+            "value": float(
+                abs(
+                    reference_array[current_index]
+                    - reference_array[previous_index]
+                )
+            ),
+        }
     return results
 
 
