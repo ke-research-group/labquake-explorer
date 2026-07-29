@@ -1,4 +1,4 @@
-"""Headless-safe tests for the tau/mu event-drop preview view."""
+"""Headless-safe tests for scalar and ordered slip event-drop previews."""
 
 import copy
 import unittest
@@ -222,6 +222,8 @@ class PreviewCallTests(unittest.TestCase):
         self.assertEqual(
             view.metric_bindings, {"tau": None, "mu": None, "lvdt": None}
         )
+        self.assertEqual(view.preview_results, {})
+        self.assertIsNone(view.preview_parameters)
 
     @mock.patch(
         "labquake_explorer.ui.views.event_drop_editor_view."
@@ -474,6 +476,98 @@ class PreviewCallTests(unittest.TestCase):
         "labquake_explorer.ui.views.event_drop_editor_view."
         "calculate_event_drop_metrics"
     )
+    def test_scalar_and_slip_mappings_keep_order_identity_and_parameters(
+        self, calculator
+    ):
+        event = {
+            "time": np.array([-1.0, 1.0]),
+            "event_time": 0.0,
+            "tau_source": np.array([3.0, 1.0]),
+            "slip_a": np.array([8.0, 5.0]),
+            "slip_b": np.array([7.0, 4.0]),
+        }
+        view = self.make_view(event)
+        view.metric_bindings["tau"] = "tau_source"
+        view.slip_bindings = ["slip_a", None, "slip_b"]
+        view.parameter_vars = self._parameter_vars()
+        view.lvdt_parameter_vars = self._parameter_vars()
+        view.slip_parameter_vars = self._parameter_vars(
+            half_win="2", points=("-2", "-1", "1", "2"), smooth_w=""
+        )
+        calculator.return_value = {
+            "tau": {"valid": True},
+            "slip_1": {"valid": True},
+            "slip_3": {"valid": False},
+        }
+
+        view.calculate_preview()
+
+        call = calculator.call_args.kwargs
+        self.assertEqual(list(call["signals"]), ["tau", "slip_1", "slip_3"])
+        self.assertIs(call["signals"]["slip_1"], event["slip_a"])
+        self.assertIs(call["signals"]["slip_3"], event["slip_b"])
+        self.assertEqual(list(call["parameters"]), ["tau", "slip_1", "slip_3"])
+        self.assertIsNot(
+            call["parameters"]["slip_1"], call["parameters"]["slip_3"]
+        )
+        self.assertIsNone(call["parameters"]["slip_1"]["smooth_w"])
+        self.assertEqual(call["parameters"]["slip_3"]["half_win"], 2.0)
+        calculator.assert_called_once()
+
+    @mock.patch(
+        "labquake_explorer.ui.views.event_drop_editor_view."
+        "calculate_event_drop_metrics"
+    )
+    def test_stale_slip_and_invalid_bound_slip_parameters_stop_all_analysis(
+        self, calculator
+    ):
+        event = {
+            "time": np.array([-1.0, 1.0]),
+            "event_time": 0.0,
+            "tau_source": np.array([3.0, 1.0]),
+        }
+        view = self.make_view(event)
+        view.metric_bindings["tau"] = "tau_source"
+        view.slip_bindings = [None, "missing"]
+
+        with self.assertRaisesRegex(ValueError, "bound to slip_2"):
+            view.calculate_preview()
+        calculator.assert_not_called()
+
+        view.slip_bindings = ["tau_source"]
+        view.parameter_vars = self._parameter_vars()
+        view.lvdt_parameter_vars = self._parameter_vars()
+        view.slip_parameter_vars = self._parameter_vars(half_win="invalid")
+        with self.assertRaises(ValueError):
+            view.calculate_preview()
+        calculator.assert_not_called()
+
+    @mock.patch(
+        "labquake_explorer.ui.views.event_drop_editor_view."
+        "calculate_event_drop_metrics"
+    )
+    def test_empty_slip_rows_do_not_parse_slip_parameters(self, calculator):
+        event = {
+            "time": np.array([-1.0, 1.0]),
+            "event_time": 0.0,
+            "tau_source": np.array([3.0, 1.0]),
+        }
+        view = self.make_view(event)
+        view.metric_bindings["tau"] = "tau_source"
+        view.slip_bindings = [None]
+        view.parameter_vars = self._parameter_vars()
+        view.lvdt_parameter_vars = self._parameter_vars()
+        view.slip_parameter_vars = self._parameter_vars(half_win="invalid")
+        calculator.return_value = {"tau": {"valid": False}}
+
+        view.calculate_preview()
+
+        calculator.assert_called_once()
+
+    @mock.patch(
+        "labquake_explorer.ui.views.event_drop_editor_view."
+        "calculate_event_drop_metrics"
+    )
     def test_preview_does_not_modify_event(self, calculator):
         event = {
             "time": np.array([-1.0, -0.5, 0.5, 1.0]),
@@ -522,6 +616,7 @@ class PreviewCallTests(unittest.TestCase):
             "mu": "mu_signal",
             "lvdt": "mu_signal",
         }
+        view.slip_bindings = ["tau_signal", None]
         view.result_vars = {
             role: {
                 key: FakeVariable()
@@ -536,6 +631,32 @@ class PreviewCallTests(unittest.TestCase):
             for role in ("tau", "mu", "lvdt")
         }
         view.status_var = FakeVariable()
+        view.slip_rows = [
+            {
+                "result_vars": {
+                    key: FakeVariable()
+                    for key in (
+                        "valid",
+                        "delta",
+                        "magnitude",
+                        "val_pre_0",
+                        "val_post_0",
+                    )
+                }
+            },
+            {
+                "result_vars": {
+                    key: FakeVariable()
+                    for key in (
+                        "valid",
+                        "delta",
+                        "magnitude",
+                        "val_pre_0",
+                        "val_post_0",
+                    )
+                }
+            },
+        ]
         view.calculate_preview = mock.Mock(return_value={
             "tau": {
                 "valid": True,
@@ -549,6 +670,12 @@ class PreviewCallTests(unittest.TestCase):
                 "delta": 0.25,
                 "val_pre_0": 0.5,
                 "val_post_0": 0.25,
+            },
+            "slip_1": {
+                "valid": True,
+                "delta": -1.25,
+                "val_pre_0": 2.0,
+                "val_post_0": 3.25,
             },
         })
         view._plot_preview = mock.Mock()
@@ -564,6 +691,11 @@ class PreviewCallTests(unittest.TestCase):
         self.assertEqual(view.result_vars["lvdt"]["valid"].get(), "True")
         self.assertEqual(view.result_vars["lvdt"]["delta"].get(), "0.25")
         self.assertEqual(view.result_vars["lvdt"]["magnitude"].get(), "0.25")
+        self.assertEqual(view.slip_rows[0]["result_vars"]["delta"].get(), "-1.25")
+        self.assertEqual(
+            view.slip_rows[0]["result_vars"]["magnitude"].get(), "1.25"
+        )
+        self.assertEqual(view.slip_rows[1]["result_vars"]["valid"].get(), "—")
         self.assertEqual(view.status_var.get(), "Preview only — not saved")
         view._plot_preview.assert_called_once_with()
 
@@ -711,6 +843,52 @@ class PreviewPlotTests(unittest.TestCase):
         self.assertAlmostEqual(fit_lines["Pre fit"].get_ydata()[-1], 8.0)
         self.assertAlmostEqual(fit_lines["Post fit"].get_ydata()[0], 4.0)
 
+    def test_active_slip_uses_selected_signal_result_and_slip_windows(self):
+        view = EventDropEditorView.__new__(EventDropEditorView)
+        view.figure = Figure()
+        view.raw_ax = view.figure.add_subplot(211)
+        view.fit_ax = view.figure.add_subplot(212, sharex=view.raw_ax)
+        view.canvas = mock.Mock()
+        view.event = {
+            "time": np.array([-2.0, -1.0, 1.0, 2.0]),
+            "event_time": 0.0,
+        }
+        slip = np.array([9.0, 10.0, 5.0, 6.0])
+        view.signal_candidates = {"chosen": slip}
+        view.metric_bindings = {"tau": None, "mu": None, "lvdt": None}
+        view.slip_bindings = ["chosen"]
+        view.active_metric_role = "slip_1"
+        view.preview_results = {
+            "slip_1": {
+                "valid": True,
+                "coeff_pre": np.array([1.0, 9.0]),
+                "coeff_post": np.array([2.0, 5.0]),
+            }
+        }
+        view.parameter_vars = PreviewCallTests._parameter_vars()
+        view.lvdt_parameter_vars = PreviewCallTests._parameter_vars()
+        view.slip_parameter_vars = PreviewCallTests._parameter_vars(
+            half_win="2",
+            points=("-1.8", "-0.8", "0.4", "1.6"),
+            smooth_w="",
+        )
+
+        view._plot_preview()
+
+        np.testing.assert_array_equal(view.raw_ax.lines[0].get_ydata(), slip)
+        shaded = [
+            (
+                float(patch.get_x()),
+                float(patch.get_x()) + float(patch.get_width()),
+            )
+            for patch in view.raw_ax.patches
+        ]
+        self.assertIn((-1.8, -0.8), shaded)
+        self.assertIn((0.4, 1.6), shaded)
+        fit_lines = {line.get_label(): line for line in view.fit_ax.lines}
+        self.assertAlmostEqual(fit_lines["Pre fit"].get_ydata()[-1], 9.0)
+        self.assertAlmostEqual(fit_lines["Post fit"].get_ydata()[0], 5.0)
+
 
 class EventSwitchingTests(unittest.TestCase):
     def test_set_event_reloads_canonical_event_and_candidates(self):
@@ -744,6 +922,7 @@ class EventSwitchingTests(unittest.TestCase):
         view.preview_results = {"tau": {"valid": True}}
         view.preview_parameters = {"half_win": 1.0}
         view.metric_bindings = {"tau": "first", "mu": "first"}
+        view.slip_bindings = ["first"]
         view.active_metric_role = "tau"
 
         view._set_event(1)
@@ -755,6 +934,7 @@ class EventSwitchingTests(unittest.TestCase):
         self.assertEqual(
             view.metric_bindings, {"tau": None, "mu": None, "lvdt": None}
         )
+        self.assertEqual(view.slip_bindings, [])
         self.assertIsNone(view.active_metric_role)
         self.assertEqual(
             view.data_manager.paths,
@@ -951,6 +1131,45 @@ class DraggableWindowTests(unittest.TestCase):
         calculator.assert_not_called()
         view.data_manager.set_data.assert_not_called()
 
+    @mock.patch(
+        "labquake_explorer.ui.views.event_drop_editor_view."
+        "calculate_event_drop_metrics"
+    )
+    def test_slip_endpoint_invalidates_all_slip_results_only(self, calculator):
+        view = self.make_plot_view()
+        view.slip_bindings = ["signal", "signal"]
+        view.active_metric_role = "slip_2"
+        view.slip_parameter_vars = {
+            key: FakeVariable(variable.get())
+            for key, variable in view.parameter_vars.items()
+        }
+        view.preview_results = {
+            "tau": {"valid": True},
+            "mu": {"valid": True},
+            "lvdt": {"valid": True},
+            "slip_1": {"valid": True},
+            "slip_2": {"valid": False},
+        }
+        view.slip_rows = [
+            {"result_vars": {key: FakeVariable("old") for key in view.result_vars["tau"]}},
+            {"result_vars": {key: FakeVariable("old") for key in view.result_vars["tau"]}},
+        ]
+        view.data_manager = mock.Mock()
+
+        view._on_endpoint_changed("pre_start", -0.9)
+
+        self.assertEqual(
+            view.preview_results,
+            {
+                "tau": {"valid": True},
+                "mu": {"valid": True},
+                "lvdt": {"valid": True},
+            },
+        )
+        self.assertEqual(view.slip_parameter_vars["pre_start"].get(), "-0.9")
+        calculator.assert_not_called()
+        view.data_manager.set_data.assert_not_called()
+
     def test_redraw_disconnects_old_callbacks_before_recreating_lines(self):
         view = self.make_plot_view()
 
@@ -1013,6 +1232,8 @@ class DraggableWindowTests(unittest.TestCase):
         self.assertEqual(
             view.metric_bindings, {"tau": None, "mu": None, "lvdt": None}
         )
+        self.assertEqual(view.preview_results, {})
+        self.assertIsNone(view.preview_parameters)
         self.assertIsNone(view.active_metric_role)
         self.assertEqual(
             float(view._endpoint_draggables["pre_start"].line.get_xdata()[0]),
@@ -1182,6 +1403,8 @@ class SignalSelectionStateTests(unittest.TestCase):
         self.assertEqual(
             view.metric_bindings, {"tau": None, "mu": None, "lvdt": None}
         )
+        self.assertEqual(view.preview_results, {})
+        self.assertIsNone(view.preview_parameters)
 
     def test_tau_selection_only_updates_tau_and_does_not_analyze(self):
         view = self.make_view()
@@ -1190,12 +1413,96 @@ class SignalSelectionStateTests(unittest.TestCase):
         view.on_tau_signal_changed()
 
         self.assertEqual(view.preview_button.options["state"], "normal")
+
+
+class SlipBindingStateTests(unittest.TestCase):
+    def make_view(self):
+        view = EventDropEditorView.__new__(EventDropEditorView)
+        view.signal_candidates = {
+            "z_signal": np.array([1.0, 2.0]),
+            "a_signal": np.array([3.0, 4.0]),
+            "first": np.array([5.0, 6.0]),
+            "second": np.array([7.0, 8.0]),
+        }
+        view.metric_bindings = {"tau": None, "mu": None, "lvdt": None}
+        view.slip_bindings = []
+        view.slip_rows = []
+        view.preview_results = {}
+        view.preview_parameters = None
+        view.active_metric_role = None
+        view.tau_signal_combobox = FakeWidget()
+        view.mu_signal_combobox = FakeWidget()
+        view.lvdt_signal_combobox = FakeWidget()
+        view.preview_button = FakeWidget()
+        view.status_var = FakeVariable()
+        view.result_vars = {
+            role: {"valid": FakeVariable(), "delta": FakeVariable()}
+            for role in ("tau", "mu", "lvdt")
+        }
+        view.preview_results = {
+            "tau": {"valid": True},
+            "mu": {"valid": True},
+        }
+        view.preview_parameters = {"half_win": 1.0}
+        view._plot_preview = mock.Mock()
+        view._rebuild_slip_rows = mock.Mock()
+        return view
+
+    def test_initial_state_and_empty_added_row_do_not_enable_preview(self):
+        view = self.make_view()
+
+        view.add_slip_sensor()
+
+        self.assertEqual(view.slip_bindings, [None])
+        self.assertEqual(view.preview_button.options["state"], "disabled")
+        view._rebuild_slip_rows.assert_called_once_with()
+
+    def test_selection_updates_only_slot_and_allows_duplicate_signal(self):
+        view = self.make_view()
+        view.slip_bindings = [None, None]
+        view.slip_rows = [
+            {"selector": FakeWidget("z_signal"), "result_vars": {}},
+            {"selector": FakeWidget("z_signal"), "result_vars": {}},
+        ]
+        view.preview_results = {
+            "tau": {"valid": True},
+            "slip_1": {"valid": True},
+            "slip_2": {"valid": True},
+        }
+        view._clear_result_display = mock.Mock()
+
+        view.on_slip_signal_changed(1)
+
+        self.assertEqual(view.slip_bindings, [None, "z_signal"])
+        self.assertEqual(view.active_metric_role, "slip_2")
         self.assertEqual(
-            view.metric_bindings, {"tau": "second", "mu": None, "lvdt": None}
+            view.preview_results,
+            {"tau": {"valid": True}, "slip_1": {"valid": True}},
         )
-        self.assertEqual(view.preview_results, {"mu": {"valid": True}})
+        self.assertEqual(view.preview_button.options["state"], "normal")
+
+        view.on_slip_signal_changed(0)
+        self.assertEqual(view.slip_bindings, ["z_signal", "z_signal"])
+
+    def test_remove_compacts_rows_clears_slip_results_and_falls_back(self):
+        view = self.make_view()
+        view.metric_bindings["tau"] = "z_signal"
+        view.slip_bindings = ["z_signal", "a_signal", "z_signal"]
+        view.preview_results = {
+            "tau": {"valid": True},
+            "slip_1": {"valid": True},
+            "slip_2": {"valid": True},
+            "slip_3": {"valid": True},
+        }
+        view.active_metric_role = "slip_2"
+
+        view.remove_slip_sensor(1)
+
+        self.assertEqual(view.slip_bindings, ["z_signal", "z_signal"])
+        self.assertEqual(view.preview_results, {"tau": {"valid": True}})
         self.assertEqual(view.active_metric_role, "tau")
-        self.assertIsNone(view.preview_parameters)
+        view._rebuild_slip_rows.assert_called_once_with()
+        view._plot_preview.assert_called_once_with()
 
     def test_mu_selection_only_updates_mu_and_same_signal_is_allowed(self):
         view = self.make_view()
