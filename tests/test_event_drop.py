@@ -25,7 +25,11 @@ class CalculateIntereventDisplacementMetricsTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            result, {"D_Push": {"valid": True, "value": 7.0}}
+            result,
+            {
+                "D_Push": {"valid": True, "value": 7.0},
+                "D_max": {"valid": False},
+            },
         )
         self.assertIsInstance(result["D_Push"]["value"], float)
 
@@ -51,7 +55,13 @@ class CalculateIntereventDisplacementMetricsTests(unittest.TestCase):
             push_speed=3.5,
         )
 
-        self.assertEqual(result, {"D_Push": {"valid": False}})
+        self.assertEqual(
+            result,
+            {
+                "D_Push": {"valid": False},
+                "D_max": {"valid": False},
+            },
+        )
 
     def test_python_integer_and_numpy_scalar_inputs_return_python_float(self):
         integer_result = calculate_interevent_displacement_metrics(
@@ -139,6 +149,155 @@ class CalculateIntereventDisplacementMetricsTests(unittest.TestCase):
 
         self.assertIsNot(first, second)
         self.assertIsNot(first["D_Push"], second["D_Push"])
+        self.assertIsNot(first["D_max"], second["D_max"])
+
+    def test_d_max_smooths_full_run_before_delayed_sample_difference(self):
+        time = np.arange(5.0)
+        lvdt = np.array([0.0, 0.0, 0.0, 9.0, 9.0])
+
+        result = calculate_interevent_displacement_metrics(
+            current_event_time=3.0,
+            previous_event_time=1.0,
+            push_speed=2.0,
+            time=time,
+            lvdt_signal=lvdt,
+            delay_sec=0.0,
+            lvdt_smooth_w=3,
+        )
+
+        self.assertEqual(result["D_max"], {"valid": True, "value": 6.0})
+        self.assertNotEqual(result["D_max"]["value"], abs(lvdt[3] - lvdt[1]))
+
+    def test_d_max_is_absolute_and_delay_selects_nearest_samples(self):
+        time = np.arange(6.0)
+        lvdt = np.array([0.0, 8.0, 6.0, 4.0, 2.0, 1.0])
+
+        result = calculate_interevent_displacement_metrics(
+            current_event_time=3.2,
+            previous_event_time=1.2,
+            push_speed=1.0,
+            time=time,
+            lvdt_signal=lvdt,
+            delay_sec=0.6,
+            lvdt_smooth_w=1,
+        )
+
+        self.assertEqual(result["D_max"], {"valid": True, "value": 4.0})
+
+    def test_nearest_sample_tie_selects_earlier_sample(self):
+        result = calculate_interevent_displacement_metrics(
+            current_event_time=2.5,
+            previous_event_time=0.5,
+            push_speed=1.0,
+            time=np.array([0.0, 1.0, 2.0, 3.0]),
+            lvdt_signal=np.array([1.0, 20.0, 5.0, 40.0]),
+            delay_sec=0.0,
+            lvdt_smooth_w=1,
+        )
+
+        self.assertEqual(result["D_max"]["value"], 4.0)
+
+    def test_optional_arrays_must_be_provided_together(self):
+        with self.assertRaisesRegex(
+            ValueError, "time and lvdt_signal must be provided together"
+        ):
+            calculate_interevent_displacement_metrics(
+                current_event_time=2.0,
+                previous_event_time=1.0,
+                push_speed=1.0,
+                time=np.array([0.0, 1.0, 2.0]),
+            )
+        with self.assertRaisesRegex(
+            ValueError, "time and lvdt_signal must be provided together"
+        ):
+            calculate_interevent_displacement_metrics(
+                current_event_time=2.0,
+                previous_event_time=1.0,
+                push_speed=1.0,
+                lvdt_signal=np.array([0.0, 1.0, 2.0]),
+            )
+
+    def test_out_of_range_target_only_invalidates_d_max(self):
+        for current, previous in ((5.0, 1.0), (2.0, -1.0), (5.0, -1.0)):
+            with self.subTest(current=current, previous=previous):
+                result = calculate_interevent_displacement_metrics(
+                    current_event_time=current,
+                    previous_event_time=previous,
+                    push_speed=2.0,
+                    time=np.array([0.0, 1.0, 2.0, 3.0]),
+                    lvdt_signal=np.array([0.0, 2.0, 4.0, 6.0]),
+                    delay_sec=0.0,
+                    lvdt_smooth_w=1,
+                )
+                self.assertTrue(result["D_Push"]["valid"])
+                self.assertEqual(result["D_max"], {"valid": False})
+
+    def test_invalid_run_arrays_are_rejected(self):
+        cases = (
+            ("empty", np.array([]), np.array([]), "not be empty"),
+            ("length", np.array([0.0, 1.0]), np.array([1.0]), "same length"),
+            ("time ndim", np.ones((2, 2)), np.ones(4), "time.*one-dimensional"),
+            ("lvdt ndim", np.arange(4.0), np.ones((2, 2)), "lvdt_signal.*one-dimensional"),
+            ("time finite", np.array([0.0, np.nan]), np.ones(2), "time.*finite"),
+            ("lvdt finite", np.arange(2.0), np.array([0.0, np.inf]), "lvdt_signal.*finite"),
+            ("descending", np.array([1.0, 0.0]), np.ones(2), "strictly increasing"),
+            ("duplicate", np.array([0.0, 0.0]), np.ones(2), "strictly increasing"),
+            ("time bool", np.array([False, True]), np.ones(2), "time"),
+            ("lvdt bool", np.arange(2.0), np.array([False, True]), "lvdt_signal"),
+        )
+        for label, time, lvdt, message in cases:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(ValueError, message):
+                    calculate_interevent_displacement_metrics(
+                        current_event_time=1.0,
+                        previous_event_time=0.0,
+                        push_speed=1.0,
+                        time=time,
+                        lvdt_signal=lvdt,
+                        delay_sec=0.0,
+                        lvdt_smooth_w=1,
+                    )
+
+    def test_invalid_delay_and_smoothing_window_are_rejected(self):
+        base = {
+            "current_event_time": 2.0,
+            "previous_event_time": 1.0,
+            "push_speed": 1.0,
+            "time": np.arange(4.0),
+            "lvdt_signal": np.arange(4.0),
+        }
+        for value in (True, np.array([0.0]), np.nan, np.inf):
+            with self.subTest(delay=value):
+                with self.assertRaisesRegex(ValueError, "delay_sec"):
+                    calculate_interevent_displacement_metrics(
+                        **base, delay_sec=value, lvdt_smooth_w=1
+                    )
+        for value in (0, -1, 3.0, True):
+            with self.subTest(window=value):
+                with self.assertRaisesRegex(ValueError, "lvdt_smooth_w"):
+                    calculate_interevent_displacement_metrics(
+                        **base, delay_sec=0.0, lvdt_smooth_w=value
+                    )
+
+    def test_numpy_parameters_and_input_arrays_are_not_modified(self):
+        time = np.arange(5.0)
+        lvdt = np.array([0.0, 1.0, 4.0, 9.0, 16.0])
+        original_time = time.copy()
+        original_lvdt = lvdt.copy()
+
+        result = calculate_interevent_displacement_metrics(
+            current_event_time=np.float64(3.0),
+            previous_event_time=np.float64(1.0),
+            push_speed=np.float64(2.0),
+            time=time,
+            lvdt_signal=lvdt,
+            delay_sec=np.float64(0.0),
+            lvdt_smooth_w=np.int64(1),
+        )
+
+        self.assertTrue(result["D_max"]["valid"])
+        np.testing.assert_array_equal(time, original_time)
+        np.testing.assert_array_equal(lvdt, original_lvdt)
 
 
 class CalculateEventDropMetricsTests(unittest.TestCase):

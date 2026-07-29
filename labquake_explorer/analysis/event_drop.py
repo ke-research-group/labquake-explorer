@@ -172,31 +172,85 @@ def calculate_interevent_displacement_metrics(
     current_event_time: float,
     previous_event_time: float | None,
     push_speed: float,
+    time: Any | None = None,
+    lvdt_signal: Any | None = None,
+    delay_sec: float = 0.05,
+    lvdt_smooth_w: int = 100,
 ) -> dict[str, dict[str, Any]]:
-    """Calculate schema-neutral metrics between two explicitly chosen events.
+    """Calculate schema-neutral displacement metrics between two events.
 
     The caller is responsible for selecting the previous event; this function
-    does not understand a run or event schema.  ``D_Push`` preserves the signed
-    event-time difference.  If ``previous_event_time`` is ``None``, the metric
-    is unavailable and ``{"valid": False}`` is returned for it.
+    does not understand a run or event schema. ``D_Push`` preserves the signed
+    event-time difference. ``D_max`` uses an explicitly supplied full-run LVDT
+    signal: the complete signal is smoothed first, then delayed nearest samples
+    are selected and their absolute difference is returned. If
+    ``previous_event_time`` is ``None``, both metrics are unavailable.
 
-    The output unit is the event-time unit multiplied by the push-speed unit.
+    Time, signal, and output units are defined by the caller's input contract.
     """
     current_time = _coerce_finite_scalar(
         current_event_time, "current_event_time"
     )
     speed = _coerce_finite_scalar(push_speed, "push_speed")
+    results = {
+        "D_Push": {"valid": False},
+        "D_max": {"valid": False},
+    }
     if previous_event_time is None:
-        return {"D_Push": {"valid": False}}
+        return results
     previous_time = _coerce_finite_scalar(
         previous_event_time, "previous_event_time"
     )
-    return {
-        "D_Push": {
-            "valid": True,
-            "value": float((current_time - previous_time) * speed),
-        }
+    results["D_Push"] = {
+        "valid": True,
+        "value": float((current_time - previous_time) * speed),
     }
+
+    if time is None and lvdt_signal is None:
+        return results
+    if time is None or lvdt_signal is None:
+        raise ValueError("time and lvdt_signal must be provided together")
+
+    time_array = _coerce_interevent_array(time, "time")
+    lvdt_array = _coerce_interevent_array(lvdt_signal, "lvdt_signal")
+    if time_array.size != lvdt_array.size:
+        raise ValueError("time and lvdt_signal must have the same length")
+    if time_array.size == 0:
+        raise ValueError("time and lvdt_signal must not be empty")
+    if not np.all(np.diff(time_array) > 0):
+        raise ValueError("time must be strictly increasing")
+
+    delay = _coerce_finite_scalar(delay_sec, "delay_sec")
+    if isinstance(lvdt_smooth_w, (bool, np.bool_)) or not isinstance(
+        lvdt_smooth_w, (int, np.integer)
+    ):
+        raise ValueError("lvdt_smooth_w must be a positive integer")
+    try:
+        smoothed_lvdt = moving_average(lvdt_array, lvdt_smooth_w)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "lvdt_smooth_w is not supported for lvdt_signal"
+        ) from exc
+
+    current_target = current_time + delay
+    previous_target = previous_time + delay
+    if (
+        current_target < time_array[0]
+        or current_target > time_array[-1]
+        or previous_target < time_array[0]
+        or previous_target > time_array[-1]
+    ):
+        return results
+
+    current_index = int(np.argmin(np.abs(time_array - current_target)))
+    previous_index = int(np.argmin(np.abs(time_array - previous_target)))
+    results["D_max"] = {
+        "valid": True,
+        "value": float(
+            abs(smoothed_lvdt[current_index] - smoothed_lvdt[previous_index])
+        ),
+    }
+    return results
 
 
 def calculate_trend_drop(
@@ -269,6 +323,23 @@ def _coerce_finite_scalar(value: Any, name: str) -> float:
     if not math.isfinite(result):
         raise ValueError(f"{name} must be a finite numeric scalar")
     return result
+
+
+def _coerce_interevent_array(values: Any, name: str) -> np.ndarray:
+    raw = np.asarray(values)
+    if raw.dtype.kind == "b":
+        raise ValueError(f"{name} must be a one-dimensional finite numeric array")
+    try:
+        array = np.asarray(values, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{name} must be a one-dimensional finite numeric array"
+        ) from exc
+    if array.ndim != 1:
+        raise ValueError(f"{name} must be one-dimensional")
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must contain only finite values")
+    return array
 
 
 def _coerce_window(values: Sequence[float], name: str) -> tuple[float, float]:
