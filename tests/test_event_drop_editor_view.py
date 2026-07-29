@@ -1,4 +1,4 @@
-"""Headless-safe tests for the single-signal event-drop preview view."""
+"""Headless-safe tests for the tau/mu event-drop preview view."""
 
 import copy
 import unittest
@@ -191,45 +191,44 @@ class PreviewCallTests(unittest.TestCase):
         view = EventDropEditorView.__new__(EventDropEditorView)
         view.event = event
         view.signal_candidates = find_signal_candidates(event)
-        view.metric_bindings = {"preview": None}
-        view.preview_result = None
+        view.metric_bindings = {"tau": None, "mu": None}
+        view.preview_results = {}
+        view.active_metric_role = None
         view.preview_parameters = None
         return view
 
-    def test_headless_view_has_preview_metric_binding(self):
+    def test_headless_view_has_tau_and_mu_metric_bindings(self):
         view = self.make_view({
             "time": np.array([0.0, 1.0]),
             "event_time": 0.5,
             "signal": np.array([1.0, 2.0]),
         })
 
-        self.assertEqual(view.metric_bindings, {"preview": None})
+        self.assertEqual(view.metric_bindings, {"tau": None, "mu": None})
 
     @mock.patch(
         "labquake_explorer.ui.views.event_drop_editor_view."
         "calculate_event_drop_metrics"
     )
-    def test_orchestrator_receives_single_selected_signal(self, calculator):
+    def test_orchestrator_receives_tau_and_mu_once_in_role_order(self, calculator):
         event = {
             "time": np.array([9.0, 9.5, 10.5, 11.0]),
             "event_time": 10.0,
-            "selected": np.array([5.0, 6.0, 2.0, 3.0]),
+            "tau_signal": np.array([5.0, 6.0, 2.0, 3.0]),
+            "mu_signal": np.array([0.5, 0.6, 0.2, 0.3]),
         }
-        expected_result = {
-            "valid": True,
-            "delta": 4.0,
-            "val_pre_0": 5.0,
-            "val_post_0": 1.0,
+        expected_results = {
+            "tau": {"valid": True, "delta": 4.0},
+            "mu": {"valid": False},
         }
-        calculator.return_value = {"selected": expected_result}
+        calculator.return_value = expected_results
         view = self.make_view(event)
-        view.metric_bindings["preview"] = "selected"
+        view.metric_bindings = {"tau": "tau_signal", "mu": "mu_signal"}
 
         with mock.patch(
             "labquake_explorer.analysis.event_drop.calculate_event_signal_drop"
         ) as direct_calculator:
-            result = view.calculate_preview(
-                "selected",
+            results = view.calculate_preview(
                 half_win=1.5,
                 points=(-1.0, -0.5, 0.5, 1.0),
                 smooth_w=9,
@@ -239,42 +238,62 @@ class PreviewCallTests(unittest.TestCase):
         call = calculator.call_args.kwargs
         self.assertIs(call["time"], event["time"])
         self.assertEqual(call["event_time"], 10.0)
-        self.assertEqual(list(call["signals"]), ["selected"])
-        self.assertIs(
-            call["signals"]["selected"], view.signal_candidates["selected"]
-        )
+        self.assertEqual(list(call["signals"]), ["tau", "mu"])
+        self.assertIs(call["signals"]["tau"], event["tau_signal"])
+        self.assertIs(call["signals"]["mu"], event["mu_signal"])
+        self.assertEqual(list(call["parameters"]), ["tau", "mu"])
+        self.assertIsNot(call["parameters"]["tau"], call["parameters"]["mu"])
         self.assertEqual(
-            call["parameters"],
+            call["parameters"]["tau"],
             {
-                "selected": {
-                    "half_win": 1.5,
-                    "points": (-1.0, -0.5, 0.5, 1.0),
-                    "smooth_w": 9,
-                }
+                "half_win": 1.5,
+                "points": (-1.0, -0.5, 0.5, 1.0),
+                "smooth_w": 9,
             },
         )
+        self.assertEqual(call["parameters"]["mu"], call["parameters"]["tau"])
         direct_calculator.assert_not_called()
-        self.assertIs(result, expected_result)
-        self.assertIs(view.preview_result, expected_result)
+        self.assertIs(results, expected_results)
+        self.assertIs(view.preview_results, expected_results)
 
     @mock.patch(
         "labquake_explorer.ui.views.event_drop_editor_view."
         "calculate_event_drop_metrics"
     )
-    def test_stale_binding_is_rejected_before_orchestration(self, calculator):
+    def test_each_single_role_uses_domain_role_as_orchestration_key(
+        self, calculator
+    ):
+        event = {
+            "time": np.array([-1.0, 1.0]),
+            "event_time": 0.0,
+            "shared": np.array([2.0, 1.0]),
+        }
+        calculator.return_value = {"mu": {"valid": False}}
+        view = self.make_view(event)
+        view.metric_bindings["mu"] = "shared"
+
+        view.calculate_preview(1.0, (-1.0, -0.5, 0.5, 1.0), None)
+
+        call = calculator.call_args.kwargs
+        self.assertEqual(list(call["signals"]), ["mu"])
+        self.assertIs(call["signals"]["mu"], event["shared"])
+        self.assertEqual(list(call["parameters"]), ["mu"])
+
+    @mock.patch(
+        "labquake_explorer.ui.views.event_drop_editor_view."
+        "calculate_event_drop_metrics"
+    )
+    def test_stale_tau_binding_is_rejected_before_orchestration(self, calculator):
         event = {
             "time": np.array([-1.0, -0.5, 0.5, 1.0]),
             "event_time": 0.0,
             "signal": np.array([4.0, 5.0, 1.0, 2.0]),
         }
         view = self.make_view(event)
-        view.metric_bindings["preview"] = "removed"
+        view.metric_bindings = {"tau": "removed", "mu": "signal"}
 
-        with self.assertRaisesRegex(
-            ValueError, "No available signal is bound to preview"
-        ):
+        with self.assertRaisesRegex(ValueError, "bound to tau"):
             view.calculate_preview(
-                "removed",
                 half_win=1.0,
                 points=(-1.0, -0.5, 0.5, 1.0),
                 smooth_w=None,
@@ -286,25 +305,19 @@ class PreviewCallTests(unittest.TestCase):
         "labquake_explorer.ui.views.event_drop_editor_view."
         "calculate_event_drop_metrics"
     )
-    def test_argument_must_match_preview_binding(self, calculator):
+    def test_stale_mu_binding_is_rejected_without_partial_calculation(
+        self, calculator
+    ):
         event = {
             "time": np.array([-1.0, -0.5, 0.5, 1.0]),
             "event_time": 0.0,
-            "first": np.array([4.0, 5.0, 1.0, 2.0]),
-            "second": np.array([3.0, 4.0, 2.0, 3.0]),
+            "signal": np.array([4.0, 5.0, 1.0, 2.0]),
         }
         view = self.make_view(event)
-        view.metric_bindings["preview"] = "first"
+        view.metric_bindings = {"tau": "signal", "mu": "removed"}
 
-        with self.assertRaisesRegex(
-            ValueError, "Selected signal does not match preview binding"
-        ):
-            view.calculate_preview(
-                "second",
-                half_win=1.0,
-                points=(-1.0, -0.5, 0.5, 1.0),
-                smooth_w=None,
-            )
+        with self.assertRaisesRegex(ValueError, "bound to mu"):
+            view.calculate_preview(1.0, (-1.0, -0.5, 0.5, 1.0), None)
 
         calculator.assert_not_called()
 
@@ -319,12 +332,11 @@ class PreviewCallTests(unittest.TestCase):
             "signal": np.array([4.0, 5.0, 1.0, 2.0]),
         }
         original = copy.deepcopy(event)
-        calculator.return_value = {"signal": {"valid": False}}
+        calculator.return_value = {"tau": {"valid": False}}
         view = self.make_view(event)
-        view.metric_bindings["preview"] = "signal"
+        view.metric_bindings["tau"] = "signal"
 
         view.calculate_preview(
-            "signal",
             half_win=1.0,
             points=(-1.0, -0.5, 0.5, 1.0),
             smooth_w=None,
@@ -343,16 +355,66 @@ class PreviewCallTests(unittest.TestCase):
         }
         view = self.make_view(event)
         view.data_manager = mock.Mock()
-        view.metric_bindings["preview"] = "signal"
+        view.metric_bindings["tau"] = "signal"
 
         view.calculate_preview(
-            "signal",
             half_win=1.0,
             points=(-1.0, -0.5, 0.5, 1.0),
             smooth_w=None,
         )
 
         view.data_manager.set_data.assert_not_called()
+
+    def test_recompute_formats_valid_and_invalid_metrics_independently(self):
+        view = self.make_view({
+            "time": np.array([-1.0, 1.0]),
+            "event_time": 0.0,
+            "tau_signal": np.array([2.0, 1.0]),
+            "mu_signal": np.array([0.2, 0.1]),
+        })
+        view.metric_bindings = {"tau": "tau_signal", "mu": "mu_signal"}
+        view.result_vars = {
+            role: {
+                key: FakeVariable()
+                for key in (
+                    "valid",
+                    "delta",
+                    "magnitude",
+                    "val_pre_0",
+                    "val_post_0",
+                )
+            }
+            for role in ("tau", "mu")
+        }
+        view.status_var = FakeVariable()
+        view._read_parameters = mock.Mock(return_value={
+            "half_win": 1.0,
+            "points": (-1.0, -0.5, 0.5, 1.0),
+            "smooth_w": None,
+        })
+        view.calculate_preview = mock.Mock(return_value={
+            "tau": {
+                "valid": True,
+                "delta": -2.5,
+                "val_pre_0": 1.0,
+                "val_post_0": 3.5,
+            },
+            "mu": {"valid": False},
+        })
+        view._plot_preview = mock.Mock()
+
+        view.recompute_preview()
+
+        view.calculate_preview.assert_called_once_with(
+            1.0, (-1.0, -0.5, 0.5, 1.0), None
+        )
+        self.assertEqual(view.result_vars["tau"]["valid"].get(), "True")
+        self.assertEqual(view.result_vars["tau"]["delta"].get(), "-2.5")
+        self.assertEqual(view.result_vars["tau"]["magnitude"].get(), "2.5")
+        self.assertEqual(view.result_vars["mu"]["valid"].get(), "False")
+        self.assertEqual(view.result_vars["mu"]["delta"].get(), "—")
+        self.assertEqual(view.status_var.get(), "Preview only — not saved")
+        view._plot_preview.assert_called_once_with()
 
 
 class PreviewPlotTests(unittest.TestCase):
@@ -369,7 +431,8 @@ class PreviewPlotTests(unittest.TestCase):
         view.signal_candidates = {
             "signal": np.array([5.0, 6.0, 1.0, 2.0]),
         }
-        view.signal_combobox = FakeWidget("signal")
+        view.metric_bindings = {"tau": "signal", "mu": None}
+        view.active_metric_role = "tau"
         view.parameter_vars = {
             "half_win": FakeVariable("2"),
             "pre_start": FakeVariable("-0.5"),
@@ -378,13 +441,15 @@ class PreviewPlotTests(unittest.TestCase):
             "post_end": FakeVariable("0.5"),
             "smooth_w": FakeVariable(""),
         }
-        view.preview_result = {
-            "valid": True,
-            "coeff_pre": np.array([1.0, 4.0]),
-            "coeff_post": np.array([2.0, 1.0]),
-            "delta": 3.0,
-            "val_pre_0": 4.0,
-            "val_post_0": 1.0,
+        view.preview_results = {
+            "tau": {
+                "valid": True,
+                "coeff_pre": np.array([1.0, 4.0]),
+                "coeff_post": np.array([2.0, 1.0]),
+                "delta": 3.0,
+                "val_pre_0": 4.0,
+                "val_post_0": 1.0,
+            }
         }
 
         view._plot_preview()
@@ -403,6 +468,49 @@ class PreviewPlotTests(unittest.TestCase):
             shaded_ranges.append((start, start + float(patch.get_width())))
         self.assertIn((-1.5, -0.5), shaded_ranges)
         self.assertIn((0.5, 1.5), shaded_ranges)
+
+    def test_active_metric_controls_raw_signal_and_fit_result(self):
+        view = EventDropEditorView.__new__(EventDropEditorView)
+        view.figure = Figure()
+        view.raw_ax = view.figure.add_subplot(211)
+        view.fit_ax = view.figure.add_subplot(212, sharex=view.raw_ax)
+        view.canvas = mock.Mock()
+        view.event = {
+            "time": np.array([-1.0, -0.5, 0.5, 1.0]),
+            "event_time": 0.0,
+        }
+        tau = np.array([10.0, 11.0, 7.0, 8.0])
+        mu = np.array([1.0, 1.1, 0.7, 0.8])
+        view.signal_candidates = {"tau_source": tau, "mu_source": mu}
+        view.metric_bindings = {"tau": "tau_source", "mu": "mu_source"}
+        view.active_metric_role = "mu"
+        view.preview_results = {
+            "tau": {
+                "valid": True,
+                "coeff_pre": np.array([1.0, 10.0]),
+                "coeff_post": np.array([1.0, 7.0]),
+            },
+            "mu": {
+                "valid": True,
+                "coeff_pre": np.array([2.0, 1.0]),
+                "coeff_post": np.array([3.0, 0.7]),
+            },
+        }
+        view.parameter_vars = {
+            "half_win": FakeVariable("1"),
+            "pre_start": FakeVariable("-1"),
+            "pre_end": FakeVariable("-0.5"),
+            "post_start": FakeVariable("0.5"),
+            "post_end": FakeVariable("1"),
+            "smooth_w": FakeVariable(""),
+        }
+
+        view._plot_preview()
+
+        np.testing.assert_array_equal(view.raw_ax.lines[0].get_ydata(), mu)
+        fit_lines = {line.get_label(): line for line in view.fit_ax.lines}
+        self.assertAlmostEqual(fit_lines["Pre fit"].get_ydata()[-1], 1.0)
+        self.assertAlmostEqual(fit_lines["Post fit"].get_ydata()[0], 0.7)
 
 
 class EventSwitchingTests(unittest.TestCase):
@@ -434,17 +542,19 @@ class EventSwitchingTests(unittest.TestCase):
         view = EventDropEditorView.__new__(EventDropEditorView)
         view.run_idx = 2
         view.data_manager = FakeDataManager()
-        view.preview_result = {"valid": True}
+        view.preview_results = {"tau": {"valid": True}}
         view.preview_parameters = {"half_win": 1.0}
-        view.metric_bindings = {"preview": "first"}
+        view.metric_bindings = {"tau": "first", "mu": "first"}
+        view.active_metric_role = "tau"
 
         view._set_event(1)
 
         self.assertIs(view.event, second_event)
         self.assertEqual(list(view.signal_candidates), ["second"])
-        self.assertIsNone(view.preview_result)
+        self.assertEqual(view.preview_results, {})
         self.assertIsNone(view.preview_parameters)
-        self.assertIsNone(view.metric_bindings["preview"])
+        self.assertEqual(view.metric_bindings, {"tau": None, "mu": None})
+        self.assertIsNone(view.active_metric_role)
         self.assertEqual(
             view.data_manager.paths,
             ["runs/[2]/events/[1]"],
@@ -491,8 +601,10 @@ class DraggableWindowTests(unittest.TestCase):
         view.signal_candidates = {
             "signal": np.array([5.0, 6.0, 1.0, 2.0]),
         }
-        view.metric_bindings = {"preview": "signal"}
-        view.signal_combobox = FakeWidget("signal")
+        view.metric_bindings = {"tau": "signal", "mu": None}
+        view.active_metric_role = "tau"
+        view.tau_signal_combobox = FakeWidget("signal")
+        view.mu_signal_combobox = FakeWidget()
         view.parameter_vars = {
             "half_win": FakeVariable("2"),
             "pre_start": FakeVariable("-0.5"),
@@ -502,11 +614,20 @@ class DraggableWindowTests(unittest.TestCase):
             "smooth_w": FakeVariable(""),
         }
         view.result_vars = {
-            key: FakeVariable("old")
-            for key in ("valid", "delta", "magnitude", "val_pre_0", "val_post_0")
+            role: {
+                key: FakeVariable("old")
+                for key in (
+                    "valid",
+                    "delta",
+                    "magnitude",
+                    "val_pre_0",
+                    "val_post_0",
+                )
+            }
+            for role in ("tau", "mu")
         }
         view.status_var = FakeVariable()
-        view.preview_result = None
+        view.preview_results = {}
         view.preview_parameters = None
         view._endpoint_draggables = {}
         view._active_endpoint = None
@@ -569,21 +690,25 @@ class DraggableWindowTests(unittest.TestCase):
         self, calculator
     ):
         view = self.make_plot_view()
-        view.preview_result = {"valid": True}
+        view.preview_results = {"tau": {"valid": True}}
         view.preview_parameters = {"half_win": 2.0}
         view.data_manager = mock.Mock()
 
         view._on_endpoint_changed("pre_start", -0.83456789)
 
         self.assertEqual(view.parameter_vars["pre_start"].get(), "-0.834568")
-        self.assertIsNone(view.preview_result)
+        self.assertEqual(view.preview_results, {})
         self.assertIsNone(view.preview_parameters)
         self.assertEqual(
             view.status_var.get(),
             "Fitting windows changed — recompute preview",
         )
         self.assertTrue(
-            all(variable.get() == "—" for variable in view.result_vars.values())
+            all(
+                variable.get() == "—"
+                for role_vars in view.result_vars.values()
+                for variable in role_vars.values()
+            )
         )
         calculator.assert_not_called()
         view.data_manager.set_data.assert_not_called()
@@ -644,9 +769,11 @@ class DraggableWindowTests(unittest.TestCase):
             },
             original_controls,
         )
-        self.assertEqual(view.signal_combobox.get(), "")
+        self.assertEqual(view.tau_signal_combobox.get(), "")
+        self.assertEqual(view.mu_signal_combobox.get(), "")
         self.assertEqual(view.preview_button.options["state"], "disabled")
-        self.assertIsNone(view.metric_bindings["preview"])
+        self.assertEqual(view.metric_bindings, {"tau": None, "mu": None})
+        self.assertIsNone(view.active_metric_role)
         self.assertEqual(
             float(view._endpoint_draggables["pre_start"].line.get_xdata()[0]),
             -0.5,
@@ -667,7 +794,7 @@ class DraggableWindowTests(unittest.TestCase):
             for key, variable in view.parameter_vars.items()
         }
 
-        view.on_signal_changed()
+        view.on_tau_signal_changed()
 
         self.assertEqual(
             {
@@ -776,15 +903,23 @@ class SignalSelectionStateTests(unittest.TestCase):
             "first": np.array([1.0, 2.0]),
             "second": np.array([3.0, 4.0]),
         }
-        view.metric_bindings = {"preview": None}
-        view.signal_combobox = FakeWidget()
+        view.metric_bindings = {"tau": None, "mu": None}
+        view.active_metric_role = None
+        view.tau_signal_combobox = FakeWidget()
+        view.mu_signal_combobox = FakeWidget()
         view.preview_button = FakeWidget()
         view.status_var = FakeVariable()
         view.result_vars = {
-            "valid": FakeVariable(),
-            "delta": FakeVariable(),
+            role: {
+                "valid": FakeVariable(),
+                "delta": FakeVariable(),
+            }
+            for role in ("tau", "mu")
         }
-        view.preview_result = {"valid": True}
+        view.preview_results = {
+            "tau": {"valid": True},
+            "mu": {"valid": True},
+        }
         view.preview_parameters = {"half_win": 1.0}
         view._plot_preview = mock.Mock()
         return view
@@ -794,32 +929,66 @@ class SignalSelectionStateTests(unittest.TestCase):
 
         view._refresh_event_widgets()
 
-        self.assertEqual(view.signal_combobox.options["values"], ["first", "second"])
-        self.assertEqual(view.signal_combobox.get(), "")
+        self.assertEqual(
+            view.tau_signal_combobox.options["values"], ["first", "second"]
+        )
+        self.assertEqual(
+            view.mu_signal_combobox.options["values"], ["first", "second"]
+        )
+        self.assertEqual(view.tau_signal_combobox.get(), "")
+        self.assertEqual(view.mu_signal_combobox.get(), "")
         self.assertEqual(view.preview_button.options["state"], "disabled")
-        self.assertIsNone(view.metric_bindings["preview"])
+        self.assertEqual(view.metric_bindings, {"tau": None, "mu": None})
 
-    def test_explicit_valid_selection_enables_preview_and_clears_old_result(self):
+    def test_tau_selection_only_updates_tau_and_does_not_analyze(self):
         view = self.make_view()
-        view.signal_combobox.set("second")
+        view.tau_signal_combobox.set("second")
 
-        view.on_signal_changed()
+        view.on_tau_signal_changed()
 
         self.assertEqual(view.preview_button.options["state"], "normal")
-        self.assertEqual(view.metric_bindings["preview"], "second")
-        self.assertIsNone(view.preview_result)
+        self.assertEqual(view.metric_bindings, {"tau": "second", "mu": None})
+        self.assertEqual(view.preview_results, {"mu": {"valid": True}})
+        self.assertEqual(view.active_metric_role, "tau")
         self.assertIsNone(view.preview_parameters)
 
-    def test_blank_or_invalid_selection_clears_binding_and_disables_preview(self):
+    def test_mu_selection_only_updates_mu_and_same_signal_is_allowed(self):
         view = self.make_view()
-        view.metric_bindings["preview"] = "first"
-        view.signal_combobox.set("missing")
+        view.metric_bindings["tau"] = "first"
+        view.tau_signal_combobox.set("first")
+        view.mu_signal_combobox.set("first")
 
-        view.on_signal_changed()
+        view.on_mu_signal_changed()
 
-        self.assertIsNone(view.metric_bindings["preview"])
+        self.assertEqual(view.metric_bindings, {"tau": "first", "mu": "first"})
+        self.assertEqual(view.active_metric_role, "mu")
+        self.assertEqual(view.preview_button.options["state"], "normal")
+
+    def test_clearing_one_role_preserves_other_binding_and_result(self):
+        view = self.make_view()
+        view.metric_bindings = {"tau": "first", "mu": "second"}
+        view.tau_signal_combobox.set("first")
+        view.mu_signal_combobox.set("missing")
+        view.active_metric_role = "mu"
+
+        view.on_mu_signal_changed()
+
+        self.assertEqual(view.metric_bindings, {"tau": "first", "mu": None})
+        self.assertEqual(view.preview_results, {"tau": {"valid": True}})
+        self.assertEqual(view.active_metric_role, "tau")
+        self.assertEqual(view.preview_button.options["state"], "normal")
+
+    def test_clearing_both_roles_disables_preview(self):
+        view = self.make_view()
+        view.metric_bindings = {"tau": "first", "mu": None}
+        view.preview_results = {"tau": {"valid": True}}
+        view.tau_signal_combobox.set("")
+
+        view.on_tau_signal_changed()
+
+        self.assertEqual(view.metric_bindings, {"tau": None, "mu": None})
         self.assertEqual(view.preview_button.options["state"], "disabled")
-        self.assertIsNone(view.preview_result)
+        self.assertEqual(view.preview_results, {})
         self.assertIsNone(view.preview_parameters)
 
 
