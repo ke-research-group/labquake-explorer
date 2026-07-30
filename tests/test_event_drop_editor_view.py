@@ -13,7 +13,9 @@ from labquake_explorer.ui.views.event_drop_editor_view import (
     EventDropEditorView,
     _DraggableVerticalLine,
     find_signal_candidates,
+    format_interevent_result,
     format_preview_result,
+    parse_interevent_parameters,
     parse_preview_parameters,
     parse_smooth_window,
 )
@@ -1364,6 +1366,501 @@ class FakeVariable:
 
     def get(self):
         return self.value
+
+
+class IntereventParameterAndFormattingTests(unittest.TestCase):
+    def test_interevent_parameters_accept_finite_signed_values(self):
+        for speed, delay in (("3.508", "0.05"), ("-2", "-0.5"), ("0", "0")):
+            with self.subTest(speed=speed, delay=delay):
+                result = parse_interevent_parameters(speed, delay, "100")
+                self.assertIsInstance(result["push_speed"], float)
+                self.assertIsInstance(result["delay_sec"], float)
+                self.assertIsInstance(result["lvdt_smooth_w"], int)
+                self.assertEqual(result["lvdt_smooth_w"], 100)
+
+    def test_interevent_parameters_reject_invalid_numeric_text(self):
+        for name, values in (
+            ("push_speed", ("", "text", "nan", "inf", "-inf")),
+            ("delay_sec", ("", "text", "nan", "inf", "-inf")),
+        ):
+            for value in values:
+                arguments = {
+                    "push_speed": "3.508",
+                    "delay_sec": "0.05",
+                    "lvdt_smooth_w": "100",
+                }
+                arguments[name] = value
+                with self.subTest(name=name, value=value):
+                    with self.assertRaisesRegex(ValueError, name):
+                        parse_interevent_parameters(**arguments)
+
+    def test_interevent_smoothing_requires_positive_integer_text(self):
+        for value in ("", "0", "-1", "1.0", "text", "True", "false"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "lvdt_smooth_w"):
+                    parse_interevent_parameters("1", "0", value)
+
+    def test_interevent_result_format_preserves_signed_value(self):
+        self.assertEqual(
+            format_interevent_result({"valid": True, "value": -2.5}),
+            {"valid": "True", "value": "-2.5"},
+        )
+        self.assertEqual(
+            format_interevent_result({"valid": False}),
+            {"valid": "False", "value": "—"},
+        )
+
+
+class IntereventPreviewTests(unittest.TestCase):
+    @staticmethod
+    def make_view():
+        view = EventDropEditorView.__new__(EventDropEditorView)
+        view.current_event_time = 4.0
+        view.previous_event_time = 2.0
+        view.run_data = None
+        view.full_run_signal_candidates = []
+        view.metric_bindings = {"tau": None, "mu": None, "lvdt": None}
+        view.interevent_bindings = {"reference": None}
+        view.interevent_preview_results = {}
+        view.interevent_preview_parameters = None
+        view.interevent_parameter_vars = {
+            "push_speed": FakeVariable("3.508"),
+            "delay_sec": FakeVariable("0.05"),
+            "lvdt_smooth_w": FakeVariable("100"),
+        }
+        view.interevent_result_vars = {
+            metric: {
+                "valid": FakeVariable("—"),
+                "value": FakeVariable("—"),
+            }
+            for metric in ("D_Push", "D_max", "D_reference")
+        }
+        view.interevent_status_var = FakeVariable("Preview only — not saved")
+        view.reference_signal_combobox = FakeWidget("")
+        view.interevent_preview_button = FakeWidget()
+        view.preview_results = {"tau": {"valid": True}}
+        view.preview_parameters = {"tau": {"half_win": 1.5}}
+        view.result_vars = {"lvdt": {"valid": FakeVariable("True")}}
+        view.slip_rows = []
+        return view
+
+    def test_constructor_initializes_separate_interevent_state(self):
+        parent = mock.Mock()
+        parent.root = mock.Mock()
+        parent.data_manager = mock.Mock()
+        with (
+            mock.patch.object(
+                EventDropEditorView.__bases__[0], "__init__", return_value=None
+            ),
+            mock.patch.object(EventDropEditorView, "title"),
+            mock.patch.object(EventDropEditorView, "protocol"),
+            mock.patch.object(EventDropEditorView, "_set_event"),
+            mock.patch.object(EventDropEditorView, "_create_controls"),
+            mock.patch.object(EventDropEditorView, "_create_figure"),
+            mock.patch.object(EventDropEditorView, "_initialize_event_selector"),
+            mock.patch.object(EventDropEditorView, "_refresh_event_widgets"),
+        ):
+            view = EventDropEditorView(parent, 2, 3)
+
+        self.assertEqual(view.interevent_bindings, {"reference": None})
+        self.assertEqual(view.interevent_preview_results, {})
+        self.assertIsNone(view.interevent_preview_parameters)
+        self.assertNotIn("reference", view.metric_bindings)
+        self.assertEqual(view.slip_bindings, [])
+
+    @mock.patch(
+        "labquake_explorer.ui.views.event_drop_editor_view."
+        "calculate_interevent_displacement_metrics"
+    )
+    def test_d_push_only_passes_no_run_context_and_calls_once(self, calculator):
+        calculator.return_value = {
+            "D_Push": {"valid": True, "value": 7.016},
+            "D_max": {"valid": False},
+            "D_reference": {"valid": False},
+        }
+        view = self.make_view()
+
+        result = view.calculate_interevent_preview()
+
+        self.assertIs(result, calculator.return_value)
+        calculator.assert_called_once_with(
+            current_event_time=4.0,
+            previous_event_time=2.0,
+            push_speed=3.508,
+            time=None,
+            lvdt_signal=None,
+            reference_displacement_signal=None,
+            delay_sec=0.05,
+            lvdt_smooth_w=100,
+        )
+        self.assertIs(view.interevent_preview_results, result)
+        self.assertEqual(
+            view.interevent_preview_parameters,
+            {
+                "push_speed": 3.508,
+                "delay_sec": 0.05,
+                "lvdt_smooth_w": 100,
+            },
+        )
+
+    @mock.patch(
+        "labquake_explorer.ui.views.event_drop_editor_view."
+        "calculate_interevent_displacement_metrics"
+    )
+    def test_lvdt_only_uses_full_run_objects_not_event_array(self, calculator):
+        full_time = np.arange(5.0)
+        full_lvdt = np.arange(5.0) * 2
+        event_lvdt = np.array([99.0, 100.0])
+        view = self.make_view()
+        view.run_data = {"time": full_time, "chosen": full_lvdt}
+        view.metric_bindings["lvdt"] = "chosen"
+        view.signal_candidates = {"chosen": event_lvdt}
+        original_run = {key: value.copy() for key, value in view.run_data.items()}
+        original_event_signal = event_lvdt.copy()
+        calculator.return_value = {
+            "D_Push": {"valid": True, "value": 1.0},
+            "D_max": {"valid": True, "value": 2.0},
+            "D_reference": {"valid": False},
+        }
+
+        view.calculate_interevent_preview()
+
+        arguments = calculator.call_args.kwargs
+        self.assertIs(arguments["time"], full_time)
+        self.assertIs(arguments["lvdt_signal"], full_lvdt)
+        self.assertIsNot(arguments["lvdt_signal"], event_lvdt)
+        self.assertIsNone(arguments["reference_displacement_signal"])
+        calculator.assert_called_once()
+        for key, original in original_run.items():
+            np.testing.assert_array_equal(view.run_data[key], original)
+        np.testing.assert_array_equal(event_lvdt, original_event_signal)
+
+    @mock.patch(
+        "labquake_explorer.ui.views.event_drop_editor_view."
+        "calculate_interevent_displacement_metrics"
+    )
+    def test_reference_only_and_dual_signal_preserve_identity(self, calculator):
+        full_time = np.arange(5.0)
+        lvdt = np.arange(5.0)
+        reference = np.arange(5.0) * 3
+        view = self.make_view()
+        view.run_data = {
+            "time": full_time,
+            "lvdt_key": lvdt,
+            "reference_key": reference,
+        }
+        view.interevent_bindings["reference"] = "reference_key"
+        calculator.return_value = {
+            "D_Push": {"valid": True, "value": 1.0},
+            "D_max": {"valid": False},
+            "D_reference": {"valid": True, "value": 3.0},
+        }
+
+        view.calculate_interevent_preview()
+        first_arguments = calculator.call_args.kwargs
+        self.assertIs(first_arguments["time"], full_time)
+        self.assertIsNone(first_arguments["lvdt_signal"])
+        self.assertIs(
+            first_arguments["reference_displacement_signal"], reference
+        )
+
+        calculator.reset_mock()
+        view.metric_bindings["lvdt"] = "lvdt_key"
+        view.calculate_interevent_preview()
+        second_arguments = calculator.call_args.kwargs
+        self.assertIs(second_arguments["time"], full_time)
+        self.assertIs(second_arguments["lvdt_signal"], lvdt)
+        self.assertIs(
+            second_arguments["reference_displacement_signal"], reference
+        )
+        calculator.assert_called_once()
+
+    @mock.patch(
+        "labquake_explorer.ui.views.event_drop_editor_view."
+        "calculate_interevent_displacement_metrics"
+    )
+    def test_missing_full_run_bindings_do_not_fallback(self, calculator):
+        fallback = np.arange(4.0)
+        reference = np.arange(4.0) + 10
+        event_lvdt = np.array([1.0, 2.0])
+        view = self.make_view()
+        view.run_data = {
+            "time": np.arange(4.0),
+            "LP_displacement": fallback,
+            "reference": reference,
+        }
+        view.metric_bindings["lvdt"] = "event_only"
+        view.interevent_bindings["reference"] = "reference"
+        view.signal_candidates = {"event_only": event_lvdt}
+        calculator.return_value = {
+            "D_Push": {"valid": True, "value": 1.0},
+            "D_max": {"valid": False},
+            "D_reference": {"valid": True, "value": 2.0},
+        }
+
+        view.calculate_interevent_preview()
+
+        arguments = calculator.call_args.kwargs
+        self.assertIsNone(arguments["lvdt_signal"])
+        self.assertIs(
+            arguments["reference_displacement_signal"], reference
+        )
+        self.assertIsNot(arguments["lvdt_signal"], fallback)
+        self.assertIsNot(arguments["lvdt_signal"], event_lvdt)
+
+    @mock.patch(
+        "labquake_explorer.ui.views.event_drop_editor_view."
+        "calculate_interevent_displacement_metrics"
+    )
+    def test_context_errors_prevent_analysis_without_touching_event_preview(
+        self, calculator
+    ):
+        view = self.make_view()
+        event_results = view.preview_results
+        view.current_event_time = None
+        with self.assertRaisesRegex(ValueError, "Current event"):
+            view.calculate_interevent_preview()
+        calculator.assert_not_called()
+        self.assertIs(view.preview_results, event_results)
+
+        view.current_event_time = 4.0
+        view.run_data = {"selected": np.arange(3.0)}
+        view.interevent_bindings["reference"] = "selected"
+        with self.assertRaisesRegex(ValueError, "Full-run time"):
+            view.calculate_interevent_preview()
+        calculator.assert_not_called()
+
+    @mock.patch(
+        "labquake_explorer.ui.views.event_drop_editor_view."
+        "calculate_interevent_displacement_metrics"
+    )
+    def test_first_event_calls_analysis_and_displays_unavailable(
+        self, calculator
+    ):
+        calculator.return_value = {
+            "D_Push": {"valid": False},
+            "D_max": {"valid": False},
+            "D_reference": {"valid": False},
+        }
+        view = self.make_view()
+        view.previous_event_time = None
+
+        with mock.patch(
+            "labquake_explorer.ui.views.event_drop_editor_view."
+            "messagebox.showerror"
+        ) as showerror:
+            view.recompute_interevent_preview()
+
+        calculator.assert_called_once()
+        showerror.assert_not_called()
+        for metric in ("D_Push", "D_max", "D_reference"):
+            self.assertEqual(
+                view.interevent_result_vars[metric]["valid"].get(), "False"
+            )
+            self.assertEqual(
+                view.interevent_result_vars[metric]["value"].get(), "—"
+            )
+        self.assertEqual(
+            view.interevent_status_var.get(),
+            "No previous event with a finite event_time",
+        )
+
+    @mock.patch(
+        "labquake_explorer.ui.views.event_drop_editor_view."
+        "calculate_interevent_displacement_metrics"
+    )
+    def test_recompute_formats_mixed_results_and_handles_value_error(
+        self, calculator
+    ):
+        view = self.make_view()
+        calculator.return_value = {
+            "D_Push": {"valid": True, "value": -2.0},
+            "D_max": {"valid": False},
+            "D_reference": {"valid": True, "value": 4.5},
+        }
+        view.recompute_interevent_preview()
+        self.assertEqual(
+            view.interevent_result_vars["D_Push"]["value"].get(), "-2"
+        )
+        self.assertEqual(
+            view.interevent_result_vars["D_max"]["value"].get(), "—"
+        )
+        self.assertEqual(
+            view.interevent_result_vars["D_reference"]["value"].get(), "4.5"
+        )
+
+        event_results = view.preview_results
+        calculator.side_effect = ValueError("bad run array")
+        with mock.patch(
+            "labquake_explorer.ui.views.event_drop_editor_view."
+            "messagebox.showerror"
+        ) as showerror:
+            view.recompute_interevent_preview()
+        self.assertEqual(view.interevent_preview_results, {})
+        self.assertIsNone(view.interevent_preview_parameters)
+        self.assertIs(view.preview_results, event_results)
+        showerror.assert_called_once_with(
+            "Inter-event displacement", "bad run array"
+        )
+
+    def test_clear_and_metric_invalidation_are_isolated(self):
+        view = self.make_view()
+        view.interevent_preview_results = {
+            "D_Push": {"valid": True},
+            "D_max": {"valid": True},
+            "D_reference": {"valid": True},
+        }
+        for metric in view.interevent_result_vars:
+            view.interevent_result_vars[metric]["valid"].set("True")
+            view.interevent_result_vars[metric]["value"].set("1")
+        event_results = view.preview_results
+
+        view._invalidate_interevent_preview(("D_max",), "changed")
+
+        self.assertIn("D_Push", view.interevent_preview_results)
+        self.assertNotIn("D_max", view.interevent_preview_results)
+        self.assertIn("D_reference", view.interevent_preview_results)
+        self.assertEqual(
+            view.interevent_result_vars["D_max"]["value"].get(), "—"
+        )
+        self.assertEqual(
+            view.interevent_result_vars["D_Push"]["value"].get(), "1"
+        )
+        self.assertIs(view.preview_results, event_results)
+
+        view._clear_interevent_result_display()
+        for metric in view.interevent_result_vars:
+            self.assertEqual(
+                view.interevent_result_vars[metric]["valid"].get(), "—"
+            )
+
+    def test_parameter_invalidation_matrix_does_not_analyze(self):
+        expected = {
+            "push_speed": {"D_max", "D_reference"},
+            "delay_sec": {"D_Push"},
+            "lvdt_smooth_w": {"D_Push", "D_reference"},
+        }
+        for parameter, remaining in expected.items():
+            with self.subTest(parameter=parameter):
+                view = self.make_view()
+                view.interevent_preview_results = {
+                    metric: {"valid": True}
+                    for metric in ("D_Push", "D_max", "D_reference")
+                }
+                with mock.patch(
+                    "labquake_explorer.ui.views.event_drop_editor_view."
+                    "calculate_interevent_displacement_metrics"
+                ) as calculator:
+                    view._on_interevent_parameter_changed(parameter)
+                self.assertEqual(
+                    set(view.interevent_preview_results), remaining
+                )
+                calculator.assert_not_called()
+                self.assertEqual(
+                    view.preview_results, {"tau": {"valid": True}}
+                )
+
+    def test_event_local_endpoint_invalidation_does_not_clear_d_results(self):
+        view = self.make_view()
+        view.active_metric_role = "tau"
+        view.preview_results = {
+            "tau": {"valid": True},
+            "mu": {"valid": True},
+        }
+        view.preview_parameters = {"tau": {}}
+        view.status_var = FakeVariable()
+        view._clear_result_display = mock.Mock()
+        view.interevent_preview_results = {
+            metric: {"valid": True}
+            for metric in ("D_Push", "D_max", "D_reference")
+        }
+        original_d_results = view.interevent_preview_results.copy()
+
+        view._invalidate_preview()
+
+        self.assertEqual(
+            view.interevent_preview_results, original_d_results
+        )
+
+    def test_reference_binding_changes_only_reference_result(self):
+        view = self.make_view()
+        view.full_run_signal_candidates = ["same"]
+        view.metric_bindings["lvdt"] = "same"
+        view.reference_signal_combobox.set("same")
+        view.interevent_preview_results = {
+            "D_Push": {"valid": True},
+            "D_max": {"valid": True},
+            "D_reference": {"valid": True},
+        }
+
+        view.on_reference_signal_changed()
+
+        self.assertEqual(view.interevent_bindings, {"reference": "same"})
+        self.assertEqual(
+            set(view.interevent_preview_results), {"D_Push", "D_max"}
+        )
+        self.assertEqual(view.preview_results, {"tau": {"valid": True}})
+
+        view.reference_signal_combobox.set("stale")
+        view.on_reference_signal_changed()
+        self.assertIsNone(view.interevent_bindings["reference"])
+
+    def test_lvdt_binding_invalidates_d_max_but_tau_does_not(self):
+        view = self.make_view()
+        view.signal_candidates = {"signal": np.arange(2.0)}
+        view.lvdt_signal_combobox = FakeWidget("signal")
+        view.tau_signal_combobox = FakeWidget("signal")
+        view.preview_button = FakeWidget()
+        view.status_var = FakeVariable()
+        view.raw_ax = mock.Mock()
+        view.fit_ax = mock.Mock()
+        view.canvas = mock.Mock()
+        view._plot_preview = mock.Mock()
+        view._clear_result_display = mock.Mock()
+        view.interevent_preview_results = {
+            "D_Push": {"valid": True},
+            "D_max": {"valid": True},
+            "D_reference": {"valid": True},
+        }
+
+        view.on_lvdt_signal_changed()
+        self.assertNotIn("D_max", view.interevent_preview_results)
+        self.assertIn("D_Push", view.interevent_preview_results)
+        self.assertIn("D_reference", view.interevent_preview_results)
+
+        view.interevent_preview_results["D_max"] = {"valid": True}
+        view.on_tau_signal_changed()
+        self.assertIn("D_max", view.interevent_preview_results)
+
+    def test_refresh_widgets_preserves_valid_reference_and_clears_stale(self):
+        view = self.make_view()
+        view.current_event_time = 3.0
+        view.full_run_signal_candidates = ["kept", "other"]
+        view.interevent_bindings["reference"] = "kept"
+        view._refresh_interevent_widgets()
+        self.assertEqual(view.reference_signal_combobox.get(), "kept")
+        self.assertEqual(
+            view.reference_signal_combobox.options["values"],
+            ["kept", "other"],
+        )
+        self.assertEqual(
+            view.interevent_preview_button.options["state"], "normal"
+        )
+
+        view.full_run_signal_candidates = ["new"]
+        view._refresh_interevent_widgets()
+        self.assertIsNone(view.interevent_bindings["reference"])
+        self.assertEqual(view.reference_signal_combobox.get(), "")
+
+        view.current_event_time = None
+        view._refresh_interevent_widgets()
+        self.assertEqual(
+            view.interevent_preview_button.options["state"], "disabled"
+        )
+        self.assertEqual(
+            view.interevent_status_var.get(),
+            "Current event has no finite event_time",
+        )
 
 
 class DraggableWindowTests(unittest.TestCase):

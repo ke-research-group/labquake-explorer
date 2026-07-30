@@ -16,6 +16,7 @@ from matplotlib.figure import Figure
 
 from labquake_explorer.analysis.event_drop import (
     calculate_event_drop_metrics,
+    calculate_interevent_displacement_metrics,
     compute_half_win,
 )
 
@@ -214,6 +215,45 @@ def format_preview_result(result: Mapping[str, Any]) -> dict[str, str]:
     }
 
 
+def parse_interevent_parameters(
+    push_speed: str,
+    delay_sec: str,
+    lvdt_smooth_w: str,
+) -> dict[str, Any]:
+    """Parse the explicit controls used by inter-event displacement preview."""
+    try:
+        speed = float(push_speed)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("push_speed must be a finite number") from exc
+    if not math.isfinite(speed):
+        raise ValueError("push_speed must be a finite number")
+
+    try:
+        delay = float(delay_sec)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("delay_sec must be a finite number") from exc
+    if not math.isfinite(delay):
+        raise ValueError("delay_sec must be a finite number")
+
+    if re.fullmatch(r"[1-9]\d*", lvdt_smooth_w.strip()) is None:
+        raise ValueError("lvdt_smooth_w must be a positive integer")
+    return {
+        "push_speed": speed,
+        "delay_sec": delay,
+        "lvdt_smooth_w": int(lvdt_smooth_w),
+    }
+
+
+def format_interevent_result(result: Mapping[str, Any]) -> dict[str, str]:
+    """Format one inter-event result without changing its numeric value."""
+    if not result.get("valid", False):
+        return {"valid": "False", "value": "—"}
+    return {
+        "valid": "True",
+        "value": f"{float(result['value']):.6g}",
+    }
+
+
 class EventDropEditorView(tk.Toplevel):
     """Preview explicitly bound scalar and ordered slip event-drop signals."""
 
@@ -233,6 +273,11 @@ class EventDropEditorView(tk.Toplevel):
         self.current_event_time: float | None = None
         self.previous_event_time: float | None = None
         self.full_run_signal_candidates: list[str] = []
+        self.interevent_bindings: dict[str, str | None] = {
+            "reference": None,
+        }
+        self.interevent_preview_results: dict[str, dict[str, Any]] = {}
+        self.interevent_preview_parameters: dict[str, Any] | None = None
         self.metric_bindings: dict[str, str | None] = {
             "tau": None,
             "mu": None,
@@ -395,6 +440,97 @@ class EventDropEditorView(tk.Toplevel):
                 slip_parameters, textvariable=variable, width=11
             ).grid(row=1, column=column, padx=3)
 
+        self._create_interevent_controls()
+
+    def _create_interevent_controls(self) -> None:
+        section = ttk.LabelFrame(self, text="Inter-event displacement")
+        section.pack(side=tk.TOP, fill=tk.X, padx=6, pady=(4, 0))
+
+        defaults = {
+            "push_speed": "3.508",
+            "delay_sec": "0.05",
+            "lvdt_smooth_w": "100",
+        }
+        labels = (
+            ("Push speed", "push_speed"),
+            ("Delay", "delay_sec"),
+            ("LVDT smooth window", "lvdt_smooth_w"),
+        )
+        self.interevent_parameter_vars = {}
+        for column, (label, key) in enumerate(labels):
+            ttk.Label(section, text=label).grid(
+                row=0, column=2 * column, padx=(6, 2), pady=3
+            )
+            variable = tk.StringVar(value=defaults[key])
+            self.interevent_parameter_vars[key] = variable
+            ttk.Entry(section, textvariable=variable, width=11).grid(
+                row=0, column=2 * column + 1, padx=(0, 6), pady=3
+            )
+
+        ttk.Label(section, text="Reference displacement signal").grid(
+            row=0, column=6, padx=(6, 2), pady=3
+        )
+        self.reference_signal_combobox = ttk.Combobox(
+            section, width=20, state="readonly"
+        )
+        self.reference_signal_combobox.grid(
+            row=0, column=7, padx=(0, 6), pady=3
+        )
+        self.reference_signal_combobox.bind(
+            "<<ComboboxSelected>>", self.on_reference_signal_changed
+        )
+        self.interevent_preview_button = ttk.Button(
+            section,
+            text="Preview D metrics",
+            command=self.recompute_interevent_preview,
+        )
+        self.interevent_preview_button.grid(
+            row=0, column=8, padx=(6, 3), pady=3
+        )
+
+        self.interevent_result_vars = {
+            metric: {
+                "valid": tk.StringVar(value="—"),
+                "value": tk.StringVar(value="—"),
+            }
+            for metric in ("D_Push", "D_max", "D_reference")
+        }
+        for row, metric in enumerate(
+            ("D_Push", "D_max", "D_reference"), start=1
+        ):
+            ttk.Label(section, text=metric).grid(
+                row=row, column=0, padx=(6, 10), pady=2, sticky="w"
+            )
+            ttk.Label(section, text="Valid:").grid(
+                row=row, column=1, padx=(3, 2), pady=2
+            )
+            ttk.Label(
+                section,
+                textvariable=self.interevent_result_vars[metric]["valid"],
+            ).grid(row=row, column=2, padx=(0, 8), pady=2)
+            ttk.Label(section, text="Value:").grid(
+                row=row, column=3, padx=(3, 2), pady=2
+            )
+            ttk.Label(
+                section,
+                textvariable=self.interevent_result_vars[metric]["value"],
+            ).grid(row=row, column=4, padx=(0, 8), pady=2)
+
+        self.interevent_status_var = tk.StringVar(
+            value="Preview only — not saved"
+        )
+        ttk.Label(section, textvariable=self.interevent_status_var).grid(
+            row=4, column=0, columnspan=9, padx=6, pady=(2, 3), sticky="w"
+        )
+
+        for name, variable in self.interevent_parameter_vars.items():
+            variable.trace_add(
+                "write",
+                lambda *args, parameter=name: (
+                    self._on_interevent_parameter_changed(parameter)
+                ),
+            )
+
     def _create_figure(self) -> None:
         self.figure = Figure(figsize=(9, 6), dpi=100)
         self.raw_ax = self.figure.add_subplot(211)
@@ -426,6 +562,8 @@ class EventDropEditorView(tk.Toplevel):
         self.active_metric_role = None
         self.preview_parameters = None
         self._refresh_interevent_context()
+        self.interevent_preview_results = {}
+        self.interevent_preview_parameters = None
 
     @staticmethod
     def _coerce_finite_event_time(value: Any) -> float | None:
@@ -550,6 +688,141 @@ class EventDropEditorView(tk.Toplevel):
             self._find_full_run_signal_candidates()
         )
 
+    def _clear_interevent_result_display(
+        self, metric: str | None = None
+    ) -> None:
+        result_vars = getattr(self, "interevent_result_vars", {})
+        metrics = (
+            (metric,)
+            if metric is not None
+            else ("D_Push", "D_max", "D_reference")
+        )
+        for metric_name in metrics:
+            for variable in result_vars.get(metric_name, {}).values():
+                variable.set("—")
+
+    def _invalidate_interevent_preview(
+        self, metrics: tuple[str, ...], status: str
+    ) -> None:
+        results = getattr(self, "interevent_preview_results", {})
+        invalidated = False
+        for metric in metrics:
+            if metric in results:
+                invalidated = True
+                results.pop(metric, None)
+            self._clear_interevent_result_display(metric)
+        if invalidated:
+            self.interevent_preview_parameters = None
+        status_var = getattr(self, "interevent_status_var", None)
+        if status_var is not None:
+            status_var.set(status)
+
+    def _on_interevent_parameter_changed(self, parameter_name: str) -> None:
+        metrics_by_parameter = {
+            "push_speed": ("D_Push",),
+            "delay_sec": ("D_max", "D_reference"),
+            "lvdt_smooth_w": ("D_max",),
+        }
+        metrics = metrics_by_parameter.get(parameter_name)
+        if metrics is not None:
+            self._invalidate_interevent_preview(
+                metrics,
+                "Inter-event parameters changed — recompute preview",
+            )
+
+    def on_reference_signal_changed(self, event=None) -> None:
+        signal_name = self.reference_signal_combobox.get()
+        if signal_name in self.full_run_signal_candidates:
+            self.interevent_bindings["reference"] = signal_name
+        else:
+            self.interevent_bindings["reference"] = None
+        self._invalidate_interevent_preview(
+            ("D_reference",),
+            "Reference binding changed — recompute preview",
+        )
+
+    def _refresh_interevent_widgets(self) -> None:
+        combobox = getattr(self, "reference_signal_combobox", None)
+        button = getattr(self, "interevent_preview_button", None)
+        status_var = getattr(self, "interevent_status_var", None)
+        if combobox is None or button is None or status_var is None:
+            return
+
+        candidates = list(self.full_run_signal_candidates)
+        reference = self.interevent_bindings.get("reference")
+        if reference not in candidates:
+            reference = None
+            self.interevent_bindings["reference"] = None
+        combobox.configure(values=candidates)
+        combobox.set(reference or "")
+        self._clear_interevent_result_display()
+        if self.current_event_time is None:
+            button.configure(state="disabled")
+            status_var.set("Current event has no finite event_time")
+        else:
+            button.configure(state="normal")
+            status_var.set("Preview only — not saved")
+
+    def _read_interevent_parameters(self) -> dict[str, Any]:
+        variables = self.interevent_parameter_vars
+        return parse_interevent_parameters(
+            variables["push_speed"].get(),
+            variables["delay_sec"].get(),
+            variables["lvdt_smooth_w"].get(),
+        )
+
+    def calculate_interevent_preview(self) -> dict[str, dict[str, Any]]:
+        if self.current_event_time is None:
+            raise ValueError("Current event has no finite event_time")
+        parameters = self._read_interevent_parameters()
+        lvdt_signal = self._resolve_full_run_signal(
+            self.metric_bindings.get("lvdt")
+        )
+        reference_signal = self._resolve_full_run_signal(
+            self.interevent_bindings.get("reference")
+        )
+        has_run_signal = lvdt_signal is not None or reference_signal is not None
+        full_time = self._get_full_run_time() if has_run_signal else None
+        if has_run_signal and full_time is None:
+            raise ValueError(
+                "Full-run time is unavailable for the selected displacement signal"
+            )
+
+        results = calculate_interevent_displacement_metrics(
+            current_event_time=self.current_event_time,
+            previous_event_time=self.previous_event_time,
+            push_speed=parameters["push_speed"],
+            time=full_time,
+            lvdt_signal=lvdt_signal,
+            reference_displacement_signal=reference_signal,
+            delay_sec=parameters["delay_sec"],
+            lvdt_smooth_w=parameters["lvdt_smooth_w"],
+        )
+        self.interevent_preview_results = results
+        self.interevent_preview_parameters = parameters
+        return results
+
+    def recompute_interevent_preview(self) -> None:
+        try:
+            results = self.calculate_interevent_preview()
+            self._clear_interevent_result_display()
+            for metric in ("D_Push", "D_max", "D_reference"):
+                display = format_interevent_result(results[metric])
+                for key, variable in self.interevent_result_vars[metric].items():
+                    variable.set(display[key])
+            if self.previous_event_time is None:
+                self.interevent_status_var.set(
+                    "No previous event with a finite event_time"
+                )
+            else:
+                self.interevent_status_var.set("Preview only — not saved")
+        except ValueError as exc:
+            self.interevent_preview_results = {}
+            self.interevent_preview_parameters = None
+            self._clear_interevent_result_display()
+            self.interevent_status_var.set(str(exc))
+            messagebox.showerror("Inter-event displacement", str(exc))
+
     def _refresh_event_widgets(self) -> None:
         names = list(self.signal_candidates)
         self.metric_bindings = {"tau": None, "mu": None, "lvdt": None}
@@ -572,6 +845,7 @@ class EventDropEditorView(tk.Toplevel):
             self.preview_button.configure(state="disabled")
             self.status_var.set("No numeric one-dimensional event signal is available")
         self._clear_result_display()
+        self._refresh_interevent_widgets()
         self._plot_preview()
 
     def _clear_result_display(self, role: str | None = None) -> None:
@@ -642,6 +916,10 @@ class EventDropEditorView(tk.Toplevel):
 
     def on_lvdt_signal_changed(self, event=None) -> None:
         self._on_metric_signal_changed("lvdt", self.lvdt_signal_combobox)
+        self._invalidate_interevent_preview(
+            ("D_max",),
+            "LVDT binding changed — recompute preview",
+        )
 
     def _slip_role(self, index: int) -> str:
         return f"slip_{index + 1}"
