@@ -13,7 +13,7 @@ from labquake_explorer.utils.config import LabquakeExplorerConfig
 from labquake_explorer.ui.views import (
     SimplePlotView, PointsSelectorView, IndexPickerView,
     SlopeAnalyzerView, DynamicStrainArrivalPickerView, CZMFitterView,
-    EventAnalyzerView, EventDropEditorView
+    EventAnalyzerView, EventDropEditorView, EventKEditorView
 )
 
 class LabquakeExplorer:
@@ -67,6 +67,10 @@ class LabquakeExplorer:
         self.event_menu = tk.Menu(self.root, tearoff=0)
         self.event_menu.add_command(label="Analyze Event", command=self.analyze_event)
         self.event_menu.add_command(label="Analyze Event Drop", command=self.analyze_event_drop)
+        self.event_menu.add_command(
+            label="Analyze Loading Stiffness",
+            command=self.analyze_event_loading_stiffness,
+        )
         self.event_menu.add_command(label="Pick Arrivals", command=self.pick_strain_array_arrivals)
         self.event_menu.add_command(label="Fit Cohesive Zone Model", command=self.fit_cohesive_zone_model)
 
@@ -326,6 +330,14 @@ class LabquakeExplorer:
         run_idx, event_idx = self._extract_run_event_indices(path)
 
         view = EventDropEditorView(self, run_idx, event_idx)
+        self.set_window_icon(view)
+        self.child_windows.append(view)
+
+    def analyze_event_loading_stiffness(self):
+        path, item = self.get_full_path()
+        run_idx, event_idx = self._extract_run_event_indices(path)
+
+        view = EventKEditorView(self, run_idx, event_idx)
         self.set_window_icon(view)
         self.child_windows.append(view)
 
