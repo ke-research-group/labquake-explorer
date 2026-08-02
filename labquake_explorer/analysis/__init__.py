@@ -9,6 +9,7 @@ from .event_drop import (
     compute_half_win,
     moving_average,
 )
+from .k_stiffness import calculate_event_loading_stiffness
 
 __all__ = [
     "calculate_2pt_trend_drop",
@@ -18,4 +19,5 @@ __all__ = [
     "calculate_trend_drop",
     "compute_half_win",
     "moving_average",
+    "calculate_event_loading_stiffness",
 ]
