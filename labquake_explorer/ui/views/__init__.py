@@ -8,6 +8,7 @@ from labquake_explorer.ui.views.czm_fitter_view import CZMFitterView
 from labquake_explorer.ui.views.event_analyzer_view import EventAnalyzerView
 from labquake_explorer.ui.views.event_drop_editor_view import EventDropEditorView
 from labquake_explorer.ui.views.event_k_editor_view import EventKEditorView
+from labquake_explorer.ui.views.colored_slip_lines_view import ColoredSlipLinesView
 from labquake_explorer.ui.views.misc import *
 
 __all__ = [
@@ -19,5 +20,6 @@ __all__ = [
     'CZMFitterView',
     'EventAnalyzerView',
     'EventDropEditorView',
-    'EventKEditorView'
+    'EventKEditorView',
+    'ColoredSlipLinesView'
 ]
