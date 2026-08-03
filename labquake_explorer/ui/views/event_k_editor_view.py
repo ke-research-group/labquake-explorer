@@ -174,6 +174,7 @@ class EventKEditorView(tk.Toplevel):
         self.preview_parameters: dict[str, Any] | None = None
         self._endpoint_draggables: list[_DraggablePreEndpoint] = []
         self._initializing_parameters = True
+        self._updating_endpoint_control = False
 
         self._set_event(event_idx)
         self._create_controls()
@@ -353,7 +354,10 @@ class EventKEditorView(tk.Toplevel):
         self._plot_preview()
 
     def _on_parameter_changed(self, *args) -> None:
-        if getattr(self, "_initializing_parameters", False):
+        if (
+            getattr(self, "_initializing_parameters", False)
+            or getattr(self, "_updating_endpoint_control", False)
+        ):
             return
         self._clear_preview("Parameters changed — recompute preview")
         self._plot_preview()
@@ -442,7 +446,13 @@ class EventKEditorView(tk.Toplevel):
         return min(max(position, lower), min(upper, 0.0))
 
     def _on_endpoint_changed(self, key: str, position: float) -> None:
-        self.parameter_vars[key].set(f"{position:.6g}")
+        # Keep the trace from rebuilding draggable lines during mouse motion.
+        self._updating_endpoint_control = True
+        try:
+            self.parameter_vars[key].set(f"{position:.6g}")
+        finally:
+            self._updating_endpoint_control = False
+        self._clear_preview("Fitting window changed — recompute preview")
 
     def _on_endpoint_released(self) -> None:
         self._plot_preview()

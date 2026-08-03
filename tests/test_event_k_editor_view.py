@@ -28,6 +28,17 @@ class FakeVariable:
         self.value = value
 
 
+class TraceVariable(FakeVariable):
+    def __init__(self, value="", callback=None):
+        super().__init__(value)
+        self.callback = callback
+
+    def set(self, value):
+        super().set(value)
+        if self.callback is not None:
+            self.callback()
+
+
 class FakeWidget(FakeVariable):
     def __init__(self, value=""):
         super().__init__(value)
@@ -89,6 +100,7 @@ def make_headless_view(run_data=None, event=None):
     view.status_var = FakeVariable()
     view._endpoint_draggables = []
     view._initializing_parameters = False
+    view._updating_endpoint_control = False
     view.figure = Figure()
     view.slip_ax = view.figure.add_subplot(311)
     view.tau_ax = view.figure.add_subplot(312)
@@ -402,6 +414,167 @@ class LifecycleAndWiringTests(unittest.TestCase):
         released.assert_called_once()
         draggable.disconnect()
         self.assertEqual(draggable._connection_ids, [])
+
+    def test_endpoint_motion_invalidates_without_full_redraw(self):
+        view = make_headless_view()
+        view.preview_result = {"valid": True}
+        view.preview_parameters = {"pre_start": -3.0}
+        view.result_vars["valid"].set("True")
+        view.result_vars["k"].set("4.5")
+        view.result_vars["intercept"].set("1.2")
+        view._plot_preview = mock.Mock()
+
+        view._on_endpoint_changed("pre_start", -1.25)
+
+        self.assertEqual(view.parameter_vars["pre_start"].get(), "-1.25")
+        self.assertIsNone(view.preview_result)
+        self.assertIsNone(view.preview_parameters)
+        self.assertEqual(view.result_vars["valid"].get(), "—")
+        self.assertEqual(view.result_vars["k"].get(), "—")
+        self.assertEqual(view.result_vars["intercept"].get(), "—")
+        self.assertEqual(
+            view.status_var.get(),
+            "Fitting window changed — recompute preview",
+        )
+        view._plot_preview.assert_not_called()
+
+    def test_endpoint_control_trace_is_suppressed_during_motion(self):
+        view = make_headless_view()
+        view._plot_preview = mock.Mock()
+        view._on_parameter_changed = mock.Mock(
+            wraps=view._on_parameter_changed
+        )
+        view.parameter_vars["pre_start"] = TraceVariable(
+            "-3.0", view._on_parameter_changed
+        )
+
+        with (
+            mock.patch(
+                "labquake_explorer.ui.views.event_k_editor_view."
+                "calculate_event_loading_stiffness"
+            ) as calculator,
+            mock.patch(
+                "labquake_explorer.ui.views.event_k_editor_view."
+                "messagebox.showerror"
+            ) as showerror,
+        ):
+            view._on_endpoint_changed("pre_start", -1.75)
+
+        view._on_parameter_changed.assert_called_once()
+        view._plot_preview.assert_not_called()
+        calculator.assert_not_called()
+        showerror.assert_not_called()
+        self.assertFalse(view._updating_endpoint_control)
+
+    def test_manual_parameter_edit_still_invalidates_and_redraws_once(self):
+        view = make_headless_view()
+        view.preview_result = {"valid": True}
+        view.preview_parameters = {"old": True}
+        view._plot_preview = mock.Mock()
+
+        view._on_parameter_changed()
+
+        self.assertIsNone(view.preview_result)
+        self.assertIsNone(view.preview_parameters)
+        self.assertEqual(
+            view.status_var.get(),
+            "Parameters changed — recompute preview",
+        )
+        view._plot_preview.assert_called_once_with()
+
+    def test_multiple_motion_events_keep_callbacks_until_single_release(self):
+        figure = Figure()
+        axis = figure.add_subplot()
+        line = axis.axvline(-1.0)
+        changed = mock.Mock()
+        released = mock.Mock()
+        draggable = _DraggablePreEndpoint(
+            line,
+            changed,
+            released,
+            lambda value: min(value, 0.0),
+        )
+        original_connections = list(draggable._connection_ids)
+        draggable.dragging = True
+
+        for position in (-1.5, -1.25, -0.75):
+            draggable._on_motion(mock.Mock(inaxes=axis, xdata=position))
+            self.assertTrue(draggable.dragging)
+            self.assertEqual(draggable._connection_ids, original_connections)
+
+        self.assertEqual(
+            [call.args[0] for call in changed.call_args_list],
+            [-1.5, -1.25, -0.75],
+        )
+        np.testing.assert_allclose(line.get_xdata(), [-0.75, -0.75])
+        draggable._on_release(mock.Mock())
+        draggable._on_release(mock.Mock())
+        self.assertFalse(draggable.dragging)
+        released.assert_called_once_with()
+
+    def test_release_redraws_once_and_keeps_stale_status(self):
+        view = make_headless_view()
+        view._plot_preview = mock.Mock()
+        view._on_endpoint_changed("pre_end", -0.25)
+
+        view._on_endpoint_released()
+
+        view._plot_preview.assert_called_once_with()
+        self.assertEqual(
+            view.status_var.get(),
+            "Fitting window changed — recompute preview",
+        )
+
+    def test_full_redraw_replaces_endpoint_callbacks_without_accumulating(self):
+        view = make_headless_view()
+        old_draggable = mock.Mock()
+        view._endpoint_draggables = [old_draggable]
+
+        view._plot_preview()
+
+        old_draggable.disconnect.assert_called_once_with()
+        first_generation = list(view._endpoint_draggables)
+        self.assertEqual(len(first_generation), 2)
+        view._plot_preview()
+        self.assertEqual(len(view._endpoint_draggables), 2)
+        for draggable in first_generation:
+            self.assertEqual(draggable._connection_ids, [])
+
+    def test_integrated_drag_accepts_repeated_motion_then_rebuilds_on_release(self):
+        view = make_headless_view()
+        view.metric_bindings = {"tau": "tau source", "slip": "slip source"}
+        view.preview_result = {"valid": True}
+        view.preview_parameters = {"pre_start": -3.0}
+        view.parameter_vars["pre_start"] = TraceVariable(
+            "-3.0", view._on_parameter_changed
+        )
+        view._plot_preview = mock.Mock()
+        figure = Figure()
+        axis = figure.add_subplot()
+        line = axis.axvline(-3.0)
+        draggable = _DraggablePreEndpoint(
+            line,
+            lambda value: view._on_endpoint_changed("pre_start", value),
+            view._on_endpoint_released,
+            lambda value: min(value, 0.0),
+        )
+        draggable.dragging = True
+
+        with mock.patch(
+            "labquake_explorer.ui.views.event_k_editor_view."
+            "calculate_event_loading_stiffness"
+        ) as calculator:
+            for position in (-2.5, -2.0, -1.5):
+                draggable._on_motion(mock.Mock(inaxes=axis, xdata=position))
+                self.assertTrue(draggable.dragging)
+            view._plot_preview.assert_not_called()
+            draggable._on_release(mock.Mock())
+
+        self.assertEqual(view.parameter_vars["pre_start"].get(), "-1.5")
+        self.assertIsNone(view.preview_result)
+        self.assertIsNone(view.preview_parameters)
+        view._plot_preview.assert_called_once_with()
+        calculator.assert_not_called()
 
     def test_close_disconnects_and_removes_child_without_saving(self):
         view = EventKEditorView.__new__(EventKEditorView)
