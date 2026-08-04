@@ -33,6 +33,16 @@ from .pzt_analysis_seismology import (
     tukey_window,
     validate_fit_parameter_bounds,
 )
+from .pzt_analysis_egf import (
+    EGFFitResult,
+    EGFSpectrumResult,
+    EGFTimeWindowResult,
+    calc_mw_from_amp,
+    compute_egf_spectrum,
+    compute_egf_time_window,
+    egf_calib_interp_for,
+    fit_egf_omega_n,
+)
 
 __all__ = [
     "calculate_2pt_trend_drop",
@@ -64,4 +74,12 @@ __all__ = [
     "model_ln_amp",
     "validate_fit_parameter_bounds",
     "fit_omega_n_q",
+    "EGFTimeWindowResult",
+    "EGFSpectrumResult",
+    "EGFFitResult",
+    "egf_calib_interp_for",
+    "compute_egf_time_window",
+    "compute_egf_spectrum",
+    "fit_egf_omega_n",
+    "calc_mw_from_amp",
 ]
