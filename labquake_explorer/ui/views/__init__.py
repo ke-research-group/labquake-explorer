@@ -11,6 +11,7 @@ from labquake_explorer.ui.views.event_k_editor_view import EventKEditorView
 from labquake_explorer.ui.views.colored_slip_lines_view import ColoredSlipLinesView
 from labquake_explorer.ui.views.pzt_time_domain_view import PZTTimeDomainView
 from labquake_explorer.ui.views.pzt_spectrum_view import PZTSpectrumView
+from labquake_explorer.ui.views.pzt_egf_view import PZTEGFView
 from labquake_explorer.ui.views.misc import *
 
 __all__ = [
@@ -25,5 +26,6 @@ __all__ = [
     'EventKEditorView',
     'ColoredSlipLinesView',
     'PZTTimeDomainView',
-    'PZTSpectrumView'
+    'PZTSpectrumView',
+    'PZTEGFView'
 ]
