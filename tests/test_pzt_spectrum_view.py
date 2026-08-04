@@ -8,6 +8,7 @@ from unittest import mock
 
 import numpy as np
 from matplotlib.figure import Figure
+from pandas.errors import EmptyDataError, ParserError
 
 from labquake_explorer.analysis.pzt_analysis_seismology import (
     BlockTrace,
@@ -17,6 +18,7 @@ from labquake_explorer.analysis.pzt_analysis_seismology import (
 from labquake_explorer.ui.labquake_explorer import LabquakeExplorer
 from labquake_explorer.ui.views import PZTSpectrumView as ExportedView
 from labquake_explorer.ui.views.pzt_spectrum_view import (
+    _EXPECTED_PREVIEW_EXCEPTIONS,
     PZTSpectrumView,
     parse_spectrum_parameters,
 )
@@ -290,6 +292,14 @@ class BrowseAndSwitchTests(unittest.TestCase):
 
 
 class AnalysisAndPlotTests(unittest.TestCase):
+    def _configure_existing_paths(self, view, directory):
+        calibration = Path(directory) / "cal.csv"
+        q_path = Path(directory) / "q.csv"
+        calibration.write_text("x", encoding="utf-8")
+        q_path.write_text("y", encoding="utf-8")
+        view.calibration_path_var.set(str(calibration))
+        view.q_path_var.set(str(q_path))
+
     @mock.patch("labquake_explorer.ui.views.pzt_spectrum_view.compute_spectrum_at_trigger")
     def test_preview_calls_only_explicit_analysis_once(self, compute):
         view = make_view()
@@ -358,6 +368,69 @@ class AnalysisAndPlotTests(unittest.TestCase):
         self.assertIsNone(view.preview_result)
         self.assertIn("calibration_csv", view.status_var.get())
         showerror.assert_called_once()
+
+    def test_expected_analysis_and_file_errors_are_presented(self):
+        expected_errors = (
+            ValueError("invalid spectrum"),
+            FileNotFoundError("missing calibration"),
+            OSError("cannot read Q file"),
+            ParserError("malformed calibration CSV"),
+            EmptyDataError("empty calibration CSV"),
+        )
+        for error in expected_errors:
+            with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as directory:
+                view = make_view()
+                view.selected_channel_index = 0
+                view.preview_result = object()
+                self._configure_existing_paths(view, directory)
+                with mock.patch(
+                    "labquake_explorer.ui.views.pzt_spectrum_view.compute_spectrum_at_trigger",
+                    side_effect=error,
+                ), mock.patch(
+                    "labquake_explorer.ui.views.pzt_spectrum_view.messagebox.showerror"
+                ) as showerror:
+                    view.recompute_preview()
+                self.assertIsNone(view.preview_result)
+                self.assertEqual(view.status_var.get(), str(error))
+                showerror.assert_called_once_with("PZT spectrum", str(error), parent=view)
+
+    def test_programming_errors_are_not_caught(self):
+        for error in (AttributeError("missing implementation attribute"), RuntimeError("internal failure")):
+            with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as directory:
+                view = make_view()
+                view.selected_channel_index = 0
+                self._configure_existing_paths(view, directory)
+                with mock.patch(
+                    "labquake_explorer.ui.views.pzt_spectrum_view.compute_spectrum_at_trigger",
+                    side_effect=error,
+                ), mock.patch(
+                    "labquake_explorer.ui.views.pzt_spectrum_view.messagebox.showerror"
+                ) as showerror, self.assertRaises(type(error)):
+                    view.recompute_preview()
+                showerror.assert_not_called()
+
+    def test_unexpected_plotting_error_propagates_without_user_error_dialog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            view = make_view()
+            view.selected_channel_index = 0
+            self._configure_existing_paths(view, directory)
+            result = make_result(view._build_selected_trace())
+            with mock.patch(
+                "labquake_explorer.ui.views.pzt_spectrum_view.compute_spectrum_at_trigger",
+                return_value=result,
+            ), mock.patch.object(
+                view, "_draw_preview", side_effect=AttributeError("plot contract bug")
+            ), mock.patch(
+                "labquake_explorer.ui.views.pzt_spectrum_view.messagebox.showerror"
+            ) as showerror, self.assertRaisesRegex(AttributeError, "plot contract bug"):
+                view.recompute_preview()
+            showerror.assert_not_called()
+
+    def test_expected_exception_tuple_excludes_programming_errors(self):
+        self.assertNotIn(AttributeError, _EXPECTED_PREVIEW_EXCEPTIONS)
+        self.assertNotIn(AssertionError, _EXPECTED_PREVIEW_EXCEPTIONS)
+        self.assertNotIn(RuntimeError, _EXPECTED_PREVIEW_EXCEPTIONS)
+        self.assertNotIn(Exception, _EXPECTED_PREVIEW_EXCEPTIONS)
 
     def test_real_multi_pulse_preview_stays_at_canonical_trigger(self):
         time = np.linspace(12.0, 13.0, 1001)

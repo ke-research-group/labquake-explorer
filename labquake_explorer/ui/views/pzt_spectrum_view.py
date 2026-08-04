@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
+from pandas.errors import EmptyDataError, ParserError
 
 from labquake_explorer.analysis.pzt_analysis_seismology import (
     DEFAULT_NFFT,
@@ -22,6 +23,19 @@ from labquake_explorer.analysis.pzt_analysis_seismology import (
     BlockTrace,
     SpectrumResult,
     compute_spectrum_at_trigger,
+)
+
+
+_EXPECTED_PREVIEW_EXCEPTIONS = (
+    ValueError,
+    TypeError,
+    IndexError,
+    KeyError,
+    FileNotFoundError,
+    OSError,
+    UnicodeError,
+    ParserError,
+    EmptyDataError,
 )
 
 
@@ -346,7 +360,7 @@ class PZTSpectrumView(tk.Toplevel):
                 f"{Path(parameters['calibration_csv']).name}; {Path(parameters['q_csv']).name}; "
                 f"{valid_count} calibrated, {len(result.f7_hz)} resampled — preview only, not saved"
             )
-        except Exception as exc:
+        except _EXPECTED_PREVIEW_EXCEPTIONS as exc:
             self._show_error(exc)
 
     @staticmethod
