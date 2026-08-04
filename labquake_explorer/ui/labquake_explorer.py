@@ -14,7 +14,7 @@ from labquake_explorer.ui.views import (
     SimplePlotView, PointsSelectorView, IndexPickerView,
     SlopeAnalyzerView, DynamicStrainArrivalPickerView, CZMFitterView,
     EventAnalyzerView, EventDropEditorView, EventKEditorView,
-    ColoredSlipLinesView
+    ColoredSlipLinesView, PZTTimeDomainView
 )
 
 class LabquakeExplorer:
@@ -75,6 +75,10 @@ class LabquakeExplorer:
         self.event_menu.add_command(
             label="Analyze Colored Slip Lines",
             command=self.analyze_colored_slip_lines,
+        )
+        self.event_menu.add_command(
+            label="Preview PZT Time Domain",
+            command=self.preview_pzt_time_domain,
         )
         self.event_menu.add_command(label="Pick Arrivals", command=self.pick_strain_array_arrivals)
         self.event_menu.add_command(label="Fit Cohesive Zone Model", command=self.fit_cohesive_zone_model)
@@ -351,6 +355,14 @@ class LabquakeExplorer:
         run_idx, _ = self._extract_run_event_indices(path)
 
         view = ColoredSlipLinesView(self, run_idx)
+        self.set_window_icon(view)
+        self.child_windows.append(view)
+
+    def preview_pzt_time_domain(self):
+        path, item = self.get_full_path()
+        run_idx, event_idx = self._extract_run_event_indices(path)
+
+        view = PZTTimeDomainView(self, run_idx, event_idx)
         self.set_window_icon(view)
         self.child_windows.append(view)
 
