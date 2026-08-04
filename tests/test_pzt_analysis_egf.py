@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -56,6 +57,15 @@ def make_trace(count=6000, sample_rate=50000.0):
         block=7,
         sensor="selected",
     )
+
+
+def make_multi_pulse_trace(trigger_time=12.56):
+    sample_rate = 10000.0
+    time = np.arange(2001, dtype=float) / sample_rate + 12.5
+    voltage = 0.001 * np.sin(2 * np.pi * 700 * (time - time[0]))
+    voltage[200] = 0.5
+    voltage[600] = 1.0
+    return BlockTrace(time, voltage, sample_rate, trigger_time, 600, 9, "explicit")
 
 
 def write_calibration(directory):
@@ -109,7 +119,9 @@ class DataclassAndExportTests(unittest.TestCase):
             "EGFFitResult",
             "egf_calib_interp_for",
             "compute_egf_time_window",
+            "compute_egf_time_window_at_trigger",
             "compute_egf_spectrum",
+            "compute_egf_spectrum_at_trigger",
             "fit_egf_omega_n",
             "calc_mw_from_amp",
         )
@@ -271,6 +283,224 @@ class NumericalParityTests(unittest.TestCase):
                     ValueError, "Not enough EGF calibrated spectrum points"
                 ):
                     module.compute_egf_spectrum(*args, nfft=8192, pre_sec=0.01, post_sec=0.015)
+
+
+class CanonicalTriggerTests(unittest.TestCase):
+    def test_api_signatures_keep_legacy_threshold_and_exclude_it_from_explicit(self):
+        legacy_window = inspect.signature(official.compute_egf_time_window).parameters
+        legacy_spectrum = inspect.signature(official.compute_egf_spectrum).parameters
+        explicit_window = inspect.signature(
+            official.compute_egf_time_window_at_trigger
+        ).parameters
+        explicit_spectrum = inspect.signature(
+            official.compute_egf_spectrum_at_trigger
+        ).parameters
+        self.assertIn("threshold", legacy_window)
+        self.assertIn("threshold", legacy_spectrum)
+        self.assertNotIn("threshold", explicit_window)
+        self.assertNotIn("threshold", explicit_spectrum)
+
+    def test_legacy_peak_selection_threshold_and_argmax_are_preserved(self):
+        trace = make_multi_pulse_trace()
+        early = official.compute_egf_time_window(
+            trace, pre_sec=0.005, post_sec=0.008, threshold=0.4
+        )
+        canonical = official.compute_egf_time_window(
+            trace, pre_sec=0.005, post_sec=0.008, threshold=0.8
+        )
+        fallback = official.compute_egf_time_window(
+            trace, pre_sec=0.005, post_sec=0.008, threshold=2.0
+        )
+        self.assertAlmostEqual(early.peak_time, 0.02)
+        self.assertAlmostEqual(canonical.peak_time, 0.06)
+        self.assertAlmostEqual(fallback.peak_time, 0.06)
+
+    def test_explicit_window_uses_absolute_trigger_without_find_peaks(self):
+        trace = make_multi_pulse_trace(trigger_time=12.56)
+        with mock.patch.object(official, "find_peaks") as find:
+            result = official.compute_egf_time_window_at_trigger(
+                trace, pre_sec=0.005, post_sec=0.008
+            )
+        find.assert_not_called()
+        self.assertAlmostEqual(result.peak_time, 0.06)
+        expected_indices = np.where(
+            (result.full_time >= result.peak_time - 0.005)
+            & (result.full_time <= result.peak_time + 0.008)
+        )[0]
+        self.assertEqual((result.i0, result.i1), (expected_indices[0], expected_indices[-1]))
+        expected_length = result.i1 - result.i0 + 1
+        self.assertEqual(
+            (result.noise_start, result.noise_end),
+            (result.i0 - expected_length, result.i0),
+        )
+        self.assertTrue(hasattr(result, "_noise_windowed"))
+        self.assertEqual(result._noise_windowed.shape, result.signal_windowed.shape)
+
+    def test_same_peak_window_fields_are_identical_but_independently_owned(self):
+        trace = make_multi_pulse_trace(trigger_time=12.52)
+        legacy = official.compute_egf_time_window(
+            trace, pre_sec=0.005, post_sec=0.008, threshold=0.4
+        )
+        explicit = official.compute_egf_time_window_at_trigger(
+            trace, pre_sec=0.005, post_sec=0.008
+        )
+        assert_dataclass_values_equal(self, explicit, legacy)
+        assert_arrays_equal(self, explicit._noise_windowed, legacy._noise_windowed)
+        for field in dataclasses.fields(explicit):
+            if isinstance(getattr(explicit, field.name), np.ndarray):
+                self.assertIsNot(getattr(explicit, field.name), getattr(legacy, field.name))
+
+    def test_absolute_trigger_is_converted_to_relative_coordinate(self):
+        trace = make_multi_pulse_trace(trigger_time=np.float64(12.56))
+        result = official.compute_egf_time_window_at_trigger(
+            trace, pre_sec=0.005, post_sec=0.008
+        )
+        self.assertAlmostEqual(result.peak_time, 0.06)
+        self.assertLess(result.peak_time, 1.0)
+
+    def test_trim_adjustment_boundary_and_trimmed_away_trigger(self):
+        trace = make_multi_pulse_trace(trigger_time=12.56)
+        result = official._prepare_egf_time_window_at_trigger(
+            trace, pre_sec=0.005, post_sec=0.008, trim_head_sec=0.01
+        )
+        self.assertAlmostEqual(result.peak_time, 0.05)
+
+        boundary = make_multi_pulse_trace()
+        normalized = boundary.time - boundary.time[0]
+        first_retained = np.where(normalized >= 0.01)[0][0]
+        boundary.trigger_time = float(boundary.time[first_retained])
+        boundary_result = official._prepare_egf_time_window_at_trigger(
+            boundary, pre_sec=0.005, post_sec=0.008, trim_head_sec=0.01
+        )
+        self.assertEqual(boundary_result.peak_time, boundary_result.full_time[0])
+
+        removed = make_multi_pulse_trace(trigger_time=12.505)
+        with self.assertRaisesRegex(ValueError, "trimmed-away"):
+            official._prepare_egf_time_window_at_trigger(
+                removed, pre_sec=0.005, post_sec=0.008, trim_head_sec=0.01
+            )
+
+    def test_nearest_sample_tie_uses_first_index(self):
+        trace = BlockTrace(
+            np.array([10.0, 12.0]), np.array([1.0, 2.0]), 0.5, 11.0, 1, 1, "tie"
+        )
+        result = official.compute_egf_time_window_at_trigger(trace, pre_sec=2.0, post_sec=2.0)
+        self.assertEqual(result.peak_time, 0.0)
+
+    def test_invalid_triggers_do_not_fallback_or_reach_window_body(self):
+        base = make_multi_pulse_trace()
+        invalid = (
+            True,
+            np.bool_(False),
+            np.array([12.56]),
+            "12.56",
+            np.nan,
+            np.inf,
+            12.4,
+            12.8,
+        )
+        for trigger in invalid:
+            with self.subTest(trigger=repr(trigger)):
+                trace = BlockTrace(
+                    base.time, base.voltage, base.sampling_rate, trigger,
+                    base.trigger_sample, base.block, base.sensor,
+                )
+                with mock.patch.object(official, "_finish_egf_time_window") as finish:
+                    with self.assertRaises(ValueError):
+                        official.compute_egf_time_window_at_trigger(trace)
+                    finish.assert_not_called()
+                with mock.patch.object(
+                    official, "_compute_egf_spectrum_from_window"
+                ) as spectrum:
+                    with self.assertRaises(ValueError):
+                        official.compute_egf_spectrum_at_trigger(
+                            trace, Path("unused.csv")
+                        )
+                    spectrum.assert_not_called()
+
+    def test_explicit_spectrum_wires_only_explicit_window_and_shared_body_once(self):
+        trace = make_multi_pulse_trace()
+        window = mock.Mock(spec=official.EGFTimeWindowResult)
+        result = object()
+        calibration = Path("chosen.csv")
+        with mock.patch.object(
+            official, "_prepare_egf_time_window_at_trigger", return_value=window
+        ) as prepare, mock.patch.object(
+            official, "_prepare_egf_time_window"
+        ) as legacy, mock.patch.object(
+            official, "_compute_egf_spectrum_from_window", return_value=result
+        ) as spectrum:
+            actual = official.compute_egf_spectrum_at_trigger(
+                trace, calibration, nfft=4096, pre_sec=0.02, post_sec=0.03
+            )
+        self.assertIs(actual, result)
+        prepare.assert_called_once_with(trace, pre_sec=0.02, post_sec=0.03)
+        legacy.assert_not_called()
+        spectrum.assert_called_once_with(window, calibration, 4096)
+
+    def test_legacy_spectrum_wires_only_auto_window_and_shared_body_once(self):
+        trace = make_multi_pulse_trace()
+        window = mock.Mock(spec=official.EGFTimeWindowResult)
+        result = object()
+        with mock.patch.object(
+            official, "_prepare_egf_time_window", return_value=window
+        ) as prepare, mock.patch.object(
+            official, "_prepare_egf_time_window_at_trigger"
+        ) as explicit, mock.patch.object(
+            official, "_compute_egf_spectrum_from_window", return_value=result
+        ) as spectrum:
+            actual = official.compute_egf_spectrum(
+                trace, Path("chosen.csv"), nfft=2048,
+                pre_sec=0.01, post_sec=0.02, threshold=0.7,
+            )
+        self.assertIs(actual, result)
+        prepare.assert_called_once_with(
+            trace, pre_sec=0.01, post_sec=0.02, threshold=0.7
+        )
+        explicit.assert_not_called()
+        spectrum.assert_called_once_with(window, Path("chosen.csv"), 2048)
+
+    def test_same_window_spectra_are_numerically_identical(self):
+        trace = make_multi_pulse_trace(trigger_time=12.52)
+        with tempfile.TemporaryDirectory() as directory:
+            calibration = write_calibration(directory)
+            legacy = official.compute_egf_spectrum(
+                trace, calibration, nfft=4096,
+                pre_sec=0.005, post_sec=0.008, threshold=0.4,
+            )
+            explicit = official.compute_egf_spectrum_at_trigger(
+                trace, calibration, nfft=4096, pre_sec=0.005, post_sec=0.008
+            )
+        assert_dataclass_values_equal(self, explicit, legacy)
+
+    def test_multi_pulse_spectra_keep_distinct_auto_and_canonical_windows(self):
+        trace = make_multi_pulse_trace(trigger_time=12.56)
+        with tempfile.TemporaryDirectory() as directory:
+            calibration = write_calibration(directory)
+            legacy = official.compute_egf_spectrum(
+                trace, calibration, nfft=4096,
+                pre_sec=0.005, post_sec=0.008, threshold=0.4,
+            )
+            explicit = official.compute_egf_spectrum_at_trigger(
+                trace, calibration, nfft=4096, pre_sec=0.005, post_sec=0.008
+            )
+        self.assertAlmostEqual(legacy.time_window.peak_time, 0.02)
+        self.assertAlmostEqual(explicit.time_window.peak_time, 0.06)
+        self.assertNotEqual(legacy.time_window.i0, explicit.time_window.i0)
+
+    def test_explicit_processing_does_not_modify_trace_or_calibration(self):
+        trace = make_multi_pulse_trace()
+        original_time = trace.time.copy()
+        original_voltage = trace.voltage.copy()
+        with tempfile.TemporaryDirectory() as directory:
+            calibration = write_calibration(directory)
+            original_csv = calibration.read_bytes()
+            official.compute_egf_spectrum_at_trigger(
+                trace, calibration, nfft=4096, pre_sec=0.005, post_sec=0.008
+            )
+            self.assertEqual(calibration.read_bytes(), original_csv)
+        np.testing.assert_array_equal(trace.time, original_time)
+        np.testing.assert_array_equal(trace.voltage, original_voltage)
 
 
 class ScopeTests(unittest.TestCase):

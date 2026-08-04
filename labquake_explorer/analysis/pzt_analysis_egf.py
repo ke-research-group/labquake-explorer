@@ -9,6 +9,7 @@ persistence remain outside this module.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from numbers import Real
 from pathlib import Path
 
 import numpy as np
@@ -157,29 +158,15 @@ def apply_extra_filter(values: np.ndarray, dt: float) -> np.ndarray:
     return filtfilt(b, a, values)
 
 
-def _prepare_egf_time_window(
+def _finish_egf_time_window(
     trace: BlockTrace,
-    pre_sec: float = DEFAULT_PRE_SEC,
-    post_sec: float = DEFAULT_POST_SEC,
-    threshold: float = DEFAULT_THRESHOLD,
-    trim_head_sec: float = DEFAULT_TRIM_HEAD_SEC,
+    t_full: np.ndarray,
+    v_full: np.ndarray,
+    peak_index: int,
+    pre_sec: float,
+    post_sec: float,
 ) -> EGFTimeWindowResult:
-    """Prepare Tim's EGF window after caller-side dataset and sensor selection."""
-    t_full = np.asarray(trace.time, dtype=float)
-    v_full = np.asarray(trace.voltage, dtype=float)
-    t_full = t_full - t_full[0]
-
-    if trim_head_sec > 0.0:
-        mask = t_full >= trim_head_sec
-        if np.count_nonzero(mask) < 2:
-            raise ValueError(
-                f"{trace.sensor} has too little data after trim_head_sec={trim_head_sec}"
-            )
-        t_full = t_full[mask] - trim_head_sec
-        v_full = v_full[mask]
-
-    peaks, _ = find_peaks(np.abs(v_full), height=threshold)
-    peak_index = int(peaks[0]) if len(peaks) else int(np.nanargmax(np.abs(v_full)))
+    """Apply Tim's window processing after the peak sample is known."""
     t_peak = float(t_full[peak_index])
     t_start = t_peak - pre_sec
     t_end = t_peak + post_sec
@@ -258,18 +245,103 @@ def _prepare_egf_time_window(
     return result
 
 
+def _prepare_egf_time_window(
+    trace: BlockTrace,
+    pre_sec: float = DEFAULT_PRE_SEC,
+    post_sec: float = DEFAULT_POST_SEC,
+    threshold: float = DEFAULT_THRESHOLD,
+    trim_head_sec: float = DEFAULT_TRIM_HEAD_SEC,
+) -> EGFTimeWindowResult:
+    """Prepare Tim's EGF window after caller-side dataset and sensor selection."""
+    t_full = np.asarray(trace.time, dtype=float)
+    v_full = np.asarray(trace.voltage, dtype=float)
+    t_full = t_full - t_full[0]
+
+    if trim_head_sec > 0.0:
+        mask = t_full >= trim_head_sec
+        if np.count_nonzero(mask) < 2:
+            raise ValueError(
+                f"{trace.sensor} has too little data after trim_head_sec={trim_head_sec}"
+            )
+        t_full = t_full[mask] - trim_head_sec
+        v_full = v_full[mask]
+
+    peaks, _ = find_peaks(np.abs(v_full), height=threshold)
+    peak_index = int(peaks[0]) if len(peaks) else int(np.nanargmax(np.abs(v_full)))
+    return _finish_egf_time_window(trace, t_full, v_full, peak_index, pre_sec, post_sec)
+
+
+def _prepare_egf_time_window_at_trigger(
+    trace: BlockTrace,
+    pre_sec: float = DEFAULT_PRE_SEC,
+    post_sec: float = DEFAULT_POST_SEC,
+    trim_head_sec: float = DEFAULT_TRIM_HEAD_SEC,
+) -> EGFTimeWindowResult:
+    """Prepare Tim-compatible processing around an absolute canonical trigger."""
+    trigger = trace.trigger_time
+    if isinstance(trigger, (bool, np.bool_, np.ndarray)) or not isinstance(trigger, Real):
+        raise ValueError("trigger_time must be a finite real scalar")
+    trigger = float(trigger)
+    if not np.isfinite(trigger):
+        raise ValueError("trigger_time must be a finite real scalar")
+
+    t_original = np.asarray(trace.time, dtype=float)
+    v_full = np.asarray(trace.voltage, dtype=float)
+    if trigger < float(t_original[0]) or trigger > float(t_original[-1]):
+        raise ValueError("trigger_time is outside the original trace range")
+    trigger_relative_original = trigger - float(t_original[0])
+    t_full = t_original - t_original[0]
+
+    if trim_head_sec > 0.0:
+        if trigger_relative_original < trim_head_sec:
+            raise ValueError("trigger_time lies in the trimmed-away trace region")
+        mask = t_full >= trim_head_sec
+        if np.count_nonzero(mask) < 2:
+            raise ValueError(
+                f"{trace.sensor} has too little data after trim_head_sec={trim_head_sec}"
+            )
+        t_full = t_full[mask] - trim_head_sec
+        v_full = v_full[mask]
+        trigger_relative = trigger_relative_original - trim_head_sec
+    else:
+        trigger_relative = trigger_relative_original
+
+    if trigger_relative < float(t_full[0]) or trigger_relative > float(t_full[-1]):
+        raise ValueError("trigger_time is outside the retained trace range")
+    peak_index = int(np.argmin(np.abs(t_full - trigger_relative)))
+    return _finish_egf_time_window(trace, t_full, v_full, peak_index, pre_sec, post_sec)
+
+
 def compute_egf_time_window(
     trace: BlockTrace,
     pre_sec: float = DEFAULT_PRE_SEC,
     post_sec: float = DEFAULT_POST_SEC,
     threshold: float = DEFAULT_THRESHOLD,
 ) -> EGFTimeWindowResult:
-    """Compute an EGF window from a caller-selected in-memory trace."""
+    """Compute a Tim legacy first-threshold-peak EGF window."""
     return _prepare_egf_time_window(
         trace,
         pre_sec=pre_sec,
         post_sec=post_sec,
         threshold=threshold,
+    )
+
+
+def compute_egf_time_window_at_trigger(
+    trace: BlockTrace,
+    pre_sec: float = DEFAULT_PRE_SEC,
+    post_sec: float = DEFAULT_POST_SEC,
+) -> EGFTimeWindowResult:
+    """Compute an EGF window at an absolute ``BlockTrace.trigger_time``.
+
+    The trigger is converted relative to the trace start and adjusted for
+    ``DEFAULT_TRIM_HEAD_SEC``.  No automatic peak detection or fallback is used;
+    all remaining processing retains Tim-compatible EGF behavior.
+    """
+    return _prepare_egf_time_window_at_trigger(
+        trace,
+        pre_sec=pre_sec,
+        post_sec=post_sec,
     )
 
 
@@ -281,13 +353,42 @@ def compute_egf_spectrum(
     post_sec: float = DEFAULT_POST_SEC,
     threshold: float = DEFAULT_THRESHOLD,
 ) -> EGFSpectrumResult:
-    """Compute Tim's EGF spectrum from an explicit trace and calibration path."""
+    """Compute a Tim legacy auto-peak EGF spectrum."""
     window_result = _prepare_egf_time_window(
         trace,
         pre_sec=pre_sec,
         post_sec=post_sec,
         threshold=threshold,
     )
+    return _compute_egf_spectrum_from_window(window_result, calibration_csv, nfft)
+
+
+def compute_egf_spectrum_at_trigger(
+    trace: BlockTrace,
+    calibration_csv: Path,
+    nfft: int = DEFAULT_NFFT,
+    pre_sec: float = DEFAULT_PRE_SEC,
+    post_sec: float = DEFAULT_POST_SEC,
+) -> EGFSpectrumResult:
+    """Compute a Tim-compatible EGF spectrum at the explicit canonical trigger.
+
+    Window selection uses ``BlockTrace.trigger_time`` without automatic peak
+    detection or fallback.  FFT, calibration, and resampling remain unchanged.
+    """
+    window_result = _prepare_egf_time_window_at_trigger(
+        trace,
+        pre_sec=pre_sec,
+        post_sec=post_sec,
+    )
+    return _compute_egf_spectrum_from_window(window_result, calibration_csv, nfft)
+
+
+def _compute_egf_spectrum_from_window(
+    window_result: EGFTimeWindowResult,
+    calibration_csv: Path,
+    nfft: int,
+) -> EGFSpectrumResult:
+    """Apply Tim's spectrum body to an already-selected EGF window."""
     win_len = len(window_result.signal_windowed)
     n_use = int(nfft) if nfft and nfft > win_len else win_len
 

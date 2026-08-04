@@ -39,7 +39,9 @@ from .pzt_analysis_egf import (
     EGFTimeWindowResult,
     calc_mw_from_amp,
     compute_egf_spectrum,
+    compute_egf_spectrum_at_trigger,
     compute_egf_time_window,
+    compute_egf_time_window_at_trigger,
     egf_calib_interp_for,
     fit_egf_omega_n,
 )
@@ -79,7 +81,9 @@ __all__ = [
     "EGFFitResult",
     "egf_calib_interp_for",
     "compute_egf_time_window",
+    "compute_egf_time_window_at_trigger",
     "compute_egf_spectrum",
+    "compute_egf_spectrum_at_trigger",
     "fit_egf_omega_n",
     "calc_mw_from_amp",
 ]
