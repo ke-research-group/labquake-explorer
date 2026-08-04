@@ -481,6 +481,128 @@ def _prepare_time_window(
     return result
 
 
+def _prepare_time_window_with_peak(
+    trace: BlockTrace,
+    peak_time_rel: float,
+    pre_sec: float = DEFAULT_PRE_SEC,
+    post_sec: float = DEFAULT_POST_SEC,
+    threshold: float = DEFAULT_THRESHOLD,
+    trim_head_sec: float = DEFAULT_TRIM_HEAD_SEC,
+) -> TimeWindowResult:
+    """Tim's explicit-peak preparation path, preserved for numerical parity."""
+    t_full = np.asarray(trace.time, dtype=float)
+    v_full = np.asarray(trace.voltage, dtype=float)
+    t_full = t_full - t_full[0]
+
+    if trim_head_sec > 0.0:
+        mask = t_full >= trim_head_sec
+        if np.count_nonzero(mask) < 2:
+            raise ValueError(f"{trace.sensor} has too little data after trim_head_sec={trim_head_sec}")
+        t_full = t_full[mask] - trim_head_sec
+        v_full = v_full[mask]
+        peak_time_rel = float(peak_time_rel) - trim_head_sec
+
+    if not np.isfinite(peak_time_rel) or peak_time_rel < t_full[0] or peak_time_rel > t_full[-1]:
+        return _prepare_time_window(
+            trace,
+            pre_sec=pre_sec,
+            post_sec=post_sec,
+            threshold=threshold,
+            trim_head_sec=trim_head_sec,
+        )
+
+    peak_index = int(np.nanargmin(np.abs(t_full - float(peak_time_rel))))
+    t_peak = float(t_full[peak_index])
+    t_start = t_peak - pre_sec
+    t_end = t_peak + post_sec
+
+    mask_sig = (t_full >= t_start) & (t_full <= t_end)
+    idx_sig = np.where(mask_sig)[0]
+    if len(idx_sig) < 2:
+        raise ValueError("Signal window is too short")
+    i0 = int(idx_sig[0])
+    i1 = int(idx_sig[-1])
+    win_len = i1 - i0 + 1
+
+    if i0 - win_len >= 0:
+        noise_start, noise_end = i0 - win_len, i0
+    elif i1 + 1 + win_len <= len(t_full):
+        noise_start, noise_end = i1 + 1, i1 + 1 + win_len
+    else:
+        take = min(win_len, len(t_full))
+        noise_start = max(0, i0 - take)
+        noise_end = noise_start + take
+
+    dt_full = float(np.median(np.diff(t_full)))
+    fs_full = 1.0 / dt_full
+    if BASELINE_MODE == "linear" and noise_end - noise_start >= 2:
+        p = np.polyfit(t_full[noise_start:noise_end], v_full[noise_start:noise_end], 1)
+        v_full = v_full - np.polyval(p, t_full)
+    elif BASELINE_MODE == "dc" and noise_end > noise_start:
+        v_full = v_full - np.median(v_full[noise_start:noise_end])
+    elif BASELINE_MODE == "highpass":
+        wn = min(max(HP_FC_HZ / (0.5 * fs_full), 1e-6), 0.999999)
+        b, a = butter(2, wn, btype="highpass")
+        v_full = filtfilt(b, a, v_full)
+
+    v_sig_voltage = apply_extra_filter(v_full[i0 : i1 + 1], dt_full)
+    v_noise_voltage_raw = apply_extra_filter(v_full[noise_start:noise_end], dt_full)
+    v_sig_disp = v_sig_voltage.copy()
+    v_noise_disp_raw = v_noise_voltage_raw.copy()
+    if len(v_noise_disp_raw) < win_len:
+        v_noise = np.concatenate(
+            [v_noise_disp_raw, np.zeros(win_len - len(v_noise_disp_raw), dtype=v_noise_disp_raw.dtype)]
+        )
+        v_noise_voltage = np.concatenate(
+            [
+                v_noise_voltage_raw,
+                np.zeros(win_len - len(v_noise_voltage_raw), dtype=v_noise_voltage_raw.dtype),
+            ]
+        )
+    else:
+        v_noise = v_noise_disp_raw[:win_len]
+        v_noise_voltage = v_noise_voltage_raw[:win_len]
+
+    if WINDOW_TYPE.lower() == "bh":
+        window = blackman_harris_window(win_len, terms=BH_TERMS)
+    elif WINDOW_TYPE.lower() == "tukey":
+        window = tukey_window(win_len, alpha=TUKEY_ALPHA)
+    else:
+        raise ValueError("WINDOW_TYPE must be 'bh' or 'tukey'")
+
+    coherent_gain = float(window.mean())
+    voltage_windowed = v_sig_voltage * window
+    displacement_windowed = v_sig_disp * window
+    x_ms = (t_full[i0 : i1 + 1] - t_full[i0]) * 1e3
+    v_scale = np.max(np.abs(v_sig_voltage)) if np.max(np.abs(v_sig_voltage)) > 0 else 1.0
+    d_scale = np.max(np.abs(v_sig_disp)) if np.max(np.abs(v_sig_disp)) > 0 else 1.0
+
+    result = TimeWindowResult(
+        x_ms=x_ms,
+        voltage_windowed=voltage_windowed,
+        displacement_windowed=displacement_windowed,
+        window_scaled_voltage=window * v_scale,
+        window_scaled_displacement=window * d_scale,
+        window=window,
+        raw_voltage_segment=v_sig_voltage,
+        displacement_segment=v_sig_disp,
+        full_time=t_full,
+        full_voltage_corrected=v_full,
+        i0=i0,
+        i1=i1,
+        noise_start=int(noise_start),
+        noise_end=int(noise_end),
+        dt=dt_full,
+        coherent_gain=coherent_gain,
+        peak_time=t_peak,
+        block=trace.block,
+        sensor=trace.sensor,
+    )
+    result._noise_displacement = v_noise * window  # type: ignore[attr-defined]
+    result._noise_voltage = v_noise_voltage * window  # type: ignore[attr-defined]
+    return result
+
+
 def compute_time_window(
     trace: BlockTrace,
     pre_sec: float = DEFAULT_PRE_SEC,
@@ -489,6 +611,39 @@ def compute_time_window(
 ) -> TimeWindowResult:
     """Prepare a Tim-compatible window after caller-side trace resolution."""
     return _prepare_time_window(trace, pre_sec=pre_sec, post_sec=post_sec, threshold=threshold)
+
+
+def compute_time_window_at_trigger(
+    trace: BlockTrace,
+    pre_sec: float = DEFAULT_PRE_SEC,
+    post_sec: float = DEFAULT_POST_SEC,
+) -> TimeWindowResult:
+    """Prepare a window at the caller-specified trigger, without peak fallback.
+
+    ``trace.trigger_time`` must use the same time coordinates as ``trace.time``.
+    The nearest sample is the explicit peak used by Tim's preparation flow.
+    """
+    time = np.asarray(trace.time, dtype=float)
+    if time.ndim != 1 or time.size == 0:
+        raise ValueError("trace.time must be a non-empty 1-D array")
+    if not np.all(np.isfinite(time)) or (time.size > 1 and not np.all(np.diff(time) > 0)):
+        raise ValueError("trace.time must be finite and strictly increasing")
+    if isinstance(trace.trigger_time, (bool, np.bool_, np.ndarray)):
+        raise ValueError("trace.trigger_time must be finite")
+    try:
+        trigger_time = float(trace.trigger_time)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("trace.trigger_time must be finite") from exc
+    if not np.isfinite(trigger_time):
+        raise ValueError("trace.trigger_time must be finite")
+    if trigger_time < time[0] or trigger_time > time[-1]:
+        raise ValueError("trace.trigger_time must lie within trace.time")
+    return _prepare_time_window_with_peak(
+        trace,
+        peak_time_rel=trigger_time - float(time[0]),
+        pre_sec=pre_sec,
+        post_sec=post_sec,
+    )
 
 
 def compute_spectrum(

@@ -122,6 +122,69 @@ class WindowParityTests(unittest.TestCase):
         np.testing.assert_array_equal(official_trace.time, original_time)
         np.testing.assert_array_equal(official_trace.voltage, original_voltage)
 
+    def test_auto_peak_contract_remains_first_threshold_peak(self):
+        time = np.linspace(12.0, 13.0, 1001)
+        voltage = np.zeros(time.shape)
+        voltage[200] = 2.0
+        voltage[700] = 0.5
+        trace = official.BlockTrace(time, voltage, 1000.0, 12.7, 700, 1, "selected")
+        result = official.compute_time_window(trace, pre_sec=0.01, post_sec=0.01, threshold=0.1)
+        self.assertAlmostEqual(result.peak_time, 0.2)
+        self.assertLess(result.i0, 200)
+        self.assertLess(result.i1, 700)
+
+    def test_explicit_trigger_uses_canonical_pulse_not_larger_pulse(self):
+        time = np.linspace(12.0, 13.0, 1001)
+        voltage = np.zeros(time.shape)
+        voltage[200] = 2.0
+        voltage[700] = 0.5
+        trace = official.BlockTrace(time, voltage, 1000.0, 12.7, 700, 1, "selected")
+        result = official.compute_time_window_at_trigger(trace, pre_sec=0.01, post_sec=0.02)
+        self.assertAlmostEqual(result.peak_time, 0.7)
+        self.assertEqual((result.i0, result.i1), (690, 719))
+        self.assertEqual((result.noise_start, result.noise_end), (660, 690))
+        self.assertLessEqual(time[result.i0] - trace.trigger_time, 0.0)
+        self.assertGreaterEqual(time[result.i1] - trace.trigger_time, 0.0)
+
+    def test_explicit_trigger_matches_latest_student_explicit_peak_flow(self):
+        source = (STUDENT_ROOT / "labquake_explorer_pzt_td.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_prepare_time_window_with_peak"
+        )
+        namespace = {
+            "np": np,
+            "_pzt_seis": official,
+            "DEFAULT_PRE_SEC": official.DEFAULT_PRE_SEC,
+            "DEFAULT_POST_SEC": official.DEFAULT_POST_SEC,
+            "DEFAULT_THRESHOLD": official.DEFAULT_THRESHOLD,
+        }
+        exec(compile(ast.Module(body=[function], type_ignores=[]), "student-explicit-peak", "exec"), namespace)
+        student_explicit = namespace["_prepare_time_window_with_peak"]
+
+        trace = make_trace(official)
+        peak_time_rel = trace.trigger_time - trace.time[0]
+        expected = student_explicit(trace, peak_time_rel, pre_sec=0.03, post_sec=0.04)
+        actual = official.compute_time_window_at_trigger(trace, pre_sec=0.03, post_sec=0.04)
+        for field in dataclasses.fields(official.TimeWindowResult):
+            expected_value = getattr(expected, field.name)
+            actual_value = getattr(actual, field.name)
+            if isinstance(expected_value, np.ndarray):
+                assert_arrays_equal(self, actual_value, expected_value)
+            else:
+                self.assertEqual(actual_value, expected_value)
+        assert_arrays_equal(self, actual._noise_displacement, expected._noise_displacement)
+        assert_arrays_equal(self, actual._noise_voltage, expected._noise_voltage)
+
+    def test_explicit_trigger_rejects_invalid_or_out_of_range_time_without_fallback(self):
+        trace = make_trace(official)
+        for trigger in (True, np.array([trace.trigger_time]), np.nan, trace.time[0] - 1.0, trace.time[-1] + 1.0):
+            invalid = official.BlockTrace(**{**vars(trace), "trigger_time": trigger})
+            with self.subTest(trigger=trigger), self.assertRaisesRegex(ValueError, "trigger_time"):
+                official.compute_time_window_at_trigger(invalid)
+
 
 class FilteringParityTests(unittest.TestCase):
     def tearDown(self):

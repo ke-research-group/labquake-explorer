@@ -77,7 +77,6 @@ def make_view(event=None, event_idx=0):
     view.event_combobox = FakeWidget(str(event_idx))
     view.pre_sec_var = FakeVariable("0.1")
     view.post_sec_var = FakeVariable("0.1")
-    view.threshold_var = FakeVariable("0.05")
     view.status_var = FakeVariable()
     view.figure = Figure()
     view.ax = view.figure.add_subplot(111)
@@ -112,12 +111,12 @@ def fake_result(trace):
 class ParameterTests(unittest.TestCase):
     def test_parameters_preserve_values(self):
         self.assertEqual(
-            parse_time_domain_parameters("0.2", "0.3", "0.04"),
-            {"pre_sec": 0.2, "post_sec": 0.3, "threshold": 0.04},
+            parse_time_domain_parameters("0.2", "0.3"),
+            {"pre_sec": 0.2, "post_sec": 0.3},
         )
 
     def test_parameters_require_finite_nonnegative_values(self):
-        for values in (("x", "1", "1"), ("nan", "1", "1"), ("-1", "1", "1"), ("1", "-1", "1"), ("1", "1", "-1")):
+        for values in (("x", "1"), ("nan", "1"), ("-1", "1"), ("1", "-1")):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 parse_time_domain_parameters(*values)
 
@@ -232,14 +231,30 @@ class BindingAndSwitchingTests(unittest.TestCase):
     def test_parameter_change_invalidates_without_analysis(self):
         view = make_view()
         view.preview_result = object()
-        with mock.patch("labquake_explorer.ui.views.pzt_time_domain_view.compute_time_window") as compute:
+        with mock.patch("labquake_explorer.ui.views.pzt_time_domain_view.compute_time_window_at_trigger") as compute:
             view.on_parameters_changed()
         self.assertIsNone(view.preview_result)
         compute.assert_not_called()
 
 
 class AnalysisAndPlotTests(unittest.TestCase):
-    @mock.patch("labquake_explorer.ui.views.pzt_time_domain_view.compute_time_window")
+    def test_real_preview_window_stays_at_canonical_event_with_larger_other_pulse(self):
+        time = np.linspace(12.0, 13.0, 1001)
+        raw = np.zeros(time.shape)
+        raw[200] = 2.0
+        raw[700] = 0.5
+        event = make_event(time=time, raw=raw, event_time=12.7)
+        view = make_view(event)
+        view.selected_channel_index = 0
+        view.pre_sec_var.set("0.01")
+        view.post_sec_var.set("0.02")
+        view.recompute_preview()
+        self.assertAlmostEqual(view.preview_result.peak_time, 0.7)
+        self.assertEqual((view.preview_result.i0, view.preview_result.i1), (690, 719))
+        self.assertEqual(view.ax.lines[-1].get_xdata()[0], 0.0)
+        view.parent.data_manager.set_data.assert_not_called()
+
+    @mock.patch("labquake_explorer.ui.views.pzt_time_domain_view.compute_time_window_at_trigger")
     def test_preview_calls_analysis_once_and_preserves_input(self, compute):
         event = make_event()
         original = copy.deepcopy(event)
@@ -254,7 +269,8 @@ class AnalysisAndPlotTests(unittest.TestCase):
         compute.side_effect = calculate
         view.recompute_preview()
         compute.assert_called_once()
-        self.assertEqual(compute.call_args.kwargs, {"pre_sec": 0.1, "post_sec": 0.1, "threshold": 0.05})
+        self.assertEqual(compute.call_args.kwargs, {"pre_sec": 0.1, "post_sec": 0.1})
+        self.assertEqual(trace_holder["trace"].trigger_time, event["event_time"])
         self.assertIs(view.preview_trace, trace_holder["trace"])
         self.assertIsInstance(view.preview_result, TimeWindowResult)
         np.testing.assert_array_equal(event["strain"]["original"]["raw"], original["strain"]["original"]["raw"])
@@ -270,7 +286,7 @@ class AnalysisAndPlotTests(unittest.TestCase):
         view.selected_channel_index = 0
         trace = view._build_selected_trace()
         result = fake_result(trace)
-        with mock.patch("labquake_explorer.ui.views.pzt_time_domain_view.compute_time_window") as compute:
+        with mock.patch("labquake_explorer.ui.views.pzt_time_domain_view.compute_time_window_at_trigger") as compute:
             view._draw_preview(trace, result)
         compute.assert_not_called()
         self.assertEqual(len(view.ax.patches), 2)

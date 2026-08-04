@@ -16,25 +16,22 @@ from matplotlib.figure import Figure
 from labquake_explorer.analysis.pzt_analysis_seismology import (
     DEFAULT_POST_SEC,
     DEFAULT_PRE_SEC,
-    DEFAULT_THRESHOLD,
     WINDOW_TYPE,
     BlockTrace,
     TimeWindowResult,
-    compute_time_window,
+    compute_time_window_at_trigger,
 )
 
 
 def parse_time_domain_parameters(
     pre_sec: str,
     post_sec: str,
-    threshold: str,
 ) -> dict[str, float]:
-    """Parse the three parameters accepted by Tim's time-window helper."""
+    """Parse the window spans accepted by the explicit-trigger helper."""
     parsed = {}
     for name, text in (
         ("pre_sec", pre_sec),
         ("post_sec", post_sec),
-        ("threshold", threshold),
     ):
         try:
             value = float(text)
@@ -47,8 +44,6 @@ def parse_time_domain_parameters(
         raise ValueError("pre_sec must be non-negative")
     if parsed["post_sec"] < 0:
         raise ValueError("post_sec must be non-negative")
-    if parsed["threshold"] < 0:
-        raise ValueError("threshold must be non-negative")
     return parsed
 
 
@@ -164,12 +159,10 @@ class PZTTimeDomainView(tk.Toplevel):
 
         self.pre_sec_var = tk.StringVar(value=str(DEFAULT_PRE_SEC))
         self.post_sec_var = tk.StringVar(value=str(DEFAULT_POST_SEC))
-        self.threshold_var = tk.StringVar(value=str(DEFAULT_THRESHOLD))
         for column, (label, variable) in enumerate(
             (
                 ("Pre (s):", self.pre_sec_var),
                 ("Post (s):", self.post_sec_var),
-                ("Threshold:", self.threshold_var),
             ),
             start=4,
         ):
@@ -298,10 +291,10 @@ class PZTTimeDomainView(tk.Toplevel):
     def recompute_preview(self) -> None:
         try:
             parameters = parse_time_domain_parameters(
-                self.pre_sec_var.get(), self.post_sec_var.get(), self.threshold_var.get()
+                self.pre_sec_var.get(), self.post_sec_var.get()
             )
             trace = self._build_selected_trace()
-            result = compute_time_window(trace, **parameters)
+            result = compute_time_window_at_trigger(trace, **parameters)
             self.preview_trace = trace
             self.preview_result = result
             self.preview_parameters = {**parameters, "window_type": WINDOW_TYPE}
