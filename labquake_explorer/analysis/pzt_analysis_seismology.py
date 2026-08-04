@@ -662,6 +662,47 @@ def compute_spectrum(
         post_sec=post_sec,
         threshold=threshold,
     )
+    return _compute_spectrum_from_window(
+        window_result,
+        calibration_csv,
+        q_csv,
+        nfft,
+    )
+
+
+def compute_spectrum_at_trigger(
+    trace: BlockTrace,
+    calibration_csv: Path,
+    q_csv: Path,
+    nfft: int = DEFAULT_NFFT,
+    pre_sec: float = DEFAULT_PRE_SEC,
+    post_sec: float = DEFAULT_POST_SEC,
+) -> SpectrumResult:
+    """Compute a Tim-compatible spectrum using ``BlockTrace.trigger_time``.
+
+    Peak auto-detection is not performed; all processing after time-window
+    selection is identical to :func:`compute_spectrum`.
+    """
+    window_result = compute_time_window_at_trigger(
+        trace,
+        pre_sec=pre_sec,
+        post_sec=post_sec,
+    )
+    return _compute_spectrum_from_window(
+        window_result,
+        calibration_csv,
+        q_csv,
+        nfft,
+    )
+
+
+def _compute_spectrum_from_window(
+    window_result: TimeWindowResult,
+    calibration_csv: Path,
+    q_csv: Path,
+    nfft: int,
+) -> SpectrumResult:
+    """Compute the Tim BAC spectrum from a prepared time window."""
     win_len = len(window_result.displacement_windowed)
     n_use = int(nfft) if nfft and nfft > win_len else win_len
 

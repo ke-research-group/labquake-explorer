@@ -311,6 +311,122 @@ class SpectrumAndFitParityTests(unittest.TestCase):
             ):
                 assert_arrays_equal(self, getattr(actual, name), getattr(expected, name))
 
+    @mock.patch.object(official, "compute_time_window_at_trigger")
+    @mock.patch.object(official, "compute_time_window")
+    @mock.patch.object(official, "_compute_spectrum_from_window")
+    def test_original_spectrum_keeps_auto_peak_and_threshold_contract(
+        self, spectrum_from_window, auto_window, trigger_window
+    ):
+        trace = make_trace(official)
+        auto_window.return_value = mock.sentinel.window
+        spectrum_from_window.return_value = mock.sentinel.spectrum
+        result = official.compute_spectrum(
+            trace, Path("cal.csv"), Path("q.csv"),
+            nfft=321, pre_sec=0.02, post_sec=0.04, threshold=0.17,
+        )
+        self.assertIs(result, mock.sentinel.spectrum)
+        auto_window.assert_called_once_with(
+            trace, pre_sec=0.02, post_sec=0.04, threshold=0.17
+        )
+        trigger_window.assert_not_called()
+        spectrum_from_window.assert_called_once_with(
+            mock.sentinel.window, Path("cal.csv"), Path("q.csv"), 321
+        )
+        self.assertIn("threshold", inspect.signature(official.compute_spectrum).parameters)
+
+    @mock.patch.object(official, "compute_time_window")
+    @mock.patch.object(official, "compute_time_window_at_trigger")
+    @mock.patch.object(official, "_compute_spectrum_from_window")
+    def test_trigger_spectrum_calls_only_explicit_window_once(
+        self, spectrum_from_window, trigger_window, auto_window
+    ):
+        trace = make_trace(official)
+        trigger_window.return_value = mock.sentinel.window
+        spectrum_from_window.return_value = mock.sentinel.spectrum
+        result = official.compute_spectrum_at_trigger(
+            trace, Path("cal.csv"), Path("q.csv"),
+            nfft=654, pre_sec=0.03, post_sec=0.05,
+        )
+        self.assertIs(result, mock.sentinel.spectrum)
+        trigger_window.assert_called_once_with(trace, pre_sec=0.03, post_sec=0.05)
+        auto_window.assert_not_called()
+        spectrum_from_window.assert_called_once_with(
+            mock.sentinel.window, Path("cal.csv"), Path("q.csv"), 654
+        )
+        self.assertNotIn("threshold", inspect.signature(official.compute_spectrum_at_trigger).parameters)
+
+    @mock.patch.object(official, "_compute_spectrum_from_window")
+    def test_trigger_spectrum_rejects_invalid_trigger_before_partial_result(self, spectrum_from_window):
+        trace = make_trace(official)
+        invalid = official.BlockTrace(**{**vars(trace), "trigger_time": np.nan})
+        with self.assertRaisesRegex(ValueError, "trigger_time"):
+            official.compute_spectrum_at_trigger(
+                invalid, Path("cal.csv"), Path("q.csv")
+            )
+        spectrum_from_window.assert_not_called()
+
+    def test_multi_pulse_spectra_use_distinct_auto_and_trigger_windows(self):
+        time = np.linspace(12.0, 13.0, 1001)
+        relative = time - time[0]
+        voltage = 0.002 * np.sin(2 * np.pi * 127 * relative)
+        voltage[200] += 2.0
+        voltage[700] += 0.5
+        trace = official.BlockTrace(time, voltage, 1000.0, 12.7, 700, 1, "selected")
+        original_time = time.copy()
+        original_voltage = voltage.copy()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calibration = root / "gain.csv"
+            calibration.write_text("frequency,gain\n100,2\n500,2\n", encoding="utf-8")
+            q_path = root / "q.csv"
+            q_path.write_text("1,0.01\n100,0.01\n", encoding="utf-8")
+            auto = official.compute_spectrum(
+                trace, calibration, q_path, nfft=2048,
+                pre_sec=0.01, post_sec=0.02, threshold=0.1,
+            )
+            explicit = official.compute_spectrum_at_trigger(
+                trace, calibration, q_path, nfft=2048,
+                pre_sec=0.01, post_sec=0.02,
+            )
+        self.assertAlmostEqual(auto.time_window.peak_time, 0.2)
+        self.assertAlmostEqual(explicit.time_window.peak_time, 0.7)
+        self.assertEqual((explicit.time_window.i0, explicit.time_window.i1), (690, 719))
+        self.assertNotEqual(auto.time_window.i0, explicit.time_window.i0)
+        np.testing.assert_array_equal(time, original_time)
+        np.testing.assert_array_equal(voltage, original_voltage)
+
+    def test_spectrum_bodies_match_when_auto_peak_and_trigger_match(self):
+        time = np.arange(4000, dtype=float) / 20000.0 + 12.5
+        relative = time - time[0]
+        voltage = 0.002 * np.sin(2 * np.pi * 700 * relative)
+        voltage[2000] += 1.0
+        trace = official.BlockTrace(
+            time, voltage, 20000.0, float(time[2000]), 2000, 7, "selected"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calibration = root / "gain.csv"
+            calibration.write_text("frequency,gain\n100,2\n10000,2\n", encoding="utf-8")
+            q_path = root / "q.csv"
+            q_path.write_text("1,0.01\n100,0.01\n", encoding="utf-8")
+            auto = official.compute_spectrum(
+                trace, calibration, q_path, nfft=8192, pre_sec=0.03, post_sec=0.04,
+            )
+            explicit = official.compute_spectrum_at_trigger(
+                trace, calibration, q_path, nfft=8192, pre_sec=0.03, post_sec=0.04,
+            )
+        self.assertEqual(auto.time_window.peak_time, explicit.time_window.peak_time)
+        for field in dataclasses.fields(official.SpectrumResult):
+            if field.name == "time_window":
+                continue
+            left = getattr(auto, field.name)
+            right = getattr(explicit, field.name)
+            if isinstance(left, np.ndarray):
+                assert_arrays_equal(self, left, right)
+                self.assertIsNot(left, right)
+            else:
+                self.assertEqual(left, right)
+
     def test_parameter_bounds_validation_matches_student(self):
         cases = [
             (None, None),
