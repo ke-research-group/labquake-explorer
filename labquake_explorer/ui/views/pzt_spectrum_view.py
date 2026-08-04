@@ -17,12 +17,20 @@ from matplotlib.figure import Figure
 from pandas.errors import EmptyDataError, ParserError
 
 from labquake_explorer.analysis.pzt_analysis_seismology import (
+    DEFAULT_FIT_PARAMETER_LB,
+    DEFAULT_FIT_PARAMETER_UB,
+    DEFAULT_LNF_MAX_Q,
+    DEFAULT_LNF_MIN_Q,
     DEFAULT_NFFT,
     DEFAULT_POST_SEC,
     DEFAULT_PRE_SEC,
     BlockTrace,
+    FitResult,
     SpectrumResult,
     compute_spectrum_at_trigger,
+    fit_omega_n_q,
+    scale_spectrum_for_seismology_fit,
+    validate_fit_parameter_bounds,
 )
 
 
@@ -37,6 +45,60 @@ _EXPECTED_PREVIEW_EXCEPTIONS = (
     ParserError,
     EmptyDataError,
 )
+
+_EXPECTED_FIT_EXCEPTIONS = (ValueError, TypeError, IndexError, KeyError)
+
+
+def parse_omega_n_fit_parameters(
+    lnf_min: str,
+    lnf_max: str,
+    omega0_lb: str,
+    fc_lb: str,
+    n_lb: str,
+    omega0_ub: str,
+    fc_ub: str,
+    n_ub: str,
+) -> dict[str, Any]:
+    """Parse and validate the explicit omega-n fitting controls."""
+    fields = (
+        ("ln(f) minimum", lnf_min),
+        ("ln(f) maximum", lnf_max),
+        ("Omega0 lower bound", omega0_lb),
+        ("fc lower bound", fc_lb),
+        ("n lower bound", n_lb),
+        ("Omega0 upper bound", omega0_ub),
+        ("fc upper bound", fc_ub),
+        ("n upper bound", n_ub),
+    )
+    parsed = []
+    for name, text in fields:
+        try:
+            value = float(text)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"{name} must be a finite number") from exc
+        if not math.isfinite(value):
+            raise ValueError(f"{name} must be a finite number")
+        parsed.append(value)
+
+    fit_min, fit_max, *bounds = parsed
+    if fit_min >= fit_max:
+        raise ValueError("ln(f) minimum must be smaller than ln(f) maximum")
+    parameter_lb = tuple(bounds[:3])
+    parameter_ub = tuple(bounds[3:])
+    for name, lower, upper in zip(("Omega0", "fc", "n"), parameter_lb, parameter_ub):
+        if lower <= 0:
+            raise ValueError(f"{name} lower bound must be positive")
+        if upper <= 0:
+            raise ValueError(f"{name} upper bound must be positive")
+        if lower >= upper:
+            raise ValueError(f"{name} lower bound must be smaller than its upper bound")
+    validate_fit_parameter_bounds(parameter_lb, parameter_ub)
+    return {
+        "lnf_min": fit_min,
+        "lnf_max": fit_max,
+        "parameter_lb": parameter_lb,
+        "parameter_ub": parameter_ub,
+    }
 
 
 def parse_spectrum_parameters(
@@ -98,6 +160,8 @@ class PZTSpectrumView(tk.Toplevel):
         self.preview_trace: BlockTrace | None = None
         self.preview_result: SpectrumResult | None = None
         self.preview_parameters: dict[str, Any] | None = None
+        self.fit_result: FitResult | None = None
+        self.fit_parameters: dict[str, Any] | None = None
         self._initializing_parameters = True
 
         self._set_event(event_idx)
@@ -219,6 +283,47 @@ class PZTSpectrumView(tk.Toplevel):
             row=3, column=0, columnspan=12, sticky="w", pady=(5, 0)
         )
 
+        fitting = ttk.LabelFrame(self, text="Omega-n fitting")
+        fitting.pack(side=tk.TOP, fill=tk.X, padx=6, pady=(0, 6))
+        self.lnf_min_var = tk.StringVar(value=str(DEFAULT_LNF_MIN_Q))
+        self.lnf_max_var = tk.StringVar(value=str(DEFAULT_LNF_MAX_Q))
+        lower = [tk.StringVar(value=str(value)) for value in DEFAULT_FIT_PARAMETER_LB]
+        upper = [tk.StringVar(value=str(value)) for value in DEFAULT_FIT_PARAMETER_UB]
+        self.omega0_lb_var, self.fc_lb_var, self.n_lb_var = lower
+        self.omega0_ub_var, self.fc_ub_var, self.n_ub_var = upper
+        fit_fields = (
+            ("ln(f) min:", self.lnf_min_var),
+            ("ln(f) max:", self.lnf_max_var),
+            ("Omega0 LB:", self.omega0_lb_var),
+            ("fc LB:", self.fc_lb_var),
+            ("n LB:", self.n_lb_var),
+            ("Omega0 UB:", self.omega0_ub_var),
+            ("fc UB:", self.fc_ub_var),
+            ("n UB:", self.n_ub_var),
+        )
+        for column, (label, variable) in enumerate(fit_fields):
+            ttk.Label(fitting, text=label).grid(row=0, column=2 * column, sticky="e")
+            ttk.Entry(fitting, textvariable=variable, width=9).grid(
+                row=0, column=2 * column + 1, padx=(3, 7), sticky="w"
+            )
+            variable.trace_add("write", self.on_fit_parameters_changed)
+        self.fit_button = ttk.Button(fitting, text="Fit / Recompute", command=self.recompute_fit)
+        self.fit_button.grid(row=0, column=16, padx=(8, 0), sticky="e")
+        self.fit_value_vars = {
+            name: tk.StringVar(value="—")
+            for name in ("Omega0", "fc", "n", "c", "R²", "ln(f)")
+        }
+        for column, (name, variable) in enumerate(self.fit_value_vars.items()):
+            ttk.Label(fitting, text=f"{name}:").grid(row=1, column=2 * column, sticky="e")
+            ttk.Label(fitting, textvariable=variable).grid(
+                row=1, column=2 * column + 1, padx=(3, 10), sticky="w"
+            )
+        self.fit_status_var = tk.StringVar(value="Calculate a spectrum before fitting")
+        ttk.Label(fitting, textvariable=self.fit_status_var).grid(
+            row=2, column=0, columnspan=17, sticky="w", pady=(4, 0)
+        )
+        self._update_fit_button()
+
     def _create_figure(self) -> None:
         self.figure = Figure(figsize=(11, 8), dpi=100)
         self.time_ax, self.raw_ax, self.resampled_ax = self.figure.subplots(3, 1)
@@ -261,6 +366,9 @@ class PZTSpectrumView(tk.Toplevel):
         )
         self.preview_button.configure(state="normal" if enabled else "disabled")
 
+    def _update_fit_button(self) -> None:
+        self.fit_button.configure(state="normal" if self.preview_result is not None else "disabled")
+
     def on_channel_changed(self, _event=None) -> None:
         value = self.channel_combobox.get()
         selected = None
@@ -286,6 +394,12 @@ class PZTSpectrumView(tk.Toplevel):
             return
         self._invalidate_preview("Parameters changed — recompute preview")
 
+    def on_fit_parameters_changed(self, *_args) -> None:
+        if self._initializing_parameters:
+            return
+        self._clear_fit(redraw=True)
+        self.fit_status_var.set("Fitting parameters changed — recompute fit")
+
     def _invalidate_preview(self, status: str) -> None:
         self._clear_preview(redraw=True)
         self._update_preview_button()
@@ -295,10 +409,26 @@ class PZTSpectrumView(tk.Toplevel):
         self.preview_trace = None
         self.preview_result = None
         self.preview_parameters = None
+        self._clear_fit(redraw=False)
+        if hasattr(self, "fit_button"):
+            self._update_fit_button()
+        if hasattr(self, "fit_status_var"):
+            self.fit_status_var.set("Calculate a spectrum before fitting")
         if redraw and hasattr(self, "time_ax"):
             for axes in (self.time_ax, self.raw_ax, self.resampled_ax):
                 axes.clear()
             self.canvas.draw_idle()
+
+    def _clear_fit(self, *, redraw: bool) -> None:
+        self.fit_result = None
+        self.fit_parameters = None
+        if hasattr(self, "fit_value_vars"):
+            for variable in self.fit_value_vars.values():
+                variable.set("—")
+        if redraw and self.preview_trace is not None and self.preview_result is not None:
+            self._draw_preview(self.preview_trace, self.preview_result)
+        if hasattr(self, "fit_button"):
+            self._update_fit_button()
 
     def browse_calibration(self) -> None:
         self._browse_path(self.calibration_path_var, "Select calibration CSV")
@@ -350,10 +480,13 @@ class PZTSpectrumView(tk.Toplevel):
             )
             trace = self._build_selected_trace()
             result = compute_spectrum_at_trigger(trace, **parameters)
+            self._clear_fit(redraw=False)
             self.preview_trace = trace
             self.preview_result = result
             self.preview_parameters = parameters
             self._draw_preview(trace, result)
+            self._update_fit_button()
+            self.fit_status_var.set("Spectrum ready — fit not yet computed")
             valid_count = int(np.count_nonzero(result.valid_cal_mask))
             self.status_var.set(
                 f"{trace.sensor}; {trace.sampling_rate:.6g} Hz; NFFT {parameters['nfft']}; "
@@ -362,6 +495,38 @@ class PZTSpectrumView(tk.Toplevel):
             )
         except _EXPECTED_PREVIEW_EXCEPTIONS as exc:
             self._show_error(exc)
+
+    def recompute_fit(self) -> None:
+        if self.preview_result is None:
+            self._clear_fit(redraw=False)
+            self.fit_status_var.set("Calculate a spectrum before fitting")
+            self._update_fit_button()
+            return
+        try:
+            parameters = parse_omega_n_fit_parameters(
+                self.lnf_min_var.get(),
+                self.lnf_max_var.get(),
+                self.omega0_lb_var.get(),
+                self.fc_lb_var.get(),
+                self.n_lb_var.get(),
+                self.omega0_ub_var.get(),
+                self.fc_ub_var.get(),
+                self.n_ub_var.get(),
+            )
+            fit_spectrum = scale_spectrum_for_seismology_fit(self.preview_result)
+            result = fit_omega_n_q(fit_spectrum, **parameters)
+            self.fit_result = result
+            self.fit_parameters = parameters
+            self._draw_preview(self.preview_trace, self.preview_result, redraw=False)
+            self._draw_fit_overlay(self.preview_result, result, parameters)
+            self.figure.tight_layout()
+            self.canvas.draw_idle()
+            self._display_fit_result(result)
+            self.fit_status_var.set("Omega-n fit preview — not saved")
+        except _EXPECTED_FIT_EXCEPTIONS as exc:
+            self._clear_fit(redraw=True)
+            self.fit_status_var.set(str(exc))
+            messagebox.showerror("PZT omega-n fit", str(exc), parent=self)
 
     @staticmethod
     def _plot_positive(axes, x, y, *args, **kwargs) -> bool:
@@ -373,7 +538,9 @@ class PZTSpectrumView(tk.Toplevel):
         axes.loglog(x_values[mask], y_values[mask], *args, **kwargs)
         return True
 
-    def _draw_preview(self, trace: BlockTrace, result: SpectrumResult) -> None:
+    def _draw_preview(
+        self, trace: BlockTrace, result: SpectrumResult, *, redraw: bool = True
+    ) -> None:
         for axes in (self.time_ax, self.raw_ax, self.resampled_ax):
             axes.clear()
 
@@ -421,7 +588,51 @@ class PZTSpectrumView(tk.Toplevel):
             self.resampled_ax.legend(loc="best")
         self.resampled_ax.grid(True, which="both", alpha=0.3)
         self.figure.tight_layout()
-        self.canvas.draw_idle()
+        if redraw:
+            self.canvas.draw_idle()
+
+    def _draw_fit_overlay(
+        self,
+        preview_result: SpectrumResult,
+        fit_result: FitResult,
+        parameters: Mapping[str, Any],
+    ) -> None:
+        self._plot_positive(
+            self.resampled_ax,
+            preview_result.f7_hz[fit_result.mask_fit],
+            preview_result.y7_qcorr[fit_result.mask_fit],
+            linestyle="none",
+            marker="o",
+            markersize=3,
+            label="Fit samples",
+        )
+        self._plot_positive(
+            self.resampled_ax,
+            fit_result.f_model_hz,
+            fit_result.m_model_amp,
+            linewidth=2,
+            label="Omega-n model",
+        )
+        for value, label in (
+            (math.exp(parameters["lnf_min"]), "Fit range"),
+            (math.exp(parameters["lnf_max"]), None),
+        ):
+            if math.isfinite(value) and value > 0:
+                self.resampled_ax.axvline(value, color="C4", linestyle=":", label=label)
+        if self.resampled_ax.lines:
+            self.resampled_ax.legend(loc="best")
+
+    def _display_fit_result(self, result: FitResult) -> None:
+        values = {
+            "Omega0": result.omega0,
+            "fc": result.fc_hz,
+            "n": result.n,
+            "c": result.c,
+            "R²": result.r2,
+        }
+        for name, value in values.items():
+            self.fit_value_vars[name].set(f"{value:.6g}")
+        self.fit_value_vars["ln(f)"].set(f"{result.lnf_min:.6g} – {result.lnf_max:.6g}")
 
     def _show_error(self, exc: Exception) -> None:
         self._clear_preview(redraw=True)

@@ -11,15 +11,22 @@ from matplotlib.figure import Figure
 from pandas.errors import EmptyDataError, ParserError
 
 from labquake_explorer.analysis.pzt_analysis_seismology import (
+    DEFAULT_FIT_PARAMETER_LB,
+    DEFAULT_FIT_PARAMETER_UB,
+    DEFAULT_LNF_MAX_Q,
+    DEFAULT_LNF_MIN_Q,
     BlockTrace,
+    FitResult,
     SpectrumResult,
     TimeWindowResult,
 )
 from labquake_explorer.ui.labquake_explorer import LabquakeExplorer
 from labquake_explorer.ui.views import PZTSpectrumView as ExportedView
 from labquake_explorer.ui.views.pzt_spectrum_view import (
+    _EXPECTED_FIT_EXCEPTIONS,
     _EXPECTED_PREVIEW_EXCEPTIONS,
     PZTSpectrumView,
+    parse_omega_n_fit_parameters,
     parse_spectrum_parameters,
 )
 
@@ -83,6 +90,8 @@ def make_view(event=None, event_idx=0):
     view.preview_trace = None
     view.preview_result = None
     view.preview_parameters = None
+    view.fit_result = None
+    view.fit_parameters = None
     view._initializing_parameters = False
     view.event_combobox = FakeWidget(str(event_idx))
     view.channel_combobox = FakeWidget()
@@ -93,6 +102,19 @@ def make_view(event=None, event_idx=0):
     view.calibration_path_var = FakeVariable("")
     view.q_path_var = FakeVariable("")
     view.status_var = FakeVariable()
+    view.lnf_min_var = FakeVariable(str(DEFAULT_LNF_MIN_Q))
+    view.lnf_max_var = FakeVariable(str(DEFAULT_LNF_MAX_Q))
+    view.omega0_lb_var = FakeVariable(str(DEFAULT_FIT_PARAMETER_LB[0]))
+    view.fc_lb_var = FakeVariable(str(DEFAULT_FIT_PARAMETER_LB[1]))
+    view.n_lb_var = FakeVariable(str(DEFAULT_FIT_PARAMETER_LB[2]))
+    view.omega0_ub_var = FakeVariable(str(DEFAULT_FIT_PARAMETER_UB[0]))
+    view.fc_ub_var = FakeVariable(str(DEFAULT_FIT_PARAMETER_UB[1]))
+    view.n_ub_var = FakeVariable(str(DEFAULT_FIT_PARAMETER_UB[2]))
+    view.fit_button = FakeWidget()
+    view.fit_value_vars = {
+        name: FakeVariable("—") for name in ("Omega0", "fc", "n", "c", "R²", "ln(f)")
+    }
+    view.fit_status_var = FakeVariable("Calculate a spectrum before fitting")
     view.figure = Figure()
     view.time_ax, view.raw_ax, view.resampled_ax = view.figure.subplots(3, 1)
     view.canvas = FakeCanvas()
@@ -100,7 +122,6 @@ def make_view(event=None, event_idx=0):
 
 
 def make_result(trace):
-    count = len(trace.time)
     window = TimeWindowResult(
         x_ms=np.arange(3.0),
         voltage_windowed=np.array([0.1, 1.0, 0.1]),
@@ -145,6 +166,21 @@ def make_result(trace):
     )
 
 
+def make_fit_result():
+    return FitResult(
+        lnf_min=7.3,
+        lnf_max=10.5,
+        mask_fit=np.array([True, False, True]),
+        omega0=-1.234567,
+        fc_hz=4567.89,
+        n=2.25,
+        c=0.0,
+        r2=np.nan,
+        f_model_hz=np.array([100.0, 300.0]),
+        m_model_amp=np.array([2.0, 1.0]),
+    )
+
+
 class ParameterTests(unittest.TestCase):
     def test_parser_returns_typed_defaults_and_paths(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -177,6 +213,34 @@ class ParameterTests(unittest.TestCase):
             for calibration, q_path, field in cases:
                 with self.subTest(field=field), self.assertRaisesRegex(ValueError, field):
                     parse_spectrum_parameters("0.1", "0.1", "10", calibration, q_path)
+
+    def test_fit_parser_returns_typed_defaults(self):
+        result = parse_omega_n_fit_parameters(
+            str(DEFAULT_LNF_MIN_Q),
+            str(DEFAULT_LNF_MAX_Q),
+            *(str(value) for value in DEFAULT_FIT_PARAMETER_LB),
+            *(str(value) for value in DEFAULT_FIT_PARAMETER_UB),
+        )
+        self.assertEqual(result["lnf_min"], DEFAULT_LNF_MIN_Q)
+        self.assertEqual(result["lnf_max"], DEFAULT_LNF_MAX_Q)
+        self.assertEqual(result["parameter_lb"], DEFAULT_FIT_PARAMETER_LB)
+        self.assertEqual(result["parameter_ub"], DEFAULT_FIT_PARAMETER_UB)
+
+    def test_fit_parser_rejects_nonfinite_range_and_invalid_bounds_by_field(self):
+        defaults = ["7.3", "10.5", "1e-15", "1e-9", "1", "1e-4", "3e5", "8"]
+        cases = (
+            (0, "nan", r"ln\(f\) minimum"),
+            (1, "7.3", r"ln\(f\) minimum"),
+            (2, "0", "Omega0 lower bound"),
+            (4, "0", "n lower bound"),
+            (3, "4e5", "fc lower bound"),
+        )
+        for index, value, field in cases:
+            with self.subTest(field=field):
+                inputs = defaults.copy()
+                inputs[index] = value
+                with self.assertRaisesRegex(ValueError, field):
+                    parse_omega_n_fit_parameters(*inputs)
 
 
 class ContextAndBindingTests(unittest.TestCase):
@@ -280,6 +344,8 @@ class BrowseAndSwitchTests(unittest.TestCase):
         view.nfft_var.set("2048")
         view.calibration_path_var.set("cal.csv")
         view.q_path_var.set("q.csv")
+        view.lnf_min_var.set("8.1")
+        view.fit_result = make_fit_result()
         view.selected_channel_index = 1
         view.on_event_changed()
         self.assertEqual(view.event_idx, 1)
@@ -287,6 +353,9 @@ class BrowseAndSwitchTests(unittest.TestCase):
         self.assertIsNone(view.selected_channel_index)
         self.assertEqual((view.pre_sec_var.get(), view.nfft_var.get()), ("0.3", "2048"))
         self.assertEqual((view.calibration_path_var.get(), view.q_path_var.get()), ("cal.csv", "q.csv"))
+        self.assertEqual(view.lnf_min_var.get(), "8.1")
+        self.assertIsNone(view.fit_result)
+        self.assertEqual(view.fit_button.options["state"], "disabled")
         self.assertEqual(view.preview_button.options["state"], "disabled")
         self.assertEqual(view.data_manager.get_data.call_args_list, [mock.call("runs/[3]/events"), mock.call("runs/[3]/events/[1]")])
 
@@ -457,6 +526,158 @@ class AnalysisAndPlotTests(unittest.TestCase):
         self.assertEqual(view.time_ax.lines[-1].get_xdata()[0], 0.0)
 
 
+class OmegaNFitTests(unittest.TestCase):
+    def _ready_view(self):
+        view = make_view()
+        view.selected_channel_index = 0
+        view.preview_trace = view._build_selected_trace()
+        view.preview_result = make_result(view.preview_trace)
+        view._update_fit_button()
+        return view
+
+    def test_initial_and_spectrum_ready_fit_button_lifecycle(self):
+        view = make_view()
+        self.assertIsNone(view.fit_result)
+        self.assertIsNone(view.fit_parameters)
+        view._update_fit_button()
+        self.assertEqual(view.fit_button.options["state"], "disabled")
+        self.assertTrue(all(variable.get() == "—" for variable in view.fit_value_vars.values()))
+        view.preview_result = object()
+        view._update_fit_button()
+        self.assertEqual(view.fit_button.options["state"], "normal")
+
+    def test_fit_uses_scaled_existing_spectrum_once_without_recomputing_spectrum(self):
+        view = self._ready_view()
+        original = view.preview_result
+        original_arrays = [original.f7_hz.copy(), original.y7_qcorr.copy()]
+        scaled = copy.copy(original)
+        fit_result = make_fit_result()
+        with mock.patch(
+            "labquake_explorer.ui.views.pzt_spectrum_view.scale_spectrum_for_seismology_fit",
+            return_value=scaled,
+        ) as scale, mock.patch(
+            "labquake_explorer.ui.views.pzt_spectrum_view.fit_omega_n_q",
+            return_value=fit_result,
+        ) as fit, mock.patch(
+            "labquake_explorer.ui.views.pzt_spectrum_view.compute_spectrum_at_trigger"
+        ) as compute:
+            view.recompute_fit()
+        scale.assert_called_once_with(original)
+        fit.assert_called_once_with(
+            scaled,
+            lnf_min=DEFAULT_LNF_MIN_Q,
+            lnf_max=DEFAULT_LNF_MAX_Q,
+            parameter_lb=DEFAULT_FIT_PARAMETER_LB,
+            parameter_ub=DEFAULT_FIT_PARAMETER_UB,
+        )
+        compute.assert_not_called()
+        self.assertIs(view.preview_result, original)
+        self.assertIs(view.fit_result, fit_result)
+        np.testing.assert_array_equal(original.f7_hz, original_arrays[0])
+        np.testing.assert_array_equal(original.y7_qcorr, original_arrays[1])
+
+    def test_fit_display_and_overlay_use_returned_fit_fields(self):
+        view = self._ready_view()
+        fit_result = make_fit_result()
+        view.fit_parameters = {
+            "lnf_min": 7.3,
+            "lnf_max": 10.5,
+            "parameter_lb": DEFAULT_FIT_PARAMETER_LB,
+            "parameter_ub": DEFAULT_FIT_PARAMETER_UB,
+        }
+        view._draw_preview(view.preview_trace, view.preview_result, redraw=False)
+        view._draw_fit_overlay(view.preview_result, fit_result, view.fit_parameters)
+        view._display_fit_result(fit_result)
+        labels = [line.get_label() for line in view.resampled_ax.lines]
+        self.assertIn("Fit samples", labels)
+        self.assertIn("Omega-n model", labels)
+        self.assertIn("Fit range", labels)
+        model = next(line for line in view.resampled_ax.lines if line.get_label() == "Omega-n model")
+        np.testing.assert_array_equal(model.get_xdata(), fit_result.f_model_hz)
+        np.testing.assert_array_equal(model.get_ydata(), fit_result.m_model_amp)
+        self.assertEqual(view.fit_value_vars["Omega0"].get(), "-1.23457")
+        self.assertEqual(view.fit_value_vars["R²"].get(), "nan")
+        self.assertEqual(view.fit_status_var.get(), "Calculate a spectrum before fitting")
+
+    def test_fit_parameter_change_clears_only_fit_and_retains_base_spectrum(self):
+        view = self._ready_view()
+        spectrum = view.preview_result
+        view.fit_result = make_fit_result()
+        view.fit_parameters = {"lnf_min": 7.3}
+        with mock.patch(
+            "labquake_explorer.ui.views.pzt_spectrum_view.compute_spectrum_at_trigger"
+        ) as compute:
+            view.on_fit_parameters_changed()
+        self.assertIs(view.preview_result, spectrum)
+        self.assertIsNone(view.fit_result)
+        self.assertIsNone(view.fit_parameters)
+        self.assertEqual(view.fit_button.options["state"], "normal")
+        self.assertEqual(view.fit_status_var.get(), "Fitting parameters changed — recompute fit")
+        self.assertIn("Q-corrected", [line.get_label() for line in view.resampled_ax.lines])
+        compute.assert_not_called()
+
+    def test_spectrum_invalidation_clears_spectrum_fit_and_plots(self):
+        view = self._ready_view()
+        view.fit_result = make_fit_result()
+        view.fit_parameters = {"lnf_min": 7.3}
+        view._draw_preview(view.preview_trace, view.preview_result)
+        view.on_parameters_changed()
+        self.assertIsNone(view.preview_result)
+        self.assertIsNone(view.fit_result)
+        self.assertEqual(view.fit_button.options["state"], "disabled")
+        self.assertFalse(view.resampled_ax.lines)
+
+    def test_recomputed_spectrum_clears_old_fit_without_automatic_refit(self):
+        view = self._ready_view()
+        view.fit_result = make_fit_result()
+        with tempfile.TemporaryDirectory() as directory:
+            AnalysisAndPlotTests()._configure_existing_paths(view, directory)
+            new_result = make_result(view.preview_trace)
+            with mock.patch(
+                "labquake_explorer.ui.views.pzt_spectrum_view.compute_spectrum_at_trigger",
+                return_value=new_result,
+            ), mock.patch(
+                "labquake_explorer.ui.views.pzt_spectrum_view.fit_omega_n_q"
+            ) as fit:
+                view.recompute_preview()
+        self.assertIs(view.preview_result, new_result)
+        self.assertIsNone(view.fit_result)
+        self.assertEqual(view.fit_button.options["state"], "normal")
+        fit.assert_not_called()
+
+    def test_expected_fit_error_preserves_spectrum_and_unexpected_errors_propagate(self):
+        for error, caught in ((ValueError("bad fit"), True), (AttributeError("bug"), False), (RuntimeError("bug"), False)):
+            with self.subTest(error=type(error).__name__):
+                view = self._ready_view()
+                spectrum = view.preview_result
+                with mock.patch(
+                    "labquake_explorer.ui.views.pzt_spectrum_view.fit_omega_n_q",
+                    side_effect=error,
+                ), mock.patch(
+                    "labquake_explorer.ui.views.pzt_spectrum_view.messagebox.showerror"
+                ) as showerror:
+                    if caught:
+                        view.recompute_fit()
+                        showerror.assert_called_once_with("PZT omega-n fit", str(error), parent=view)
+                        self.assertEqual(view.fit_status_var.get(), str(error))
+                    else:
+                        with self.assertRaises(type(error)):
+                            view.recompute_fit()
+                        showerror.assert_not_called()
+                self.assertIs(view.preview_result, spectrum)
+
+    def test_expected_fit_tuple_excludes_programming_errors_and_no_persistence(self):
+        for error_type in (AttributeError, RuntimeError, AssertionError, Exception):
+            self.assertNotIn(error_type, _EXPECTED_FIT_EXCEPTIONS)
+        view = self._ready_view()
+        with mock.patch(
+            "labquake_explorer.ui.views.pzt_spectrum_view.fit_omega_n_q",
+            return_value=make_fit_result(),
+        ):
+            view.recompute_fit()
+        view.parent.data_manager.set_data.assert_not_called()
+
+
 class WiringAndLifecycleTests(unittest.TestCase):
     def test_view_is_exported_and_controller_method_exists(self):
         self.assertIs(ExportedView, PZTSpectrumView)
@@ -504,7 +725,7 @@ class WiringAndLifecycleTests(unittest.TestCase):
     def test_source_has_no_forbidden_tim_or_persistence_dependencies(self):
         source = Path(PZTSpectrumView.__module__.replace(".", "/") + ".py")
         text = (Path(__file__).parents[1] / source).read_text(encoding="utf-8")
-        for forbidden in ("TPC5Dataset", "TDEvent", "AS02", "set_data(", "compute_spectrum(", "fit_omega_n_q"):
+        for forbidden in ("TPC5Dataset", "TDEvent", "AS02", "set_data(", "compute_spectrum("):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, text)
 
