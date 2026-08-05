@@ -137,9 +137,29 @@ These are **API/test verified — no standalone GUI entry**.
 
 - [ ] Verify rectangular or circular source geometry with explicit sensor/source
       coordinates, fault dimensions, and any non-default grid/radiation inputs.
-- [ ] Verify power-law scaling with explicit paired arrays using
-      `fit_power_law(x_values, y_values)` and, when needed,
-      `compute_power_law_r_squared(...)` and `build_fit_curve(...)`.
+- [ ] Verify power-law scaling with explicit paired arrays using keyword-only
+      calls:
+
+  ```python
+  coefficient, exponent = fit_power_law(
+      x=x_values,
+      y=y_values,
+  )
+
+  r_squared = compute_power_law_r_squared(
+      x=x_values,
+      y=y_values,
+      coefficient=coefficient,
+      exponent=exponent,
+  )
+
+  curve_x, curve_y = build_fit_curve(
+      x_min=x_min,
+      x_max=x_max,
+      coefficient=coefficient,
+      exponent=exponent,
+  )
+  ```
 - [ ] Confirm these API calls do not infer case, filename, sensor, or paper-record identity.
 
 ## No-write verification
