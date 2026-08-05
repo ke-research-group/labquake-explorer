@@ -54,6 +54,16 @@ from .pzt_source_parameters import (
     TIM_DEFAULT_SOURCE_MODEL_K,
     calculate_bac_source_parameters,
 )
+from .pzt_source_geometry import (
+    BACGeometrySolution,
+    BACGeometrySolutionSet,
+    TIM_DEFAULT_GEOMETRY_GRID_RESOLUTION,
+    TIM_RADIATION_ANGLE_TABLE_DEG,
+    TIM_RADIATION_COEFFICIENT_TABLE,
+    calculate_circular_fault_geometry_solutions,
+    calculate_rectangular_fault_geometry_solutions,
+    interpolate_tim_radiation_coefficient,
+)
 
 __all__ = [
     "calculate_2pt_trend_drop",
@@ -102,4 +112,12 @@ __all__ = [
     "TIM_DEFAULT_SOURCE_MODEL_K",
     "TIM_DEFAULT_RADIATION_PATTERN_FACTOR",
     "calculate_bac_source_parameters",
+    "BACGeometrySolution",
+    "BACGeometrySolutionSet",
+    "TIM_DEFAULT_GEOMETRY_GRID_RESOLUTION",
+    "TIM_RADIATION_ANGLE_TABLE_DEG",
+    "TIM_RADIATION_COEFFICIENT_TABLE",
+    "interpolate_tim_radiation_coefficient",
+    "calculate_rectangular_fault_geometry_solutions",
+    "calculate_circular_fault_geometry_solutions",
 ]
