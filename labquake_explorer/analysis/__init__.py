@@ -64,6 +64,11 @@ from .pzt_source_geometry import (
     calculate_rectangular_fault_geometry_solutions,
     interpolate_tim_radiation_coefficient,
 )
+from .pzt_source_scaling import (
+    build_fit_curve,
+    compute_power_law_r_squared,
+    fit_power_law,
+)
 
 __all__ = [
     "calculate_2pt_trend_drop",
@@ -120,4 +125,7 @@ __all__ = [
     "interpolate_tim_radiation_coefficient",
     "calculate_rectangular_fault_geometry_solutions",
     "calculate_circular_fault_geometry_solutions",
+    "fit_power_law",
+    "compute_power_law_r_squared",
+    "build_fit_curve",
 ]
