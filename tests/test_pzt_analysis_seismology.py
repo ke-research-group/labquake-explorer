@@ -505,6 +505,10 @@ class ScopeTests(unittest.TestCase):
             with self.subTest(name=name):
                 expected = ast.parse(inspect.getsource(getattr(student, name))).body[0].body
                 actual = ast.parse(inspect.getsource(getattr(official, name))).body[0].body
+                if actual and isinstance(actual[0], ast.Expr) and isinstance(
+                    actual[0].value, ast.Constant
+                ) and isinstance(actual[0].value.value, str):
+                    actual = actual[1:]
                 self.assertEqual(
                     ast.dump(ast.Module(body=actual, type_ignores=[]), include_attributes=False),
                     ast.dump(ast.Module(body=expected, type_ignores=[]), include_attributes=False),

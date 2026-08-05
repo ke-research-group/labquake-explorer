@@ -1,10 +1,15 @@
-"""Tim BAC/PZT numerical analysis operating on in-memory waveforms.
+"""Tim BAC/PZT numerical analysis operating on in-memory ``BlockTrace`` data.
 
 The numerical implementation was migrated from the latest student-tim
 ``pzt_analysis_seismology.py`` and intentionally preserves its processing
-order and legacy numerical assumptions.  The official caller owns waveform
-and channel identity; this module does not know about DataManager, schemas,
-persistence, or TPC5 files.
+order and legacy numerical assumptions.  Dataset and file discovery belong to
+the caller.  Legacy APIs retain Tim's automatic peak selection; canonical-
+trigger APIs replace only the peak source with ``BlockTrace.trigger_time`` and
+do not fall back.  Subsequent baseline, filter, taper, FFT, calibration, Q
+correction, and fitting steps are shared with the Tim flow.
+
+The Official caller owns waveform and channel identity.  This module does not
+know about DataManager, schemas, persistence, or TPC5 files.
 """
 from __future__ import annotations
 
@@ -57,6 +62,7 @@ DEFAULT_FIT_PARAMETER_UB = (1e-4, 3e5, 8.0)
 
 @dataclass
 class BlockTrace:
+    """Caller-resolved in-memory waveform and explicit trigger metadata."""
     time: np.ndarray
     voltage: np.ndarray
     sampling_rate: float
@@ -68,6 +74,7 @@ class BlockTrace:
 
 @dataclass
 class TimeWindowResult:
+    """Tim-compatible processed signal/noise window and sampling metadata."""
     x_ms: np.ndarray
     voltage_windowed: np.ndarray
     displacement_windowed: np.ndarray
@@ -91,6 +98,7 @@ class TimeWindowResult:
 
 @dataclass
 class SpectrumResult:
+    """Tim-compatible raw, calibrated, resampled, and Q-corrected spectra."""
     time_window: TimeWindowResult
     freq_hz: np.ndarray
     amp_raw: np.ndarray
@@ -111,6 +119,7 @@ class SpectrumResult:
 
 @dataclass
 class FitResult:
+    """Omega-n fit parameters, log-space fit mask, model curve, and R-squared."""
     lnf_min: float
     lnf_max: float
     mask_fit: np.ndarray
@@ -127,6 +136,7 @@ def scale_spectrum_for_seismology_fit(
     spectrum: SpectrumResult,
     scale: float = SEISMOLOGY_FIT_SPECTRUM_SCALE,
 ) -> SpectrumResult:
+    """Return a spectrum with Tim fit-amplitude fields scaled by ``scale``."""
     scale = float(scale)
     if scale == 1.0:
         return spectrum
@@ -143,6 +153,7 @@ def scale_spectrum_for_seismology_fit(
 
 
 def general_cosine(length: int, coeffs: Iterable[float]) -> np.ndarray:
+    """Construct Tim's general-cosine window for explicit coefficients."""
     if length <= 0:
         return np.array([], dtype=float)
     n = np.arange(length, dtype=float)
@@ -156,6 +167,7 @@ def general_cosine(length: int, coeffs: Iterable[float]) -> np.ndarray:
 
 
 def blackman_harris_window(length: int, terms: int = 4) -> np.ndarray:
+    """Return Tim's 3-, 4-, or 7-term Blackman-Harris window."""
     if terms == 3:
         coeffs = np.array([0.42, -0.50, 0.08], dtype=float)
     elif terms == 4:
@@ -179,6 +191,7 @@ def blackman_harris_window(length: int, terms: int = 4) -> np.ndarray:
 
 
 def tukey_window(length: int, alpha: float = 0.5) -> np.ndarray:
+    """Return the Tukey window used by Tim's waveform preparation."""
     if length <= 0:
         return np.array([], dtype=float)
     if alpha <= 0:
@@ -199,12 +212,14 @@ def tukey_window(length: int, alpha: float = 0.5) -> np.ndarray:
 
 
 def postzero_pad(values: np.ndarray, target_length: int) -> np.ndarray:
+    """Append zeros to Tim's FFT input without truncating longer input."""
     if target_length > len(values):
         return np.concatenate([values, np.zeros(target_length - len(values), dtype=values.dtype)])
     return values
 
 
 def apply_extra_filter(values: np.ndarray, dt: float) -> np.ndarray:
+    """Apply Tim's module-configured optional filter, or return input unchanged."""
     if (not USE_EXTRA_FILTER) or values.size < 3:
         return values
 
@@ -251,6 +266,7 @@ def _auto_is_db(values: np.ndarray, amp_col_name: str = "") -> bool:
 
 @lru_cache(maxsize=8)
 def load_csv_gain(csv_path: str, csv_is_db: Optional[bool] = None) -> Tuple[np.ndarray, np.ndarray, str]:
+    """Load and normalize Tim calibration gain columns from an explicit CSV."""
     path = Path(csv_path)
     if not path.exists():
         raise FileNotFoundError(f"Calibration CSV not found: {path}")
@@ -305,6 +321,7 @@ def calib_interp_for(
     calibration_csv: Path,
     fmin_valid: float = FMIN_VALID_HZ,
 ) -> np.ndarray:
+    """Interpolate calibration gain within Tim's valid frequency interval."""
     f_csv, gain_csv, _ = load_csv_gain(str(calibration_csv), None)
     cal = np.full_like(freq_hz, np.nan, dtype=float)
     if freq_hz.size == 0:
@@ -319,6 +336,7 @@ def calib_interp_for(
 
 @lru_cache(maxsize=4)
 def load_q_data(q_csv_path: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Load positive frequency and inverse-Q arrays from an explicit CSV."""
     path = Path(q_csv_path)
     if not path.exists():
         raise FileNotFoundError(f"Q CSV not found: {path}")
@@ -345,6 +363,7 @@ def apply_q_correction(
     amp: np.ndarray,
     q_csv_path: Path,
 ) -> np.ndarray:
+    """Apply Tim's configured log-frequency Q attenuation correction."""
     corrected = np.asarray(amp, dtype=float).copy()
     if not USE_Q_ATTEN_CORR:
         return corrected
@@ -476,6 +495,7 @@ def _prepare_time_window(
         block=trace.block,
         sensor=trace.sensor,
     )
+    # Tim's spectrum stage consumes these runtime-only compatibility arrays.
     result._noise_displacement = v_noise * window  # type: ignore[attr-defined]
     result._noise_voltage = v_noise_voltage * window  # type: ignore[attr-defined]
     return result
@@ -598,6 +618,7 @@ def _prepare_time_window_with_peak(
         block=trace.block,
         sensor=trace.sensor,
     )
+    # Tim's spectrum stage consumes these runtime-only compatibility arrays.
     result._noise_displacement = v_noise * window  # type: ignore[attr-defined]
     result._noise_voltage = v_noise_voltage * window  # type: ignore[attr-defined]
     return result
@@ -609,7 +630,13 @@ def compute_time_window(
     post_sec: float = DEFAULT_POST_SEC,
     threshold: float = DEFAULT_THRESHOLD,
 ) -> TimeWindowResult:
-    """Prepare a Tim-compatible window after caller-side trace resolution."""
+    """Prepare Tim's auto-peak window after caller-side trace resolution.
+
+    The first threshold peak is used, with Tim's legacy fallback when none is
+    found.  Inputs use seconds and the result contains millisecond plot time,
+    processed arrays, indices, and sampling metadata.  No schema or persistence
+    operation occurs here.
+    """
     return _prepare_time_window(trace, pre_sec=pre_sec, post_sec=post_sec, threshold=threshold)
 
 
@@ -655,7 +682,11 @@ def compute_spectrum(
     post_sec: float = DEFAULT_POST_SEC,
     threshold: float = DEFAULT_THRESHOLD,
 ) -> SpectrumResult:
-    """Compute the Tim BAC spectrum from a caller-resolved in-memory trace."""
+    """Compute Tim's auto-peak BAC spectrum from explicit trace and CSV paths.
+
+    The result contains raw, calibrated, resampled, and Q-corrected arrays; file
+    discovery, plotting, schema traversal, and persistence remain caller work.
+    """
     window_result = compute_time_window(
         trace,
         pre_sec=pre_sec,
@@ -717,6 +748,7 @@ def _compute_spectrum_from_window(
     voltage_noise_fft = np.fft.rfft(voltage_noise, n=n_use)
     freq = np.fft.rfftfreq(n_use, window_result.dt)
 
+    # Preserve Tim's asymmetric coherent-gain correction (noise branches only).
     amp_raw = np.abs(v_sig_fft) * window_result.dt
     amp_noise_raw = (np.abs(v_noise_fft) * window_result.dt) / max(window_result.coherent_gain, np.finfo(float).tiny)
     amp_voltage_raw = np.abs(voltage_sig_fft) * window_result.dt
@@ -792,6 +824,7 @@ def _compute_spectrum_from_window(
 
 
 def model_ln_amp(params: np.ndarray, x_values: np.ndarray) -> np.ndarray:
+    """Evaluate Tim's omega-n amplitude model in natural-log coordinates."""
     omega0, fc, n = params
     freq = np.exp(x_values)
     fc = max(float(fc), 1e-12)
@@ -804,6 +837,7 @@ def validate_fit_parameter_bounds(
     parameter_lb=None,
     parameter_ub=None,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Return validated positive ``(omega0, fc, n)`` lower and upper bounds."""
     lb = np.asarray(
         DEFAULT_FIT_PARAMETER_LB if parameter_lb is None else parameter_lb,
         dtype=float,
@@ -834,6 +868,12 @@ def fit_omega_n_q(
     parameter_lb=None,
     parameter_ub=None,
 ) -> FitResult:
+    """Fit Tim's omega-n model to the existing Q-corrected spectrum.
+
+    ``lnf_min`` and ``lnf_max`` bound natural-log frequency.  The returned
+    parameters, model curve, mask, and log-space R-squared are computed without
+    reloading data, plotting, schema traversal, or persistence.
+    """
     eps = np.finfo(float).tiny
     f7 = np.asarray(spectrum.f7_hz, dtype=float)
     y = np.maximum(np.asarray(spectrum.y7_qcorr, dtype=float), eps)

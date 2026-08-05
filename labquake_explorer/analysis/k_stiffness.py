@@ -1,4 +1,4 @@
-"""Schema-neutral event loading-stiffness analysis.
+"""Potter-compatible, schema-neutral event loading-stiffness analysis.
 
 The public helper in this module calculates the signed loading slope of a
 processed shear-stress signal against an explicitly selected slip signal in a
@@ -6,6 +6,12 @@ pre-trigger relative-time window.  The caller is responsible for signal
 identity, calibration, and physical interpretation.  The core has no GUI,
 schema, or persistence knowledge and performs no unit conversion; when stress
 is supplied in MPa and slip in micrometres, the resulting slope is MPa/um.
+
+Processing and regression order preserve Potter behavior.  RANSAC uses the
+default sklearn estimator when importable (including its unfixed random state)
+and selects Potter's deterministic fallback only on ``ImportError``.  Cutoffs
+outside ``(0, Nyquist)`` mean no filter, and the returned stiffness is signed.
+Only the explicit-array and structured-result boundary is Official-specific.
 """
 
 from __future__ import annotations

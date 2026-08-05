@@ -1,4 +1,10 @@
-"""Preview one explicitly selected event-local signal and inter-event metrics."""
+"""Preview explicitly bound event-local and inter-event drop calculations.
+
+The view binds one event-local signal to one fitting-control set.  D_max and
+D_reference use independent, explicit full-run bindings; no signal name implies
+physical identity.  The view resolves canonical context, invokes analysis, and
+plots structured results without DataManager writes or persistence.
+"""
 
 from __future__ import annotations
 
@@ -258,7 +264,12 @@ def format_interevent_result(result: Mapping[str, Any]) -> dict[str, str]:
 
 
 class EventDropEditorView(tk.Toplevel):
-    """Preview one explicitly selected event-local signal."""
+    """Preview one selected signal plus independent inter-event metrics.
+
+    Endpoint motion updates controls without analysis or full redraw; release
+    rebuilds the plot and draggable callbacks.  Results remain in memory and
+    are not stored into events, runs, or the canonical schema.
+    """
 
     def __init__(self, parent, run_idx: int, event_idx: int):
         self.parent = parent

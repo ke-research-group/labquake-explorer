@@ -1,4 +1,10 @@
-"""Read-only PZT time-domain preview for canonical event strain data."""
+"""Read-only PZT time-domain preview for canonical event strain data.
+
+The view binds an explicit channel index from canonical ``strain.original``
+time/raw arrays and passes canonical ``event_time`` as ``BlockTrace.trigger_time``.
+It calls only the explicit-trigger helper, with no auto-peak fallback,
+persistence, or DataManager writes.
+"""
 
 from __future__ import annotations
 
@@ -48,7 +54,7 @@ def parse_time_domain_parameters(
 
 
 class PZTTimeDomainView(tk.Toplevel):
-    """Preview Tim's BAC time-window preparation on explicitly bound strain."""
+    """Resolve canonical context and display Tim's explicit-trigger window."""
 
     def __init__(self, parent, run_idx: int, event_idx: int):
         self.parent = parent

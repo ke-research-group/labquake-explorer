@@ -2,7 +2,10 @@
 
 The functions preserve the current student-tim BAC/AMP production behavior:
 positive-pair filtering followed by an unweighted log10-space regression,
-log10-space R-squared, and logarithmically spaced fit-curve sampling.
+``coefficient = 10**intercept``, log10-space R-squared, and logarithmically
+spaced fit-curve sampling.  The BAC/AMP guard behavior is retained.  This
+module has no paper-record aggregation, schema traversal, plotting, or
+persistence responsibilities.
 """
 
 import math

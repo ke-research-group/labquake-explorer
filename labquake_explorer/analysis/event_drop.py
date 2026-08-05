@@ -1,9 +1,14 @@
-"""Pure signal-processing helpers used by event-drop analysis.
+"""Potter-compatible event-drop calculations behind an Official boundary.
 
-This module intentionally contains no event traversal, GUI, persistence, or
-Labquake Explorer data-schema logic.  In particular, ``calculate_trend_drop``
-returns a signed delta; deciding whether a higher-level result is a magnitude
-belongs to the caller.
+Moving-average padding, inclusive event windows, baseline subtraction, and
+trend fitting retain Potter's numerical order.  Trend drop is the signed
+``val_pre_0 - val_post_0``; callers decide whether to display a magnitude.
+Inter-event sampling likewise uses Potter's delayed nearest-sample behavior,
+including natural endpoint selection for out-of-range targets.
+
+The Official adaptation accepts explicit arrays and signal identities and uses
+structured invalid results.  It performs no schema traversal, E3 inference,
+GUI work, or persistence; ``D_reference`` is any caller-selected signal.
 """
 
 from __future__ import annotations

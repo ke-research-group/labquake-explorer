@@ -1,4 +1,10 @@
-"""Read-only canonical-trigger PZT spectrum preview."""
+"""Read-only canonical-trigger PZT spectrum and omega-n fit preview.
+
+Canonical strain channel identity is selected explicitly.  Calibration and Q
+paths are read-only inputs; fitting consumes the existing ``SpectrumResult``
+without recomputing it.  Expected data/file errors are presented separately
+from programming errors.  No result is persisted or written by DataManager.
+"""
 
 from __future__ import annotations
 
@@ -139,7 +145,7 @@ def parse_spectrum_parameters(
 
 
 class PZTSpectrumView(tk.Toplevel):
-    """Preview Tim BAC spectra for an explicitly selected canonical channel."""
+    """Display explicit-trigger BAC spectrum and fit results in memory only."""
 
     def __init__(self, parent, run_idx: int, event_idx: int):
         self.parent = parent

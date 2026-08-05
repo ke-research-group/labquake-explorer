@@ -1,4 +1,10 @@
-"""Read-only canonical-trigger PZT EGF spectrum and fitting preview."""
+"""Read-only canonical-trigger PZT EGF spectrum and fitting preview.
+
+The view binds one canonical strain channel explicitly, calls the explicit-
+trigger EGF spectrum path, and fits the existing result without recomputation.
+Pairing, spectral ratios, source-time functions, persistence, and DataManager
+writes are intentionally outside this preview.
+"""
 
 from __future__ import annotations
 
@@ -138,7 +144,7 @@ def parse_egf_fit_parameters(
 
 
 class PZTEGFView(tk.Toplevel):
-    """Preview Tim EGF analysis for one explicitly selected canonical channel."""
+    """Display explicit-trigger EGF spectrum and fit results in memory only."""
 
     def __init__(self, parent, run_idx: int, event_idx: int):
         self.parent = parent

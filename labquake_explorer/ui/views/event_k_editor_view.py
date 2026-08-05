@@ -1,4 +1,10 @@
-"""Read-only loading-stiffness preview for explicitly selected run signals."""
+"""Read-only loading-stiffness preview for explicitly selected run signals.
+
+The two bindings are generic Tau-like and Slip-like analysis inputs, not
+physical-identity inference.  The view resolves canonical context, calls the
+Potter-compatible analysis, and displays signed stiffness without persistence
+or DataManager writes.
+"""
 
 from __future__ import annotations
 
@@ -150,7 +156,11 @@ def _is_finite_real_array(value: Any) -> tuple[bool, int]:
 
 
 class EventKEditorView(tk.Toplevel):
-    """Preview signed event loading stiffness without modifying source data."""
+    """Preview signed loading stiffness for one canonical event.
+
+    Draggable pre-window endpoints synchronize controls during motion and
+    perform the full redraw on release.  All state and results are preview-only.
+    """
 
     def __init__(self, parent, run_idx: int, event_idx: int):
         self.parent = parent

@@ -1,9 +1,12 @@
 """Tim-compatible BAC source-geometry calculations.
 
-The grid, angle, and radiation-coefficient behavior is imported from the
-current student-tim 1-D and 2-D production scaling scripts.  Coordinates and
-fault dimensions are explicit centimetre values; no case, specimen, sensor,
-channel, schema, or persistence identity is inferred here.
+The grid, angle, and radiation-coefficient behavior preserves the current
+student-tim 1-D and 2-D production scaling scripts.  Coordinates and fault
+dimensions are explicit centimetre values on an X-Z fault plane with fixed Y.
+Rectangular and circular searches retain Tim's 200-by-200 default grids and
+``numpy.interp`` endpoint behavior.  Min/Max are selected by ``distance/Sa``;
+Middle means the fault-center solution, not a median or confidence interval.
+No case, specimen, sensor, channel, schema, or persistence identity is inferred.
 """
 
 from dataclasses import dataclass

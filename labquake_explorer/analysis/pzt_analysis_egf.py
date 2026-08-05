@@ -1,9 +1,15 @@
 """Tim EGF numerical analysis with an explicit in-memory trace boundary.
 
 The numerical implementation is ported from the latest student-tim module and
-intentionally preserves its legacy EGF behavior.  The caller supplies identity
-and calibration inputs; project infrastructure and
-persistence remain outside this module.
+intentionally preserves its legacy EGF behavior.  Dataset, sensor, and file
+lookup are replaced by caller-supplied ``BlockTrace`` and calibration paths.
+Legacy APIs keep automatic peak selection; explicit-trigger APIs replace only
+that selection and preserve trim, baseline, filter, taper, pre-zero padding,
+calibration, log interpolation, ``EGF_SCALE_FIX``, fitting, M0, and Mw behavior.
+
+The caller supplies identity and calibration inputs.  Spectral pairing, ratios,
+source-time functions, project infrastructure, and persistence are outside this
+module.
 """
 
 from __future__ import annotations
@@ -55,6 +61,7 @@ USE_OMEGA_IN_FREQ = False
 
 @dataclass
 class EGFTimeWindowResult:
+    """Tim-compatible EGF signal/noise window and sampling metadata."""
     x_ms: np.ndarray
     signal_windowed: np.ndarray
     window_scaled_signal: np.ndarray
@@ -75,6 +82,7 @@ class EGFTimeWindowResult:
 
 @dataclass
 class EGFSpectrumResult:
+    """Tim-compatible raw, calibrated, and log-resampled EGF spectra."""
     time_window: EGFTimeWindowResult
     freq_hz: np.ndarray
     amp_raw: np.ndarray
@@ -91,6 +99,7 @@ class EGFSpectrumResult:
 
 @dataclass
 class EGFFitResult:
+    """Omega-n fit, model curve, M0, and Mw derived by Tim's EGF flow."""
     lnf_min: float
     lnf_max: float
     mask_fit: np.ndarray
@@ -126,6 +135,7 @@ def egf_calib_interp_for(
 
 
 def prezero_pad(values: np.ndarray, target_length: int) -> np.ndarray:
+    """Prepend zeros using Tim's EGF FFT padding convention."""
     if target_length > len(values):
         return np.concatenate(
             [np.zeros(target_length - len(values), dtype=values.dtype), values]
@@ -134,6 +144,7 @@ def prezero_pad(values: np.ndarray, target_length: int) -> np.ndarray:
 
 
 def apply_extra_filter(values: np.ndarray, dt: float) -> np.ndarray:
+    """Apply Tim's module-configured optional EGF filter when enabled."""
     if (not USE_EXTRA_FILTER) or values.size < 3:
         return values
     fs = 1.0 / dt
@@ -241,6 +252,7 @@ def _finish_egf_time_window(
         block=trace.block,
         sensor=trace.sensor,
     )
+    # Tim's spectrum stage consumes this runtime-only compatibility attribute.
     result._noise_windowed = noise_windowed  # type: ignore[attr-defined]
     return result
 
@@ -302,6 +314,7 @@ def _prepare_egf_time_window_at_trigger(
             )
         t_full = t_full[mask] - trim_head_sec
         v_full = v_full[mask]
+        # Convert the absolute trigger into the retained, trimmed coordinates.
         trigger_relative = trigger_relative_original - trim_head_sec
     else:
         trigger_relative = trigger_relative_original
@@ -318,7 +331,12 @@ def compute_egf_time_window(
     post_sec: float = DEFAULT_POST_SEC,
     threshold: float = DEFAULT_THRESHOLD,
 ) -> EGFTimeWindowResult:
-    """Compute a Tim legacy first-threshold-peak EGF window."""
+    """Compute Tim's legacy first-threshold-peak EGF window.
+
+    Inputs use seconds through ``BlockTrace`` and explicit window parameters;
+    the result contains processed arrays, indices, and sampling metadata.  This
+    API performs no schema traversal, plotting, or persistence.
+    """
     return _prepare_egf_time_window(
         trace,
         pre_sec=pre_sec,
@@ -353,7 +371,11 @@ def compute_egf_spectrum(
     post_sec: float = DEFAULT_POST_SEC,
     threshold: float = DEFAULT_THRESHOLD,
 ) -> EGFSpectrumResult:
-    """Compute a Tim legacy auto-peak EGF spectrum."""
+    """Compute Tim's legacy auto-peak spectrum from explicit trace and CSV.
+
+    The structured result contains raw, calibrated, and resampled spectrum
+    arrays.  Signal discovery, plotting, pairing, and persistence are excluded.
+    """
     window_result = _prepare_egf_time_window(
         trace,
         pre_sec=pre_sec,
@@ -463,6 +485,7 @@ def _compute_egf_spectrum_from_window(
 
 
 def model_ln_amp(params: np.ndarray, x_values: np.ndarray) -> np.ndarray:
+    """Evaluate Tim's EGF omega-n model in natural-log coordinates."""
     omega0, fc, n = params
     freq = np.exp(x_values)
     fc = max(float(fc), 1e-12)
@@ -478,6 +501,12 @@ def fit_egf_omega_n(
     parameter_lb=None,
     parameter_ub=None,
 ) -> EGFFitResult:
+    """Fit Tim's EGF omega-n model to an existing calibrated spectrum.
+
+    Fit limits are natural-log frequencies.  ``EGF_SCALE_FIX`` and Tim's M0/Mw
+    conversion remain part of the numerical contract; no spectrum recompute,
+    plotting, schema traversal, or persistence occurs.
+    """
     f7 = np.asarray(spectrum.f7_hz, dtype=float)
     y7 = np.asarray(spectrum.y7_cal, dtype=float) * EGF_SCALE_FIX
     y7 = np.maximum(y7, np.finfo(float).tiny)
@@ -564,4 +593,5 @@ def fit_egf_omega_n(
 
 
 def calc_mw_from_amp(value: float) -> float:
+    """Convert an explicit amplitude to Mw using Tim's fixed EGF constant."""
     return (2.0 / 3.0) * np.log10(max(float(value), 1e-50) * C_FM) - 6.067

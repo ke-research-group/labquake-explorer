@@ -1,4 +1,9 @@
-"""Read-only colored-line preview for explicitly selected run signals."""
+"""Read-only raw colored-line preview for explicitly selected run signals.
+
+Rows preserve exact run keys and display settings.  Signals are plotted without
+offset, filtering, normalization, smoothing, or analysis; no selection is
+inferred and no DataManager write or persistence operation is available.
+"""
 
 from __future__ import annotations
 
@@ -58,7 +63,7 @@ def _is_finite_real_array(value: Any) -> tuple[bool, int]:
 
 
 class ColoredSlipLinesView(tk.Toplevel):
-    """Plot explicitly bound full-run signals without processing or saving."""
+    """Plot explicitly bound full-run signals and in-memory display settings."""
 
     def __init__(self, parent, run_idx: int):
         self.parent = parent

@@ -1,8 +1,9 @@
 """Tim-compatible scalar BAC source-parameter calculations.
 
-The constants and formulas in this module are imported from the current
-student-tim 1-D and 2-D production scaling scripts.  The numerical behavior is
-intentionally preserved.  Callers must provide the geometry-derived
+The constants and formulas preserve the current student-tim 1-D and 2-D
+``parameter_row`` production expressions and return SI-unit source parameters.
+The fitted ``omega0`` sign is retained rather than converted to a magnitude.
+Callers must provide the geometry-derived
 source-receiver distance and radiation coefficient explicitly; this module
 does not infer sensor, specimen, case, schema, or persistence details.
 """
