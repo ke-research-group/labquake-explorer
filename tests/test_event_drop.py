@@ -1,5 +1,7 @@
 """Deterministic tests for the pure event-drop calculation helpers."""
 
+import importlib.util
+from pathlib import Path
 import unittest
 from unittest import mock
 
@@ -14,6 +16,75 @@ from labquake_explorer.analysis.event_drop import (
     compute_half_win,
     moving_average,
 )
+
+
+def _load_potter_event_drop():
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "student-potter"
+        / "labquake_explorer"
+        / "analysis"
+        / "event_drop_analyzer.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "_potter_event_drop_boundary_characterization", source
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+POTTER_EVENT_DROP = _load_potter_event_drop()
+
+
+def _potter_interevent_reference(
+    *,
+    time,
+    lvdt_signal,
+    reference_signal,
+    current_event_time,
+    previous_event_time,
+    push_speed,
+    delay_sec,
+    smooth_w,
+):
+    """Exact transcription of Potter's inline D block, without key discovery."""
+    result = {
+        "D_Push": np.nan,
+        "D_max": np.nan,
+        "D_reference": np.nan,
+        "current_index": None,
+        "previous_index": None,
+        "smoothed_lvdt": None,
+        "signed_lvdt_difference": None,
+        "signed_reference_difference": None,
+    }
+    if previous_event_time is None:
+        return result
+
+    result["D_Push"] = (
+        current_event_time - previous_event_time
+    ) * push_speed
+    current_index = int(
+        np.argmin(np.abs(time - (current_event_time + delay_sec)))
+    )
+    previous_index = int(
+        np.argmin(np.abs(time - (previous_event_time + delay_sec)))
+    )
+    result["current_index"] = current_index
+    result["previous_index"] = previous_index
+
+    if lvdt_signal is not None:
+        smoothed = POTTER_EVENT_DROP.moving_average(lvdt_signal, smooth_w)
+        signed = smoothed[current_index] - smoothed[previous_index]
+        result["smoothed_lvdt"] = smoothed
+        result["signed_lvdt_difference"] = signed
+        result["D_max"] = abs(signed)
+    if reference_signal is not None:
+        signed = reference_signal[current_index] - reference_signal[previous_index]
+        result["signed_reference_difference"] = signed
+        result["D_reference"] = abs(signed)
+    return result
 
 
 class CalculateIntereventDisplacementMetricsTests(unittest.TestCase):
@@ -508,6 +579,354 @@ class CalculateIntereventDisplacementMetricsTests(unittest.TestCase):
 
         self.assertEqual(result["D_max"]["value"], 6.0)
         self.assertEqual(result["D_reference"]["value"], 9.0)
+
+
+class PotterIntereventBoundaryParityTests(unittest.TestCase):
+    def setUp(self):
+        self.time = np.arange(5.0)
+        self.lvdt = np.array([0.0, 10.0, 20.0, 30.0, 40.0])
+        self.reference = np.array([0.0, 1.0, 4.0, 9.0, 16.0])
+
+    def official(self, **overrides):
+        arguments = {
+            "current_event_time": 3.0,
+            "previous_event_time": 1.0,
+            "push_speed": 2.0,
+            "time": self.time,
+            "lvdt_signal": self.lvdt,
+            "reference_displacement_signal": self.reference,
+            "delay_sec": 0.0,
+            "lvdt_smooth_w": 1,
+        }
+        arguments.update(overrides)
+        return calculate_interevent_displacement_metrics(**arguments)
+
+    def potter(self, **overrides):
+        arguments = {
+            "time": self.time,
+            "lvdt_signal": self.lvdt,
+            "reference_signal": self.reference,
+            "current_event_time": 3.0,
+            "previous_event_time": 1.0,
+            "push_speed": 2.0,
+            "delay_sec": 0.0,
+            "smooth_w": 1,
+        }
+        arguments.update(overrides)
+        return _potter_interevent_reference(**arguments)
+
+    def assert_in_range_parity(self, **overrides):
+        official = self.official(**{
+            key: value for key, value in overrides.items()
+            if key != "reference_signal" and key != "smooth_w"
+        }, **({"reference_displacement_signal": overrides["reference_signal"]}
+              if "reference_signal" in overrides else {}),
+            **({"lvdt_smooth_w": overrides["smooth_w"]}
+              if "smooth_w" in overrides else {}))
+        potter = self.potter(**overrides)
+        self.assertEqual(official["D_Push"]["value"], float(potter["D_Push"]))
+        if overrides.get("lvdt_signal", self.lvdt) is not None:
+            self.assertEqual(official["D_max"]["value"], float(potter["D_max"]))
+        if overrides.get("reference_signal", self.reference) is not None:
+            self.assertEqual(
+                official["D_reference"]["value"],
+                float(potter["D_reference"]),
+            )
+        return official, potter
+
+    def test_d_push_formula_sign_numpy_scalars_and_delay_independence(self):
+        cases = (
+            (3.0, 1.0, 2.0, 4.0),
+            (3.0, 1.0, -2.0, -4.0),
+            (1.0, 3.0, 2.0, -4.0),
+            (2.0, 2.0, -3.0, 0.0),
+            (np.float64(3.0), np.int64(1), np.float32(2.0), 4.0),
+        )
+        for current, previous, speed, expected in cases:
+            for delay in (-0.4, 0.0, 0.4):
+                with self.subTest(current=current, speed=speed, delay=delay):
+                    official, potter = self.assert_in_range_parity(
+                        current_event_time=current,
+                        previous_event_time=previous,
+                        push_speed=speed,
+                        delay_sec=delay,
+                    )
+                    self.assertEqual(official["D_Push"]["value"], expected)
+                    self.assertEqual(potter["D_Push"], expected)
+                    self.assertIsInstance(official["D_Push"]["value"], float)
+
+        d_push_only = calculate_interevent_displacement_metrics(
+            current_event_time=3.0,
+            previous_event_time=1.0,
+            push_speed=-2.0,
+            delay_sec=np.nan,
+        )
+        self.assertEqual(d_push_only["D_Push"], {"valid": True, "value": -4.0})
+
+    def test_in_range_exact_nearest_delay_and_tie_parity(self):
+        cases = (
+            (3.0, 1.0, 0.0, (3, 1)),
+            (3.2, 1.2, 0.0, (3, 1)),
+            (2.5, 0.5, 0.0, (2, 0)),
+            (2.2, 0.2, 0.6, (3, 1)),
+            (3.4, 1.4, -0.4, (3, 1)),
+        )
+        for current, previous, delay, indices in cases:
+            with self.subTest(current=current, previous=previous, delay=delay):
+                _, potter = self.assert_in_range_parity(
+                    current_event_time=current,
+                    previous_event_time=previous,
+                    delay_sec=delay,
+                )
+                self.assertEqual(
+                    (potter["current_index"], potter["previous_index"]),
+                    indices,
+                )
+
+    def test_full_run_smoothing_precedes_sampling_and_preserves_abs(self):
+        lvdt = np.array([0.0, 0.0, 0.0, 9.0, 9.0])
+        original = lvdt.copy()
+        official, potter = self.assert_in_range_parity(
+            lvdt_signal=lvdt,
+            current_event_time=3.0,
+            previous_event_time=1.0,
+            smooth_w=3,
+        )
+        expected_smoothed = POTTER_EVENT_DROP.moving_average(lvdt, 3)
+        np.testing.assert_array_equal(potter["smoothed_lvdt"], expected_smoothed)
+        self.assertEqual(potter["signed_lvdt_difference"], 6.0)
+        self.assertEqual(official["D_max"], {"valid": True, "value": 6.0})
+        np.testing.assert_array_equal(lvdt, original)
+
+    def test_reference_is_raw_absolute_and_independent_of_lvdt_smoothing(self):
+        lvdt = np.array([0.0, 0.0, 0.0, 9.0, 9.0])
+        reference = np.array([0.0, 9.0, 6.0, 3.0, 1.0])
+        official, potter = self.assert_in_range_parity(
+            lvdt_signal=lvdt,
+            reference_signal=reference,
+            smooth_w=3,
+        )
+        self.assertEqual(potter["signed_reference_difference"], -6.0)
+        self.assertEqual(official["D_reference"], {"valid": True, "value": 6.0})
+        self.assertEqual(official["D_max"], {"valid": True, "value": 6.0})
+
+    def test_moving_average_contract_matches_potter_for_supported_windows(self):
+        signal = np.array([0.0, 1.0, 4.0, 9.0, 16.0])
+        for window in (1, 2, 3, 7):
+            with self.subTest(window=window):
+                expected = POTTER_EVENT_DROP.moving_average(signal, window)
+                actual = moving_average(signal, window)
+                np.testing.assert_array_equal(actual, expected)
+                self.assertEqual(len(actual), len(signal))
+
+    def test_boundary_matrix_characterizes_potter_endpoint_selection(self):
+        cases = {
+            "inside": (3.0, 1.0, 0.0, (3, 1), True),
+            "previous_slightly_low": (2.0, -0.1, 0.0, (2, 0), False),
+            "previous_far_low": (2.0, -10.0, 0.0, (2, 0), False),
+            "current_slightly_high": (4.1, 2.0, 0.0, (4, 2), False),
+            "current_far_high": (10.0, 2.0, 0.0, (4, 2), False),
+            "both_low": (-0.1, -1.0, 0.0, (0, 0), False),
+            "both_high": (10.0, 9.0, 0.0, (4, 4), False),
+            "one_low_one_high": (10.0, -1.0, 0.0, (4, 0), False),
+            "exact_lower": (1.0, 0.0, 0.0, (1, 0), True),
+            "exact_upper": (4.0, 3.0, 0.0, (4, 3), True),
+        }
+        for name, (current, previous, delay, indices, in_range) in cases.items():
+            with self.subTest(case=name):
+                potter = self.potter(
+                    current_event_time=current,
+                    previous_event_time=previous,
+                    delay_sec=delay,
+                )
+                official = self.official(
+                    current_event_time=current,
+                    previous_event_time=previous,
+                    delay_sec=delay,
+                )
+                self.assertEqual(
+                    (potter["current_index"], potter["previous_index"]),
+                    indices,
+                )
+                self.assertEqual(
+                    potter["D_max"],
+                    abs(self.lvdt[indices[0]] - self.lvdt[indices[1]]),
+                )
+                self.assertEqual(
+                    potter["D_reference"],
+                    abs(self.reference[indices[0]] - self.reference[indices[1]]),
+                )
+                self.assertTrue(official["D_Push"]["valid"])
+                if in_range:
+                    self.assertEqual(official["D_max"]["value"], potter["D_max"])
+                    self.assertEqual(
+                        official["D_reference"]["value"],
+                        potter["D_reference"],
+                    )
+                else:
+                    self.assertEqual(official["D_max"], {"valid": False})
+                    self.assertEqual(official["D_reference"], {"valid": False})
+
+    def test_outside_targets_at_same_endpoint_give_zero_only_in_potter(self):
+        for current, previous, endpoint in ((-1.0, -2.0, 0), (8.0, 7.0, 4)):
+            with self.subTest(endpoint=endpoint):
+                potter = self.potter(
+                    current_event_time=current, previous_event_time=previous
+                )
+                official = self.official(
+                    current_event_time=current, previous_event_time=previous
+                )
+                self.assertEqual(potter["current_index"], endpoint)
+                self.assertEqual(potter["previous_index"], endpoint)
+                self.assertEqual(potter["D_max"], 0.0)
+                self.assertEqual(potter["D_reference"], 0.0)
+                self.assertEqual(official["D_max"], {"valid": False})
+                self.assertEqual(official["D_reference"], {"valid": False})
+
+    def test_official_boundary_failure_is_shared_even_for_one_signal(self):
+        for signal_arguments in (
+            {"lvdt_signal": self.lvdt, "reference_displacement_signal": None},
+            {"lvdt_signal": None, "reference_displacement_signal": self.reference},
+        ):
+            with self.subTest(signal=tuple(signal_arguments)):
+                result = self.official(
+                    current_event_time=5.0,
+                    previous_event_time=1.0,
+                    **signal_arguments,
+                )
+                self.assertTrue(result["D_Push"]["valid"])
+                self.assertEqual(result["D_max"], {"valid": False})
+                self.assertEqual(result["D_reference"], {"valid": False})
+
+    def test_first_event_contract_is_unavailable_in_both_result_shapes(self):
+        potter = self.potter(previous_event_time=None)
+        official = self.official(previous_event_time=None)
+        self.assertTrue(np.isnan(potter["D_Push"]))
+        self.assertTrue(np.isnan(potter["D_max"]))
+        self.assertTrue(np.isnan(potter["D_reference"]))
+        self.assertEqual(
+            official,
+            {
+                "D_Push": {"valid": False},
+                "D_max": {"valid": False},
+                "D_reference": {"valid": False},
+            },
+        )
+
+    def test_potter_production_missing_signal_is_not_symmetric(self):
+        time = np.linspace(0.0, 4.0, 81)
+        events = [{"event_time": 1.0}, {"event_time": 3.0}]
+        config = dict(POTTER_EVENT_DROP.DEFAULT_CONFIG)
+        config.update({"delay_sec": 0.0, "lvdt_smooth_w": 1})
+        flags = {"tau": False, "mu": False, "slip": False, "lvdt": False, "D": True}
+
+        no_eddy = POTTER_EVENT_DROP.analyze_single_event(
+            {"time": time, "LP_displacement": time.copy()},
+            events,
+            1,
+            config,
+            flags,
+        )
+        self.assertEqual(no_eddy["D_max"], 2.0)
+        self.assertTrue(np.isnan(no_eddy["D_E3"]))
+
+        with self.assertRaises(KeyError):
+            POTTER_EVENT_DROP.analyze_single_event(
+                {"time": time, "eddy_ch10": time.copy()},
+                events,
+                1,
+                config,
+                flags,
+            )
+
+        official_reference_only = calculate_interevent_displacement_metrics(
+            current_event_time=3.0,
+            previous_event_time=1.0,
+            push_speed=1.0,
+            time=time,
+            reference_displacement_signal=time.copy(),
+            delay_sec=0.0,
+        )
+        self.assertTrue(official_reference_only["D_reference"]["valid"])
+        self.assertEqual(official_reference_only["D_max"], {"valid": False})
+
+    def test_potter_previous_event_search_uses_position_and_only_skips_invalid_time(self):
+        time = np.linspace(0.0, 4.0, 81)
+        history = {"time": time, "LP_displacement": time.copy()}
+        config = dict(POTTER_EVENT_DROP.DEFAULT_CONFIG)
+        config.update({"delay_sec": 0.0, "lvdt_smooth_w": 1, "push_speed": 2.0})
+        flags = {"tau": False, "mu": False, "slip": False, "lvdt": False, "D": True}
+
+        skipped_but_finite = POTTER_EVENT_DROP.analyze_single_event(
+            history,
+            [
+                {"event_time": 1.0},
+                {"event_time": 2.0, "skipped": True},
+                {"event_time": 3.0},
+            ],
+            2,
+            config,
+            flags,
+        )
+        self.assertEqual(skipped_but_finite["D_Push"], 2.0)
+
+        invalid_previous = POTTER_EVENT_DROP.analyze_single_event(
+            history,
+            [
+                {"event_time": 1.0},
+                {"event_time": None},
+                {"event_time": 3.0},
+            ],
+            2,
+            config,
+            flags,
+        )
+        self.assertEqual(invalid_previous["D_Push"], 4.0)
+
+    def test_time_structure_differences_are_characterized(self):
+        with self.assertRaises(ValueError):
+            self.potter(time=np.array([]), lvdt_signal=np.array([]), reference_signal=np.array([]))
+
+        for label, time in (
+            ("duplicate", np.array([0.0, 1.0, 1.0, 3.0, 4.0])),
+            ("descending", np.array([4.0, 3.0, 2.0, 1.0, 0.0])),
+            ("bool", np.array([False, True, True, True, True])),
+        ):
+            with self.subTest(label=label):
+                potter = self.potter(time=time)
+                self.assertIsNotNone(potter["current_index"])
+                with self.assertRaises(ValueError):
+                    self.official(time=time)
+
+        with self.assertRaises(ValueError):
+            self.official(time=np.array([]), lvdt_signal=np.array([]), reference_displacement_signal=np.array([]))
+        with self.assertRaises(ValueError):
+            self.official(time=np.ones((1, 5)))
+        with self.assertRaises(ValueError):
+            self.official(lvdt_signal=np.ones(4))
+
+    def test_delay_validation_differs_outside_common_finite_scalar_domain(self):
+        for delay in (-0.5, 0.0, 0.5):
+            with self.subTest(delay=delay):
+                self.assert_in_range_parity(delay_sec=delay)
+
+        for delay in (True, np.array([0.0]), np.nan, np.inf):
+            with self.subTest(delay=repr(delay)):
+                potter = self.potter(delay_sec=delay)
+                self.assertIsNotNone(potter["current_index"])
+                with self.assertRaisesRegex(ValueError, "delay_sec"):
+                    self.official(delay_sec=delay)
+
+    def test_smoothing_validation_differs_but_common_windows_match(self):
+        for window in (1, 2, 3, 7):
+            with self.subTest(window=window):
+                self.assert_in_range_parity(smooth_w=window)
+        for window in (0, -1):
+            with self.subTest(window=window):
+                potter = self.potter(smooth_w=window)
+                self.assertIsNotNone(potter["smoothed_lvdt"])
+                with self.assertRaisesRegex(ValueError, "lvdt_smooth_w"):
+                    self.official(lvdt_smooth_w=window)
 
 
 class CalculateEventDropMetricsTests(unittest.TestCase):
