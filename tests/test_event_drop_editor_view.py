@@ -10,6 +10,9 @@ import numpy as np
 matplotlib.use("Agg")
 from matplotlib.figure import Figure
 
+from labquake_explorer.ui import labquake_explorer as explorer_module
+from labquake_explorer.ui.labquake_explorer import LabquakeExplorer
+from labquake_explorer.ui.views import EventDropEditorView as ExportedEventDropEditorView
 from labquake_explorer.ui.views.event_drop_editor_view import (
     EventDropEditorView,
     _DraggableVerticalLine,
@@ -713,6 +716,454 @@ class EventSwitchingTests(unittest.TestCase):
         self.assertEqual(list(view.signal_candidates), ["new"])
 
 
+class CanonicalEventContextTests(unittest.TestCase):
+    def test_event_time_coercion_accepts_only_finite_nonboolean_scalars(self):
+        accepted = (1.25, 2, np.float64(3.5), np.int64(4), 0, -2.5)
+        for value in accepted:
+            with self.subTest(value=value):
+                result = EventDropEditorView._coerce_finite_event_time(value)
+                self.assertIsInstance(result, float)
+                self.assertEqual(result, float(value))
+
+        rejected = (
+            True,
+            np.bool_(False),
+            np.array(1.0),
+            np.array([1.0]),
+            np.nan,
+            np.inf,
+            -np.inf,
+            "1.0",
+            None,
+        )
+        for value in rejected:
+            with self.subTest(value=repr(value)):
+                self.assertIsNone(
+                    EventDropEditorView._coerce_finite_event_time(value)
+                )
+
+    def test_current_event_time_uses_only_top_level_key_without_mutation(self):
+        view = headless_view()
+        event = {
+            "event_time": np.float64(-1.5),
+            "time": np.array([99.0, 100.0]),
+        }
+        original_time = event["time"].copy()
+        view.event = event
+        self.assertEqual(view._get_current_event_time(), -1.5)
+        np.testing.assert_array_equal(event["time"], original_time)
+        self.assertEqual(event["event_time"], np.float64(-1.5))
+
+        for invalid_event in ({"time": np.array([7.0])}, [], "event"):
+            with self.subTest(event=repr(invalid_event)):
+                view.event = invalid_event
+                self.assertIsNone(view._get_current_event_time())
+
+    def test_previous_event_search_follows_list_position_and_skips_invalid(self):
+        invalid_values = (
+            {"event_time": np.nan},
+            "not an event",
+            {"event_time": True},
+            {"event_time": np.array(3.0)},
+            {"missing": 1},
+        )
+        events = [
+            {"event_time": 10.0},
+            *invalid_values,
+            {"event_time": -5.0, "skipped": True, "deleted": True},
+            {"event_time": 100.0},
+        ]
+        original = copy.deepcopy(events)
+        view = headless_view()
+        view.events = events
+        view.event_idx = len(events) - 1
+        self.assertEqual(view._find_previous_event_time(), -5.0)
+        self.assertEqual(events[0]["event_time"], original[0]["event_time"])
+        self.assertEqual(events[-2], original[-2])
+
+    def test_previous_event_search_boundaries_and_supported_containers(self):
+        view = headless_view()
+        events = [{"event_time": 3.0}, {"event_time": 1.0}]
+        cases = (
+            (events, 0, None),
+            (events, 1, 3.0),
+            (events, 2, None),
+            (events, True, None),
+            ({0: events[0]}, 1, None),
+            ("events", 1, None),
+            (np.array(events, dtype=object).reshape(1, 2), 1, None),
+            ([{"event_time": np.nan}, {}], 1, None),
+        )
+        for container, index, expected in cases:
+            with self.subTest(container=type(container), index=index):
+                view.events = container
+                view.event_idx = index
+                self.assertEqual(view._find_previous_event_time(), expected)
+
+        view.events = np.array(events, dtype=object)
+        view.event_idx = 1
+        self.assertEqual(view._find_previous_event_time(), 3.0)
+
+
+class FullRunResolutionTests(unittest.TestCase):
+    def test_full_run_time_is_returned_by_identity_without_validation(self):
+        view = headless_view()
+        for time in (
+            [2.0, 1.0, 1.0],
+            np.array([2.0, 1.0, 1.0]),
+        ):
+            with self.subTest(kind=type(time)):
+                view.run_data = {"time": time}
+                self.assertIs(view._get_full_run_time(), time)
+
+        view.event = {"time": np.array([1.0])}
+        for run_data in ({}, None, []):
+            view.run_data = run_data
+            self.assertIsNone(view._get_full_run_time())
+
+    def test_exact_full_run_signal_resolution_has_no_alias_or_inference(self):
+        view = headless_view()
+        array = np.array([1.0, 2.0])
+        values = [3.0, 4.0]
+        nested = {"target": np.array([5.0])}
+        run = {
+            "Exact": array,
+            "list": values,
+            "nested": nested,
+            "LP_displacement": np.array([6.0, 7.0]),
+        }
+        view.run_data = run
+        self.assertIs(view._resolve_full_run_signal("Exact"), array)
+        self.assertIs(view._resolve_full_run_signal("list"), values)
+        for key in ("", None, 1, "exact", "LVDT", "Eddy", "target"):
+            with self.subTest(key=key):
+                self.assertIsNone(view._resolve_full_run_signal(key))
+        self.assertIs(run["Exact"], array)
+        self.assertIs(run["nested"], nested)
+        view.run_data = None
+        self.assertIsNone(view._resolve_full_run_signal("Exact"))
+
+    def test_run_array_validator_covers_shape_dtype_finiteness_and_conversion(self):
+        class BadArray:
+            def __array__(self, dtype=None):
+                raise TypeError("cannot convert")
+
+        valid = ([1, 2], np.array([1.0, 2.0]), np.array([1, 2]))
+        for value in valid:
+            with self.subTest(valid=repr(value)):
+                self.assertEqual(
+                    EventDropEditorView._is_finite_real_run_array(value),
+                    (True, 2),
+                )
+
+        invalid = (
+            1.0,
+            np.array(1.0),
+            np.ones((1, 2)),
+            [],
+            np.array([], dtype=float),
+            np.array([True, False]),
+            np.array([1 + 2j]),
+            np.array(["1", "2"]),
+            np.array([object()], dtype=object),
+            np.array([1.0, np.nan]),
+            np.array([1.0, np.inf]),
+            {"nested": [1.0]},
+            BadArray(),
+        )
+        for value in invalid:
+            with self.subTest(invalid=repr(value)):
+                self.assertEqual(
+                    EventDropEditorView._is_finite_real_run_array(value),
+                    (False, 0),
+                )
+
+    def test_candidate_filtering_preserves_order_identity_and_inputs(self):
+        time = np.array([2.0, 1.0, 1.0])
+        zulu = np.array([1.0, 2.0, 3.0])
+        alpha = np.array([4, 5, 6])
+        run = {
+            "time": time,
+            "zulu": zulu,
+            "alpha": alpha,
+            "bool": np.array([True, False, True]),
+            "complex": np.array([1 + 0j] * 3),
+            "object": np.array([1, 2, 3], dtype=object),
+            "scalar": 1.0,
+            "two_d": np.ones((3, 1)),
+            "empty": np.array([]),
+            "short": np.ones(2),
+            "nan": np.array([1.0, np.nan, 3.0]),
+            "inf": np.array([1.0, np.inf, 3.0]),
+            "nested": {"signal": np.ones(3)},
+            99: np.ones(3),
+        }
+        originals = {key: value.copy() for key, value in run.items() if isinstance(value, np.ndarray)}
+        view = headless_view()
+        view.run_data = run
+        self.assertEqual(view._find_full_run_signal_candidates(), ["zulu", "alpha"])
+        self.assertIs(run["zulu"], zulu)
+        self.assertIs(run["alpha"], alpha)
+        for key, original in originals.items():
+            np.testing.assert_array_equal(run[key], original)
+
+        integer_time = np.array([2, 1, 1])
+        integer_signal = [7, 8, 9]
+        view.run_data = {"time": integer_time, "signal": integer_signal}
+        self.assertEqual(view._find_full_run_signal_candidates(), ["signal"])
+        self.assertIs(view.run_data["time"], integer_time)
+        self.assertIs(view.run_data["signal"], integer_signal)
+
+    def test_invalid_run_time_prevents_all_candidates(self):
+        invalid_times = (
+            None,
+            1.0,
+            np.array(1.0),
+            np.ones((2, 2)),
+            [],
+            np.array([True]),
+            np.array(["1"]),
+            np.array([object()], dtype=object),
+            np.array([np.nan]),
+            np.array([np.inf]),
+        )
+        view = headless_view()
+        for time in invalid_times:
+            with self.subTest(time=repr(time)):
+                view.run_data = {"time": time, "signal": np.ones(1)}
+                self.assertEqual(view._find_full_run_signal_candidates(), [])
+        view.run_data = None
+        self.assertEqual(view._find_full_run_signal_candidates(), [])
+
+
+class IntereventContextRefreshTests(unittest.TestCase):
+    def test_refresh_reads_exact_run_once_and_preserves_unrelated_state(self):
+        view = headless_view()
+        view.run_idx = 3
+        view.event_idx = 2
+        view.event = {"event_time": 5.0, "time": np.array([4.0, 5.0])}
+        events = [{"event_time": 1.0}, {"event_time": 4.0}, view.event]
+        time = np.arange(6.0)
+        signal = np.arange(6.0) * 2
+        run = {"events": events, "time": time, "signal": signal}
+        view.data_manager = mock.Mock()
+        view.data_manager.get_data.return_value = run
+        view.selected_signal_name = "event signal"
+        view.preview_result = {"valid": True}
+        view.preview_parameters = {"half_win": 1.0}
+        view.interevent_bindings = {"dmax": "signal", "reference": "signal"}
+        controls = view.parameter_vars
+
+        with mock.patch(
+            "labquake_explorer.ui.views.event_drop_editor_view.calculate_event_drop_metrics"
+        ) as event_calc, mock.patch(
+            "labquake_explorer.ui.views.event_drop_editor_view.calculate_interevent_displacement_metrics"
+        ) as d_calc:
+            view._refresh_interevent_context()
+
+        view.data_manager.get_data.assert_called_once_with("runs/[3]")
+        self.assertIs(view.run_data, run)
+        self.assertIs(view.events, events)
+        self.assertEqual(view.current_event_time, 5.0)
+        self.assertEqual(view.previous_event_time, 4.0)
+        self.assertEqual(view.full_run_signal_candidates, ["signal"])
+        self.assertEqual(view.selected_signal_name, "event signal")
+        self.assertEqual(view.preview_result, {"valid": True})
+        self.assertEqual(view.preview_parameters, {"half_win": 1.0})
+        self.assertEqual(view.interevent_bindings, {"dmax": "signal", "reference": "signal"})
+        self.assertIs(view.parameter_vars, controls)
+        event_calc.assert_not_called()
+        d_calc.assert_not_called()
+        self.assertFalse(any(call[0] == "set_data" for call in view.data_manager.method_calls))
+        self.assertIs(run["events"], events)
+        self.assertIs(run["time"], time)
+        self.assertIs(run["signal"], signal)
+
+    def test_unavailable_run_context_handles_only_expected_read_errors(self):
+        expected_failures = (None, [], KeyError("run"), IndexError("run"), TypeError("run"), ValueError("run"))
+        for outcome in expected_failures:
+            with self.subTest(outcome=type(outcome).__name__):
+                view = headless_view()
+                view.run_idx = 1
+                view.event_idx = 0
+                view.event = {"event_time": 2.0}
+                get_data = mock.Mock()
+                if isinstance(outcome, Exception):
+                    get_data.side_effect = outcome
+                else:
+                    get_data.return_value = outcome
+                view.data_manager = SimpleNamespace(get_data=get_data)
+                view._refresh_interevent_context()
+                self.assertIsNone(view.run_data)
+                self.assertIsNone(view.events)
+                self.assertEqual(view.current_event_time, 2.0)
+                self.assertIsNone(view.previous_event_time)
+                self.assertEqual(view.full_run_signal_candidates, [])
+
+        view = headless_view()
+        view.run_idx = 1
+        view.data_manager = SimpleNamespace(
+            get_data=mock.Mock(side_effect=RuntimeError("programming error"))
+        )
+        with self.assertRaisesRegex(RuntimeError, "programming error"):
+            view._refresh_interevent_context()
+
+
+class FocusedEventSwitchingTests(unittest.TestCase):
+    def _switching_view(self):
+        view = headless_view()
+        view.run_idx = 2
+        view.event_idx = 0
+        view.event_combobox = FakeWidget("1")
+        view.title = mock.Mock()
+        view.interevent_bindings = {"dmax": "kept", "reference": "stale"}
+        view.interevent_preview_results = {
+            metric: {"valid": True}
+            for metric in ("D_Push", "D_max", "D_reference")
+        }
+        view.interevent_preview_parameters = {"delay_sec": 0.1}
+        return view
+
+    def test_event_switch_refreshes_canonical_context_without_analysis_or_write(self):
+        view = self._switching_view()
+        new_event = {
+            "event_time": 3.0,
+            "time": np.array([2.0, 3.0]),
+            "new signal": np.ones(2),
+        }
+        events = [{"event_time": 1.0}, new_event]
+        run = {"events": events, "time": np.arange(4.0), "kept": np.arange(4.0)}
+
+        def get_data(path):
+            if path == "runs/[2]/events/[1]":
+                return new_event
+            if path == "runs/[2]":
+                return run
+            raise AssertionError(path)
+
+        view.data_manager = mock.Mock()
+        view.data_manager.get_data.side_effect = get_data
+        fitting_controls = view.parameter_vars
+        with mock.patch(
+            "labquake_explorer.ui.views.event_drop_editor_view.calculate_event_drop_metrics"
+        ) as event_calc, mock.patch(
+            "labquake_explorer.ui.views.event_drop_editor_view.calculate_interevent_displacement_metrics"
+        ) as d_calc:
+            view.on_event_changed()
+
+        self.assertEqual(view.event_idx, 1)
+        self.assertIs(view.event, new_event)
+        self.assertEqual(list(view.signal_candidates), ["new signal"])
+        self.assertIsNone(view.selected_signal_name)
+        self.assertIsNone(view.preview_result)
+        self.assertIsNone(view.preview_parameters)
+        self.assertEqual(view.signal_combobox.get(), "")
+        self.assertIs(view.parameter_vars, fitting_controls)
+        self.assertEqual(view.interevent_bindings, {"dmax": "kept", "reference": None})
+        self.assertEqual(view.interevent_preview_results, {})
+        self.assertIsNone(view.interevent_preview_parameters)
+        self.assertEqual(view.current_event_time, 3.0)
+        self.assertEqual(view.previous_event_time, 1.0)
+        self.assertEqual(view.dmax_signal_combobox.get(), "kept")
+        self.assertEqual(view.reference_signal_combobox.get(), "")
+        view.title.assert_called_once_with("Event Drop Preview - Event 1")
+        event_calc.assert_not_called()
+        d_calc.assert_not_called()
+        self.assertFalse(any(call[0] == "set_data" for call in view.data_manager.method_calls))
+
+    def test_valid_run_bindings_survive_run_object_identity_change(self):
+        view = self._switching_view()
+        view.interevent_bindings = {"dmax": "same", "reference": "same"}
+        first = {"time": np.arange(2.0), "same": np.ones(2)}
+        second = {"time": np.arange(3.0), "same": np.ones(3)}
+        view.run_data = first
+        view.full_run_signal_candidates = ["same"]
+        view._refresh_interevent_widgets()
+        view.run_data = second
+        view.full_run_signal_candidates = ["same"]
+        view._refresh_interevent_widgets()
+        self.assertEqual(view.interevent_bindings, {"dmax": "same", "reference": "same"})
+
+    def test_event_local_key_does_not_rescue_stale_run_binding(self):
+        view = self._switching_view()
+        view.event = {"local only": np.ones(2), "time": np.arange(2.0)}
+        view.interevent_bindings = {"dmax": "local only", "reference": "LOCAL ONLY"}
+        view.full_run_signal_candidates = []
+        view._refresh_interevent_widgets()
+        self.assertEqual(view.interevent_bindings, {"dmax": None, "reference": None})
+
+    @mock.patch("labquake_explorer.ui.views.event_drop_editor_view.messagebox.showerror")
+    def test_on_event_changed_broadly_reports_expected_and_programming_errors(self, showerror):
+        for error in (ValueError("bad selector"), KeyError("event"), RuntimeError("bug"), AttributeError("bug")):
+            with self.subTest(error=type(error).__name__):
+                view = self._switching_view()
+                view._set_event = mock.Mock(side_effect=error)
+                view.on_event_changed()
+        self.assertEqual(showerror.call_count, 4)
+
+    def test_event_selector_uses_zero_based_canonical_positions(self):
+        view = headless_view()
+        events = [{}, {}, {}]
+        view.run_idx = 4
+        view.event_idx = 2
+        view.event_combobox = FakeWidget()
+        view.data_manager = SimpleNamespace(get_data=mock.Mock(return_value=events))
+        view._initialize_event_selector()
+        view.data_manager.get_data.assert_called_once_with("runs/[4]/events")
+        self.assertEqual(view.event_combobox.options["values"], ["0", "1", "2"])
+        self.assertEqual(view.event_combobox.get(), "2")
+
+
+class EventDropControllerWiringTests(unittest.TestCase):
+    def test_view_export_and_controller_callback_exist(self):
+        self.assertIs(ExportedEventDropEditorView, EventDropEditorView)
+        self.assertTrue(hasattr(LabquakeExplorer, "analyze_event_drop"))
+
+    def test_context_menu_registers_event_drop_callback(self):
+        menus = []
+
+        class FakeMenu:
+            def __init__(self, *args, **kwargs):
+                self.commands = []
+                menus.append(self)
+
+            def add_command(self, **kwargs):
+                self.commands.append(kwargs)
+
+        explorer = LabquakeExplorer.__new__(LabquakeExplorer)
+        explorer.root = object()
+        with mock.patch.object(explorer_module.tk, "Menu", FakeMenu):
+            explorer.create_context_menus()
+        event_commands = {item["label"]: item["command"] for item in menus[1].commands}
+        self.assertEqual(event_commands["Analyze Event Drop"], explorer.analyze_event_drop)
+
+    @mock.patch.object(explorer_module, "EventDropEditorView")
+    def test_windows_path_wiring_uses_shared_parser_without_analysis_or_write(self, view_class):
+        explorer = LabquakeExplorer.__new__(LabquakeExplorer)
+        explorer.get_full_path = mock.Mock(return_value=(r"runs\[3]\events\[7]", object()))
+        explorer._extract_run_event_indices = mock.Mock(return_value=(3, 7))
+        explorer.set_window_icon = mock.Mock()
+        explorer.child_windows = []
+        explorer.data_manager = mock.Mock()
+        view = object()
+        view_class.return_value = view
+
+        with mock.patch(
+            "labquake_explorer.ui.views.event_drop_editor_view.calculate_event_drop_metrics"
+        ) as event_calc, mock.patch(
+            "labquake_explorer.ui.views.event_drop_editor_view.calculate_interevent_displacement_metrics"
+        ) as d_calc:
+            explorer.analyze_event_drop()
+
+        explorer._extract_run_event_indices.assert_called_once_with(r"runs\[3]\events\[7]")
+        view_class.assert_called_once_with(explorer, 3, 7)
+        explorer.set_window_icon.assert_called_once_with(view)
+        self.assertEqual(explorer.child_windows, [view])
+        event_calc.assert_not_called()
+        d_calc.assert_not_called()
+        self.assertFalse(explorer.data_manager.method_calls)
+
+
 class NoPersistenceTests(unittest.TestCase):
     @mock.patch(
         "labquake_explorer.ui.views.event_drop_editor_view.calculate_event_drop_metrics"
@@ -726,6 +1177,19 @@ class NoPersistenceTests(unittest.TestCase):
         view.data_manager = mock.Mock()
         calculator.return_value = {"signal": {"valid": False}}
         view.calculate_preview()
+        self.assertFalse(view.data_manager.method_calls)
+
+    def test_signal_and_interevent_selector_changes_do_not_write(self):
+        view = headless_view()
+        view.data_manager = mock.Mock()
+        view.signal_candidates = {"event signal": np.ones(2)}
+        view.signal_combobox.set("event signal")
+        view.on_signal_changed()
+        view.full_run_signal_candidates = ["run signal"]
+        view.dmax_signal_combobox.set("run signal")
+        view.reference_signal_combobox.set("run signal")
+        view.on_dmax_signal_changed()
+        view.on_reference_signal_changed()
         self.assertFalse(view.data_manager.method_calls)
 
 
