@@ -300,8 +300,9 @@ class CalculateIntereventDisplacementMetricsTests(unittest.TestCase):
                 time=np.array([0.0, 1.0, 2.0]),
             )
 
-    def test_out_of_range_target_only_invalidates_d_max(self):
-        for current, previous in ((5.0, 1.0), (2.0, -1.0), (5.0, -1.0)):
+    def test_out_of_range_targets_use_nearest_endpoint_for_d_max(self):
+        cases = ((5.0, 1.0, 4.0), (2.0, -1.0, 4.0), (5.0, -1.0, 6.0))
+        for current, previous, expected in cases:
             with self.subTest(current=current, previous=previous):
                 result = calculate_interevent_displacement_metrics(
                     current_event_time=current,
@@ -313,7 +314,9 @@ class CalculateIntereventDisplacementMetricsTests(unittest.TestCase):
                     lvdt_smooth_w=1,
                 )
                 self.assertTrue(result["D_Push"]["valid"])
-                self.assertEqual(result["D_max"], {"valid": False})
+                self.assertEqual(
+                    result["D_max"], {"valid": True, "value": expected}
+                )
 
     def test_invalid_run_arrays_are_rejected(self):
         cases = (
@@ -485,7 +488,7 @@ class CalculateIntereventDisplacementMetricsTests(unittest.TestCase):
             },
         )
 
-    def test_out_of_range_target_invalidates_both_sample_metrics(self):
+    def test_out_of_range_target_uses_endpoint_for_both_sample_metrics(self):
         result = calculate_interevent_displacement_metrics(
             current_event_time=5.0,
             previous_event_time=1.0,
@@ -498,8 +501,10 @@ class CalculateIntereventDisplacementMetricsTests(unittest.TestCase):
         )
 
         self.assertTrue(result["D_Push"]["valid"])
-        self.assertEqual(result["D_max"], {"valid": False})
-        self.assertEqual(result["D_reference"], {"valid": False})
+        self.assertEqual(result["D_max"], {"valid": True, "value": 2.0})
+        self.assertEqual(
+            result["D_reference"], {"valid": True, "value": 20.0}
+        )
 
     def test_invalid_reference_arrays_are_rejected_with_argument_name(self):
         cases = (
@@ -719,20 +724,20 @@ class PotterIntereventBoundaryParityTests(unittest.TestCase):
                 np.testing.assert_array_equal(actual, expected)
                 self.assertEqual(len(actual), len(signal))
 
-    def test_boundary_matrix_characterizes_potter_endpoint_selection(self):
+    def test_boundary_matrix_has_strict_potter_endpoint_parity(self):
         cases = {
-            "inside": (3.0, 1.0, 0.0, (3, 1), True),
-            "previous_slightly_low": (2.0, -0.1, 0.0, (2, 0), False),
-            "previous_far_low": (2.0, -10.0, 0.0, (2, 0), False),
-            "current_slightly_high": (4.1, 2.0, 0.0, (4, 2), False),
-            "current_far_high": (10.0, 2.0, 0.0, (4, 2), False),
-            "both_low": (-0.1, -1.0, 0.0, (0, 0), False),
-            "both_high": (10.0, 9.0, 0.0, (4, 4), False),
-            "one_low_one_high": (10.0, -1.0, 0.0, (4, 0), False),
-            "exact_lower": (1.0, 0.0, 0.0, (1, 0), True),
-            "exact_upper": (4.0, 3.0, 0.0, (4, 3), True),
+            "inside": (3.0, 1.0, 0.0, (3, 1)),
+            "previous_slightly_low": (2.0, -0.1, 0.0, (2, 0)),
+            "previous_far_low": (2.0, -10.0, 0.0, (2, 0)),
+            "current_slightly_high": (4.1, 2.0, 0.0, (4, 2)),
+            "current_far_high": (10.0, 2.0, 0.0, (4, 2)),
+            "both_low": (-0.1, -1.0, 0.0, (0, 0)),
+            "both_high": (10.0, 9.0, 0.0, (4, 4)),
+            "one_low_one_high": (10.0, -1.0, 0.0, (4, 0)),
+            "exact_lower": (1.0, 0.0, 0.0, (1, 0)),
+            "exact_upper": (4.0, 3.0, 0.0, (4, 3)),
         }
-        for name, (current, previous, delay, indices, in_range) in cases.items():
+        for name, (current, previous, delay, indices) in cases.items():
             with self.subTest(case=name):
                 potter = self.potter(
                     current_event_time=current,
@@ -757,17 +762,13 @@ class PotterIntereventBoundaryParityTests(unittest.TestCase):
                     abs(self.reference[indices[0]] - self.reference[indices[1]]),
                 )
                 self.assertTrue(official["D_Push"]["valid"])
-                if in_range:
-                    self.assertEqual(official["D_max"]["value"], potter["D_max"])
-                    self.assertEqual(
-                        official["D_reference"]["value"],
-                        potter["D_reference"],
-                    )
-                else:
-                    self.assertEqual(official["D_max"], {"valid": False})
-                    self.assertEqual(official["D_reference"], {"valid": False})
+                self.assertEqual(official["D_max"]["value"], potter["D_max"])
+                self.assertEqual(
+                    official["D_reference"]["value"],
+                    potter["D_reference"],
+                )
 
-    def test_outside_targets_at_same_endpoint_give_zero_only_in_potter(self):
+    def test_outside_targets_at_same_endpoint_give_zero_in_both(self):
         for current, previous, endpoint in ((-1.0, -2.0, 0), (8.0, 7.0, 4)):
             with self.subTest(endpoint=endpoint):
                 potter = self.potter(
@@ -780,14 +781,25 @@ class PotterIntereventBoundaryParityTests(unittest.TestCase):
                 self.assertEqual(potter["previous_index"], endpoint)
                 self.assertEqual(potter["D_max"], 0.0)
                 self.assertEqual(potter["D_reference"], 0.0)
-                self.assertEqual(official["D_max"], {"valid": False})
-                self.assertEqual(official["D_reference"], {"valid": False})
+                self.assertEqual(official["D_max"], {"valid": True, "value": 0.0})
+                self.assertEqual(
+                    official["D_reference"], {"valid": True, "value": 0.0}
+                )
 
-    def test_official_boundary_failure_is_shared_even_for_one_signal(self):
-        for signal_arguments in (
-            {"lvdt_signal": self.lvdt, "reference_displacement_signal": None},
-            {"lvdt_signal": None, "reference_displacement_signal": self.reference},
-        ):
+    def test_endpoint_sampling_preserves_missing_signal_isolation(self):
+        cases = (
+            (
+                {"lvdt_signal": self.lvdt, "reference_displacement_signal": None},
+                {"valid": True, "value": 30.0},
+                {"valid": False},
+            ),
+            (
+                {"lvdt_signal": None, "reference_displacement_signal": self.reference},
+                {"valid": False},
+                {"valid": True, "value": 15.0},
+            ),
+        )
+        for signal_arguments, expected_max, expected_reference in cases:
             with self.subTest(signal=tuple(signal_arguments)):
                 result = self.official(
                     current_event_time=5.0,
@@ -795,8 +807,33 @@ class PotterIntereventBoundaryParityTests(unittest.TestCase):
                     **signal_arguments,
                 )
                 self.assertTrue(result["D_Push"]["valid"])
-                self.assertEqual(result["D_max"], {"valid": False})
-                self.assertEqual(result["D_reference"], {"valid": False})
+                self.assertEqual(result["D_max"], expected_max)
+                self.assertEqual(result["D_reference"], expected_reference)
+
+    def test_positive_and_negative_delay_select_endpoints_with_parity(self):
+        cases = (
+            (3.5, 1.0, 1.0, (4, 2)),
+            (2.0, 0.5, -1.0, (1, 0)),
+        )
+        for current, previous, delay, expected_indices in cases:
+            with self.subTest(delay=delay):
+                _, potter = self.assert_in_range_parity(
+                    current_event_time=current,
+                    previous_event_time=previous,
+                    delay_sec=delay,
+                )
+                self.assertEqual(
+                    (potter["current_index"], potter["previous_index"]),
+                    expected_indices,
+                )
+
+    def test_outside_endpoint_d_max_uses_full_run_large_window_smoothing(self):
+        official, potter = self.assert_in_range_parity(
+            current_event_time=10.0,
+            previous_event_time=-10.0,
+            smooth_w=7,
+        )
+        self.assertEqual(official["D_max"]["value"], potter["D_max"])
 
     def test_first_event_contract_is_unavailable_in_both_result_shapes(self):
         potter = self.potter(previous_event_time=None)

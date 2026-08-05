@@ -268,14 +268,7 @@ def calculate_interevent_displacement_metrics(
 
     current_target = current_time + delay
     previous_target = previous_time + delay
-    if (
-        current_target < time_array[0]
-        or current_target > time_array[-1]
-        or previous_target < time_array[0]
-        or previous_target > time_array[-1]
-    ):
-        return results
-
+    # Match Potter: np.argmin maps out-of-range targets to the nearest endpoint.
     current_index = int(np.argmin(np.abs(time_array - current_target)))
     previous_index = int(np.argmin(np.abs(time_array - previous_target)))
     if smoothed_lvdt is not None:
