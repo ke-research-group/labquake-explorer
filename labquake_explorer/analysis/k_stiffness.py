@@ -43,7 +43,7 @@ def calculate_event_loading_stiffness(
 
     Structural and parameter errors raise :class:`ValueError`.  Event-specific
     inability to complete the calculation (too few samples, filtering a window
-    that is too short, constant slip, or failed regression) returns
+    that is too short, or failed regression) returns
     ``{"valid": False}``.
     """
     time_array = _coerce_signal_array(time, "time")
@@ -72,11 +72,6 @@ def calculate_event_loading_stiffness(
         raise ValueError("pre_start must be less than zero")
     if fit_end > 0:
         raise ValueError("pre_end must be at or before zero")
-    if highpass < 0:
-        raise ValueError("highpass_freq must be non-negative")
-    if lowpass < 0:
-        raise ValueError("lowpass_freq must be non-negative")
-
     half_win = max(requested_window, abs(fit_start) + 0.5)
     event_mask = (time_array >= trigger - half_win) & (
         time_array <= trigger + half_win
@@ -93,12 +88,6 @@ def calculate_event_loading_stiffness(
     if not np.isfinite(dt) or dt <= 0:
         raise ValueError("event-window sampling interval must be finite and positive")
     sampling_rate = 1.0 / dt
-    nyquist = sampling_rate / 2.0
-    if highpass > 0 and highpass >= nyquist:
-        raise ValueError("highpass_freq must be less than the Nyquist frequency")
-    if lowpass > 0 and lowpass >= nyquist:
-        raise ValueError("lowpass_freq must be less than the Nyquist frequency")
-
     try:
         processed_tau = _process_signal(
             raw_tau, smoothing, highpass, lowpass, sampling_rate
@@ -119,15 +108,12 @@ def calculate_event_loading_stiffness(
     fit_tau = processed_tau[fit_mask]
     if not np.all(np.isfinite(fit_slip)) or not np.all(np.isfinite(fit_tau)):
         return {"valid": False}
-    if _is_effectively_constant(fit_slip):
-        return {"valid": False}
-
     try:
         if bool(use_ransac):
             coefficients = _fit_ransac(fit_slip, fit_tau)
         else:
             coefficients = np.polyfit(fit_slip, fit_tau, 1)
-    except (ValueError, TypeError, np.linalg.LinAlgError, FloatingPointError):
+    except (ValueError, np.linalg.LinAlgError, FloatingPointError):
         return {"valid": False}
 
     coefficients = np.asarray(coefficients, dtype=float).copy()
@@ -196,54 +182,75 @@ def _process_signal(
     lowpass_freq: float,
     sampling_rate: float,
 ) -> np.ndarray:
+    """Apply Potter processing; nonpositive/out-of-Nyquist cutoffs are off."""
     processed = moving_average(raw, smooth_w)
     nyquist = sampling_rate / 2.0
-    if highpass_freq > 0:
+    if 0 < highpass_freq < nyquist:
         b, a = butter(4, highpass_freq / nyquist, btype="high")
         processed = filtfilt(b, a, processed)
-    if lowpass_freq > 0:
+    if 0 < lowpass_freq < nyquist:
         b, a = butter(4, lowpass_freq / nyquist, btype="low")
         processed = filtfilt(b, a, processed)
     return np.asarray(processed, dtype=float).copy()
 
 
-def _is_effectively_constant(values: np.ndarray) -> bool:
-    scale = max(1.0, float(np.max(np.abs(values))))
-    tolerance = 16.0 * np.finfo(float).eps * scale
-    return float(np.ptp(values)) <= tolerance
-
-
 def _fit_ransac(x: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """Fit a deterministic robust line without an optional sklearn dependency."""
-    if x.size < 6 or _is_effectively_constant(x):
-        raise ValueError("RANSAC requires at least six non-constant samples")
+    """Use Potter's sklearn-first RANSAC, with its fallback when unavailable.
 
-    initial = np.polyfit(x, y, 1)
-    residuals = np.abs(y - np.polyval(initial, x))
-    threshold = max(1e-6, float(np.median(residuals)) * 1.5)
+    The sklearn estimator intentionally uses all library defaults, including
+    its unfixed ``random_state``.  Only an unavailable sklearn import selects
+    Potter's deterministic NumPy fallback.
+    """
+    try:
+        from sklearn.linear_model import RANSACRegressor
+    except ImportError:
+        return _fit_ransac_fallback(x, y)
+
+    model = RANSACRegressor()
+    model.fit(x.reshape(-1, 1), y)
+    return np.asarray(
+        [model.estimator_.coef_[0], model.estimator_.intercept_], dtype=float
+    )
+
+
+def _fit_ransac_fallback(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Potter's deterministic NumPy fallback for an unavailable sklearn."""
+    sample_count = len(x)
+    if sample_count < 5:
+        return np.asarray(np.polyfit(x, y, 1), dtype=float)
+
+    try:
+        initial = np.polyfit(x, y, 1)
+        residuals = np.abs(y - (initial[0] * x + initial[1]))
+        threshold = max(1e-6, float(np.median(residuals)) * 1.5)
+    except Exception:
+        threshold = 0.05
+
     rng = np.random.default_rng(42)
-    best_inliers: np.ndarray | None = None
+    best_inlier_count = -1
+    best_coefficients = None
 
     for _ in range(100):
         indices = rng.choice(x.size, 2, replace=False)
         dx = float(x[indices[1]] - x[indices[0]])
-        if abs(dx) <= 16.0 * np.finfo(float).eps * max(
-            1.0, float(np.max(np.abs(x)))
-        ):
+        if abs(dx) < 1e-12:
             continue
         slope = float(y[indices[1]] - y[indices[0]]) / dx
         intercept = float(y[indices[0]]) - slope * float(x[indices[0]])
         inliers = np.abs(y - (slope * x + intercept)) < threshold
-        if np.count_nonzero(inliers) < 2:
-            continue
-        if best_inliers is None or np.count_nonzero(inliers) > np.count_nonzero(
-            best_inliers
-        ):
-            best_inliers = inliers
+        inlier_count = int(np.sum(inliers))
 
-    if best_inliers is None or _is_effectively_constant(x[best_inliers]):
-        raise ValueError("RANSAC could not find a valid inlier fit")
-    coefficients = np.polyfit(x[best_inliers], y[best_inliers], 1)
-    if not np.all(np.isfinite(coefficients)):
-        raise ValueError("RANSAC produced non-finite coefficients")
-    return np.asarray(coefficients, dtype=float)
+        if inlier_count > best_inlier_count:
+            best_inlier_count = inlier_count
+            if inlier_count >= 2:
+                try:
+                    coefficients = np.polyfit(x[inliers], y[inliers], 1)
+                except Exception:
+                    coefficients = np.array([slope, intercept])
+            else:
+                coefficients = np.array([slope, intercept])
+            best_coefficients = coefficients
+
+    if best_coefficients is not None:
+        return np.asarray(best_coefficients, dtype=float)
+    return np.asarray(np.polyfit(x, y, 1), dtype=float)

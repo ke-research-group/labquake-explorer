@@ -74,6 +74,31 @@ def _potter_sklearn_ransac_seeded(x, y, seed=20260806):
         np.random.set_state(state)
 
 
+def _official_sklearn_ransac_seeded(x, y, seed=20260806):
+    state = np.random.get_state()
+    try:
+        np.random.seed(seed)
+        return k_stiffness._fit_ransac(
+            np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+        )
+    finally:
+        np.random.set_state(state)
+
+
+def _official_fallback_ransac(x, y):
+    original_import = builtins.__import__
+
+    def import_without_sklearn(name, *args, **kwargs):
+        if name == "sklearn.linear_model":
+            raise ImportError("forced test-only fallback")
+        return original_import(name, *args, **kwargs)
+
+    with mock.patch("builtins.__import__", side_effect=import_without_sklearn):
+        return k_stiffness._fit_ransac(
+            np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+        )
+
+
 class EventLoadingStiffnessTests(unittest.TestCase):
     def setUp(self):
         self.time = np.linspace(-5.0, 5.0, 101)
@@ -273,13 +298,17 @@ class EventLoadingStiffnessTests(unittest.TestCase):
         self.assertTrue(first["valid"])
         np.testing.assert_array_equal(first["coefficients"], second["coefficients"])
 
-    def test_invalid_cutoffs_raise(self):
+    def test_nonpositive_and_out_of_nyquist_cutoffs_are_disabled(self):
         for arguments in (
             {"highpass_freq": -1.0}, {"lowpass_freq": -1.0},
             {"highpass_freq": 5.0}, {"lowpass_freq": 5.0},
         ):
-            with self.subTest(arguments=arguments), self.assertRaises(ValueError):
-                self.calculate(**arguments)
+            with self.subTest(arguments=arguments):
+                result = self.calculate(**arguments)
+                self.assertTrue(result["valid"])
+                np.testing.assert_array_equal(
+                    result["processed_tau"], self.tau[15:86] - self.tau[15]
+                )
 
     def test_filter_window_too_short_is_invalid(self):
         time = np.linspace(-1.0, 1.0, 20)
@@ -293,11 +322,10 @@ class EventLoadingStiffnessTests(unittest.TestCase):
             )
         self.assertEqual(result, {"valid": False})
 
-    def test_constant_and_near_constant_slip_are_invalid(self):
+    def test_nonfinite_regression_coefficients_remain_invalid_for_constant_slip(self):
         constant = np.ones_like(self.slip)
-        near = 1.0 + np.linspace(0.0, np.finfo(float).eps, self.slip.size)
-        self.assertEqual(self.calculate(slip_signal=constant), {"valid": False})
-        self.assertEqual(self.calculate(slip_signal=near), {"valid": False})
+        with mock.patch.object(np, "polyfit", return_value=np.array([np.inf, 0.0])):
+            self.assertEqual(self.calculate(slip_signal=constant), {"valid": False})
 
     def test_nonfinite_regression_coefficients_are_invalid(self):
         with mock.patch.object(np, "polyfit", return_value=np.array([np.nan, 0.0])):
@@ -315,14 +343,12 @@ class EventLoadingStiffnessTests(unittest.TestCase):
         self.assertAlmostEqual(robust["k"], 2.0, places=10)
         self.assertGreater(abs(ols["k"] - 2.0), 0.1)
 
-    def test_ransac_is_deterministic_and_preserves_negative_sign(self):
+    def test_ransac_preserves_negative_sign(self):
         tau = -4.0 * self.slip + 3.0
         tau = tau.copy()
         tau[25] += 20.0
-        first = self.calculate(tau_signal=tau, use_ransac=True)
-        second = self.calculate(tau_signal=tau, use_ransac=True)
-        np.testing.assert_array_equal(first["coefficients"], second["coefficients"])
-        self.assertAlmostEqual(first["k"], -4.0, places=10)
+        result = self.calculate(tau_signal=tau, use_ransac=True)
+        self.assertAlmostEqual(result["k"], -4.0, places=10)
 
     def test_ransac_failure_does_not_fallback_to_ols(self):
         with mock.patch.object(k_stiffness, "_fit_ransac", side_effect=ValueError):
@@ -528,7 +554,7 @@ class PotterLoadingStiffnessParityTests(unittest.TestCase):
         y = -3.5 * x + 1.25
         sklearn_result = _potter_sklearn_ransac_seeded(x, y)
         fallback_result = _potter_fallback_ransac(x, y)
-        official_result = k_stiffness._fit_ransac(x, y)
+        official_result = _official_sklearn_ransac_seeded(x, y)
         for result in (sklearn_result, fallback_result, official_result):
             np.testing.assert_allclose(result, [-3.5, 1.25], rtol=1e-10, atol=1e-10)
 
@@ -560,45 +586,54 @@ class PotterLoadingStiffnessParityTests(unittest.TestCase):
         y[outliers] += rng.normal(0.0, 5.0, 8)
         datasets["fixed_noisy_outliers"] = (x, y)
 
-        observed_divergence = False
         for name, (x, y) in datasets.items():
             with self.subTest(dataset=name):
                 sklearn_result = _potter_sklearn_ransac_seeded(x, y)
                 fallback_result = _potter_fallback_ransac(x, y)
-                official_result = k_stiffness._fit_ransac(x, y)
+                official_result = _official_sklearn_ransac_seeded(x, y)
                 for result in (sklearn_result, fallback_result, official_result):
                     self.assertEqual(np.asarray(result).shape, (2,))
                     self.assertTrue(np.all(np.isfinite(result)))
                 np.testing.assert_allclose(
-                    fallback_result, official_result, rtol=0.0, atol=0.0
+                    sklearn_result, official_result, rtol=0.0, atol=0.0
                 )
-                if name == "fixed_noisy_outliers":
-                    self.assertFalse(
-                        np.allclose(
-                            sklearn_result, official_result, rtol=1e-12, atol=1e-12
-                        )
-                    )
-                if not np.allclose(sklearn_result, official_result, rtol=1e-12, atol=1e-12):
-                    observed_divergence = True
-        self.assertTrue(observed_divergence)
+                official_fallback = _official_fallback_ransac(x, y)
+                np.testing.assert_allclose(
+                    fallback_result, official_fallback, rtol=0.0, atol=0.0
+                )
 
-    def test_sklearn_randomness_contract_and_official_determinism(self):
+    def test_sklearn_randomness_contract_is_not_fixed_by_official(self):
         x = np.linspace(-3.0, 3.0, 40)
         y = 1.8 * x - 0.4
         y[[2, 5, 8, 12, 28, 32, 36]] += [8, -9, 7, -8, 9, -7, 8]
         potter_results = np.asarray(
             [POTTER_K_STIFFNESS.robust_fit_ransac(x, y) for _ in range(20)]
         )
-        official_results = np.asarray(
-            [k_stiffness._fit_ransac(x, y) for _ in range(20)]
-        )
+        official_results = np.asarray([k_stiffness._fit_ransac(x, y) for _ in range(20)])
         self.assertTrue(np.all(np.isfinite(potter_results)))
-        np.testing.assert_array_equal(
-            official_results, np.repeat(official_results[:1], 20, axis=0)
-        )
+        self.assertTrue(np.all(np.isfinite(official_results)))
+
+    def test_sklearn_constructor_defaults_and_fit_shape_match_potter(self):
+        x = np.linspace(-1.0, 1.0, 8)
+        y = 2.0 * x + 1.0
+        estimator = mock.Mock()
+        estimator.coef_ = np.array([2.0])
+        estimator.intercept_ = 1.0
+        model = mock.Mock(estimator_=estimator)
+        with mock.patch(
+            "sklearn.linear_model.RANSACRegressor", return_value=model
+        ) as constructor:
+            result = k_stiffness._fit_ransac(x, y)
+        constructor.assert_called_once_with()
+        model.fit.assert_called_once()
+        fit_x, fit_y = model.fit.call_args.args
+        self.assertEqual(fit_x.shape, (8, 1))
+        np.testing.assert_array_equal(fit_x[:, 0], x)
+        np.testing.assert_array_equal(fit_y, y)
+        np.testing.assert_array_equal(result, [2.0, 1.0])
 
     def test_small_minimum_and_negative_ransac_characterization(self):
-        for count in (5, 6):
+        for count in (4, 5, 6):
             x = np.linspace(-1.0, 1.0, count)
             y = -4.0 * x + 2.0
             with self.subTest(count=count):
@@ -606,13 +641,12 @@ class PotterLoadingStiffnessParityTests(unittest.TestCase):
                 fallback_result = _potter_fallback_ransac(x, y)
                 np.testing.assert_allclose(sklearn_result, [-4.0, 2.0], atol=1e-10)
                 np.testing.assert_allclose(fallback_result, [-4.0, 2.0], atol=1e-10)
-                if count == 5:
-                    with self.assertRaises(ValueError):
-                        k_stiffness._fit_ransac(x, y)
-                else:
-                    np.testing.assert_allclose(
-                        k_stiffness._fit_ransac(x, y), [-4.0, 2.0], atol=1e-10
-                    )
+                np.testing.assert_allclose(
+                    _official_sklearn_ransac_seeded(x, y), [-4.0, 2.0], atol=1e-10
+                )
+                np.testing.assert_allclose(
+                    _official_fallback_ransac(x, y), fallback_result, rtol=0.0, atol=0.0
+                )
 
     def test_constant_and_near_constant_failure_contracts(self):
         for label, x in (
@@ -627,9 +661,33 @@ class PotterLoadingStiffnessParityTests(unittest.TestCase):
                 fallback = _potter_fallback_ransac(x, y)
                 self.assertEqual(np.asarray(fallback).shape, (2,))
                 self.assertTrue(np.all(np.isfinite(fallback)))
-                with self.assertRaises(ValueError):
-                    k_stiffness._fit_ransac(x, y)
-        self.assertEqual(self.official(slip_signal=np.ones_like(self.slip)), {"valid": False})
+                official_sklearn = _official_sklearn_ransac_seeded(x, y)
+                official_fallback = _official_fallback_ransac(x, y)
+                np.testing.assert_allclose(official_sklearn, sklearn_result, rtol=0.0, atol=0.0)
+                np.testing.assert_allclose(official_fallback, fallback, rtol=0.0, atol=0.0)
+
+        constant_result = self.official(
+            tau_signal=np.linspace(0.0, 1.0, self.time.size),
+            slip_signal=np.ones_like(self.slip),
+            use_ransac=True,
+        )
+        near_result = self.official(
+            tau_signal=np.linspace(0.0, 1.0, self.time.size),
+            slip_signal=1.0 + np.arange(self.time.size) * np.finfo(float).eps,
+            use_ransac=True,
+        )
+        self.assertTrue(constant_result["valid"])
+        self.assertTrue(near_result["valid"])
+        self.assertTrue(np.isfinite(constant_result["k"]))
+        self.assertTrue(np.isfinite(near_result["k"]))
+
+    def test_fallback_no_model_uses_full_data_ols(self):
+        x = np.ones(8)
+        y = np.linspace(-1.0, 1.0, 8)
+        expected = np.polyfit(x, y, 1)
+        np.testing.assert_allclose(
+            _official_fallback_ransac(x, y), expected, rtol=0.0, atol=0.0
+        )
 
     def test_regression_failure_contract_is_swallowed_by_potter_and_invalid_official(self):
         with mock.patch.object(
@@ -642,11 +700,23 @@ class PotterLoadingStiffnessParityTests(unittest.TestCase):
         with mock.patch.object(k_stiffness, "_fit_ransac", side_effect=ValueError("fit")):
             self.assertEqual(self.official(use_ransac=True), {"valid": False})
 
-    def test_cutoff_boundaries_characterize_known_difference(self):
+    def test_unexpected_programming_errors_are_not_hidden(self):
+        with mock.patch.object(
+            k_stiffness, "_fit_ransac", side_effect=RuntimeError("programming bug")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "programming bug"):
+                self.official(use_ransac=True)
+        with mock.patch.object(
+            k_stiffness, "filtfilt", side_effect=AttributeError("plot bug")
+        ):
+            with self.assertRaisesRegex(AttributeError, "plot bug"):
+                self.official(highpass_freq=0.2)
+
+    def test_cutoff_boundaries_now_match_potter(self):
         fs = 1.0 / np.median(np.diff(self.time))
         nyquist = fs / 2.0
         raw = self.tau.copy()
-        for cutoff in (0.0, nyquist, nyquist + 1e-9):
+        for cutoff in (-1.0, 0.0, nyquist, nyquist + 1e-9):
             with self.subTest(cutoff=cutoff):
                 np.testing.assert_array_equal(
                     POTTER_K_STIFFNESS._apply_highpass(raw, cutoff, fs), raw
@@ -654,12 +724,11 @@ class PotterLoadingStiffnessParityTests(unittest.TestCase):
                 np.testing.assert_array_equal(
                     POTTER_K_STIFFNESS._apply_lowpass(raw, cutoff, fs), raw
                 )
-        for name in ("highpass_freq", "lowpass_freq"):
-            with self.subTest(name=name):
-                with self.assertRaises(ValueError):
-                    self.official(**{name: nyquist})
-                with self.assertRaises(ValueError):
-                    self.official(**{name: nyquist + 1e-9})
+                official = self.official(highpass_freq=cutoff)
+                self.assertTrue(official["valid"])
+                np.testing.assert_array_equal(
+                    official["processed_tau"], official["raw_tau"] - official["raw_tau"][0]
+                )
 
     def test_cutoff_below_nyquist_and_combined_filters_match(self):
         nyquist = 1.0 / np.median(np.diff(self.time)) / 2.0
@@ -680,8 +749,7 @@ class PotterLoadingStiffnessParityTests(unittest.TestCase):
         np.testing.assert_array_equal(
             POTTER_K_STIFFNESS._apply_lowpass(raw, -1.0, 10.0), raw
         )
-        with self.assertRaisesRegex(ValueError, "non-negative"):
-            self.official(highpass_freq=-1.0)
+        self.assertTrue(self.official(highpass_freq=-1.0)["valid"])
 
         short_time = np.linspace(-1.0, 1.0, 20)
         short_history = {
