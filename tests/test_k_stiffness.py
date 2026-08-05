@@ -1,5 +1,9 @@
 import ast
+import builtins
+import importlib.util
 import inspect
+from pathlib import Path
+import sys
 import unittest
 from unittest import mock
 
@@ -7,6 +11,67 @@ import numpy as np
 
 from labquake_explorer.analysis import calculate_event_loading_stiffness
 from labquake_explorer.analysis import k_stiffness
+
+
+def _load_potter_k_stiffness():
+    """Directly load Potter's pure production analysis modules."""
+    analysis_path = (
+        Path(__file__).resolve().parents[2]
+        / "student-potter"
+        / "labquake_explorer"
+        / "analysis"
+    )
+    source_path = analysis_path / "k_stiffness_analyzer.py"
+    dependency_name = "labquake_explorer.analysis.event_drop_analyzer"
+    previous = sys.modules.get(dependency_name)
+    try:
+        dependency_spec = importlib.util.spec_from_file_location(
+            dependency_name, analysis_path / "event_drop_analyzer.py"
+        )
+        dependency = importlib.util.module_from_spec(dependency_spec)
+        sys.modules[dependency_name] = dependency
+        dependency_spec.loader.exec_module(dependency)
+        spec = importlib.util.spec_from_file_location(
+            "_potter_k_stiffness_characterization", source_path
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        if previous is None:
+            sys.modules.pop(dependency_name, None)
+        else:
+            sys.modules[dependency_name] = previous
+
+
+POTTER_K_STIFFNESS = _load_potter_k_stiffness()
+
+
+def _potter_fallback_ransac(x, y):
+    """Call Potter production while making its optional sklearn import fail."""
+    original_import = builtins.__import__
+
+    def import_without_sklearn(name, *args, **kwargs):
+        if name == "sklearn.linear_model":
+            raise ImportError("forced test-only fallback")
+        return original_import(name, *args, **kwargs)
+
+    with mock.patch("builtins.__import__", side_effect=import_without_sklearn):
+        return POTTER_K_STIFFNESS.robust_fit_ransac(
+            np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+        )
+
+
+def _potter_sklearn_ransac_seeded(x, y, seed=20260806):
+    """Stabilize characterization without changing Potter's production API."""
+    state = np.random.get_state()
+    try:
+        np.random.seed(seed)
+        return POTTER_K_STIFFNESS.robust_fit_ransac(
+            np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+        )
+    finally:
+        np.random.set_state(state)
 
 
 class EventLoadingStiffnessTests(unittest.TestCase):
@@ -328,6 +393,339 @@ class EventLoadingStiffnessTests(unittest.TestCase):
                 imported.add(node.module)
         forbidden = {"tkinter", "h5py", "labquake_explorer.data.data_manager"}
         self.assertTrue(imported.isdisjoint(forbidden))
+
+
+class PotterLoadingStiffnessParityTests(unittest.TestCase):
+    """Characterize parity and known differences against Potter production."""
+
+    def setUp(self):
+        self.time = np.linspace(-5.0, 5.0, 1001)
+        self.slip = 0.4 * self.time + 0.03 * np.sin(2 * np.pi * 2 * self.time)
+        self.tau = 2.75 * self.slip + 0.2
+        self.common = {
+            "event_time": 0.0,
+            "pre_start": -3.0,
+            "pre_end": -0.5,
+            "window_sec": 3.5,
+            "smooth_w": 1,
+            "highpass_freq": 0.0,
+            "lowpass_freq": 0.0,
+        }
+
+    def official(self, **overrides):
+        arguments = dict(self.common)
+        arguments.update(
+            time=self.time,
+            tau_signal=self.tau,
+            slip_signal=self.slip,
+        )
+        arguments.update(overrides)
+        return calculate_event_loading_stiffness(**arguments)
+
+    def potter(self, **overrides):
+        arguments = {
+            "k_pre_start": self.common["pre_start"],
+            "k_pre_end": self.common["pre_end"],
+            "k_window_sec": self.common["window_sec"],
+            "k_smooth_w": self.common["smooth_w"],
+            "k_highpass_freq": self.common["highpass_freq"],
+            "k_lowpass_freq": self.common["lowpass_freq"],
+            "k_use_ransac": False,
+            "k_slip_source": "LVDT",
+        }
+        arguments.update(overrides)
+        return POTTER_K_STIFFNESS.analyze_single_k(
+            {
+                "time": self.time,
+                "tau_local": self.tau,
+                "LP_displacement": self.slip,
+            },
+            [{"event_time": 0.0}],
+            0,
+            arguments,
+        )
+
+    def assert_ols_parity(self, **overrides):
+        official_overrides = dict(overrides)
+        potter_overrides = {
+            {
+                "smooth_w": "k_smooth_w",
+                "highpass_freq": "k_highpass_freq",
+                "lowpass_freq": "k_lowpass_freq",
+                "pre_start": "k_pre_start",
+                "pre_end": "k_pre_end",
+                "window_sec": "k_window_sec",
+            }.get(name, name): value
+            for name, value in overrides.items()
+        }
+        official = self.official(**official_overrides)
+        potter = self.potter(**potter_overrides)
+        self.assertTrue(official["valid"])
+        self.assertFalse(potter["skipped"])
+        np.testing.assert_allclose(
+            official["coefficients"], potter["k_coeffs"], rtol=1e-12, atol=1e-12
+        )
+        self.assertEqual(official["k"], official["coefficients"][0])
+        self.assertEqual(official["intercept"], official["coefficients"][1])
+        return official, potter
+
+    def test_ols_positive_negative_intercept_and_smoothing_parity(self):
+        original_tau = self.tau.copy()
+        original_slip = self.slip.copy()
+        for slope, intercept, smooth_w in (
+            (3.0, 4.5, 1), (-2.25, -1.7, 1), (1.75, 6.0, 7)
+        ):
+            with self.subTest(slope=slope, intercept=intercept, smooth=smooth_w):
+                tau = slope * self.slip + intercept
+                self.tau = tau
+                official, _ = self.assert_ols_parity(smooth_w=smooth_w)
+                self.assertAlmostEqual(official["k"], slope, places=10)
+                np.testing.assert_array_equal(self.tau, tau)
+                np.testing.assert_array_equal(self.slip, original_slip)
+        self.tau = original_tau
+
+    def test_ols_filter_and_processing_order_parity(self):
+        cases = (
+            {"smooth_w": 5},
+            {"smooth_w": 3, "highpass_freq": 0.2},
+            {"smooth_w": 3, "lowpass_freq": 10.0},
+            {"smooth_w": 3, "highpass_freq": 0.2, "lowpass_freq": 10.0},
+        )
+        for arguments in cases:
+            with self.subTest(arguments=arguments):
+                official, _ = self.assert_ols_parity(**arguments)
+                mask = (self.time >= -3.5) & (self.time <= 3.5)
+                fs = 1.0 / np.median(np.diff(self.time[mask]))
+                expected_tau = POTTER_K_STIFFNESS._process_signal(
+                    self.tau[mask], arguments.get("smooth_w", 1),
+                    arguments.get("highpass_freq", 0.0),
+                    arguments.get("lowpass_freq", 0.0), fs,
+                )
+                expected_slip = POTTER_K_STIFFNESS._process_signal(
+                    self.slip[mask], arguments.get("smooth_w", 1),
+                    arguments.get("highpass_freq", 0.0),
+                    arguments.get("lowpass_freq", 0.0), fs,
+                )
+                expected_tau = expected_tau - expected_tau[0]
+                expected_slip = expected_slip - expected_slip[0]
+                np.testing.assert_allclose(official["processed_tau"], expected_tau)
+                np.testing.assert_allclose(official["processed_slip"], expected_slip)
+                np.testing.assert_array_equal(official["raw_tau"], self.tau[mask])
+                np.testing.assert_array_equal(official["raw_slip"], self.slip[mask])
+
+    def test_ols_inclusive_masks_and_result_arrays_match_reference(self):
+        official, _ = self.assert_ols_parity(pre_start=-2.0, pre_end=-1.0)
+        mask = (self.time >= -3.5) & (self.time <= 3.5)
+        expected_relative = self.time[mask]
+        expected_fit = (expected_relative >= -2.0) & (expected_relative <= -1.0)
+        np.testing.assert_array_equal(official["relative_time"], expected_relative)
+        np.testing.assert_array_equal(official["fit_mask"], expected_fit)
+        self.assertEqual(expected_relative[expected_fit][0], -2.0)
+        self.assertEqual(expected_relative[expected_fit][-1], -1.0)
+
+    def test_perfect_line_ransac_all_paths_match(self):
+        x = np.linspace(-2.0, 2.0, 30)
+        y = -3.5 * x + 1.25
+        sklearn_result = _potter_sklearn_ransac_seeded(x, y)
+        fallback_result = _potter_fallback_ransac(x, y)
+        official_result = k_stiffness._fit_ransac(x, y)
+        for result in (sklearn_result, fallback_result, official_result):
+            np.testing.assert_allclose(result, [-3.5, 1.25], rtol=1e-10, atol=1e-10)
+
+    def test_ransac_outlier_dataset_contracts(self):
+        base_x = np.linspace(-3.0, 3.0, 30)
+        datasets = {}
+        y = 2.0 * base_x + 0.5
+        y[10] += 50.0
+        datasets["single_large"] = (base_x, y)
+        y = 2.0 * base_x + 0.5
+        y[[4, 8, 21, 25]] += np.array([20.0, -20.0, 20.0, -20.0])
+        datasets["symmetric"] = (base_x, y)
+        y = 2.0 * base_x + 0.5
+        y[10:16] += 15.0
+        datasets["clustered"] = (base_x, y)
+        x = base_x.copy()
+        x[-1] = 40.0
+        y = 2.0 * base_x + 0.5
+        datasets["high_leverage"] = (x, y)
+        x = np.r_[np.linspace(-3.0, 3.0, 24), [0.0] * 6]
+        y = 2.0 * x + 0.5
+        y[-3:] += 10.0
+        datasets["duplicate_x"] = (x, y)
+
+        rng = np.random.default_rng(0)
+        x = np.sort(rng.uniform(-3.0, 3.0, 30))
+        y = 2.0 * x + 0.5 + rng.normal(0.0, 0.15, 30)
+        outliers = rng.choice(30, 8, replace=False)
+        y[outliers] += rng.normal(0.0, 5.0, 8)
+        datasets["fixed_noisy_outliers"] = (x, y)
+
+        observed_divergence = False
+        for name, (x, y) in datasets.items():
+            with self.subTest(dataset=name):
+                sklearn_result = _potter_sklearn_ransac_seeded(x, y)
+                fallback_result = _potter_fallback_ransac(x, y)
+                official_result = k_stiffness._fit_ransac(x, y)
+                for result in (sklearn_result, fallback_result, official_result):
+                    self.assertEqual(np.asarray(result).shape, (2,))
+                    self.assertTrue(np.all(np.isfinite(result)))
+                np.testing.assert_allclose(
+                    fallback_result, official_result, rtol=0.0, atol=0.0
+                )
+                if name == "fixed_noisy_outliers":
+                    self.assertFalse(
+                        np.allclose(
+                            sklearn_result, official_result, rtol=1e-12, atol=1e-12
+                        )
+                    )
+                if not np.allclose(sklearn_result, official_result, rtol=1e-12, atol=1e-12):
+                    observed_divergence = True
+        self.assertTrue(observed_divergence)
+
+    def test_sklearn_randomness_contract_and_official_determinism(self):
+        x = np.linspace(-3.0, 3.0, 40)
+        y = 1.8 * x - 0.4
+        y[[2, 5, 8, 12, 28, 32, 36]] += [8, -9, 7, -8, 9, -7, 8]
+        potter_results = np.asarray(
+            [POTTER_K_STIFFNESS.robust_fit_ransac(x, y) for _ in range(20)]
+        )
+        official_results = np.asarray(
+            [k_stiffness._fit_ransac(x, y) for _ in range(20)]
+        )
+        self.assertTrue(np.all(np.isfinite(potter_results)))
+        np.testing.assert_array_equal(
+            official_results, np.repeat(official_results[:1], 20, axis=0)
+        )
+
+    def test_small_minimum_and_negative_ransac_characterization(self):
+        for count in (5, 6):
+            x = np.linspace(-1.0, 1.0, count)
+            y = -4.0 * x + 2.0
+            with self.subTest(count=count):
+                sklearn_result = _potter_sklearn_ransac_seeded(x, y)
+                fallback_result = _potter_fallback_ransac(x, y)
+                np.testing.assert_allclose(sklearn_result, [-4.0, 2.0], atol=1e-10)
+                np.testing.assert_allclose(fallback_result, [-4.0, 2.0], atol=1e-10)
+                if count == 5:
+                    with self.assertRaises(ValueError):
+                        k_stiffness._fit_ransac(x, y)
+                else:
+                    np.testing.assert_allclose(
+                        k_stiffness._fit_ransac(x, y), [-4.0, 2.0], atol=1e-10
+                    )
+
+    def test_constant_and_near_constant_failure_contracts(self):
+        for label, x in (
+            ("constant", np.ones(12)),
+            ("near_constant", 1.0 + np.arange(12) * np.finfo(float).eps),
+        ):
+            y = np.linspace(0.0, 1.0, 12)
+            with self.subTest(label=label):
+                sklearn_result = _potter_sklearn_ransac_seeded(x, y)
+                self.assertEqual(np.asarray(sklearn_result).shape, (2,))
+                self.assertTrue(np.all(np.isfinite(sklearn_result)))
+                fallback = _potter_fallback_ransac(x, y)
+                self.assertEqual(np.asarray(fallback).shape, (2,))
+                self.assertTrue(np.all(np.isfinite(fallback)))
+                with self.assertRaises(ValueError):
+                    k_stiffness._fit_ransac(x, y)
+        self.assertEqual(self.official(slip_signal=np.ones_like(self.slip)), {"valid": False})
+
+    def test_regression_failure_contract_is_swallowed_by_potter_and_invalid_official(self):
+        with mock.patch.object(
+            POTTER_K_STIFFNESS, "robust_fit_ransac", side_effect=ValueError("fit")
+        ):
+            potter = self.potter(k_use_ransac=True)
+        self.assertFalse(potter["skipped"])
+        self.assertTrue(np.isnan(potter["k"]["value"]))
+        self.assertNotIn("k_coeffs", potter)
+        with mock.patch.object(k_stiffness, "_fit_ransac", side_effect=ValueError("fit")):
+            self.assertEqual(self.official(use_ransac=True), {"valid": False})
+
+    def test_cutoff_boundaries_characterize_known_difference(self):
+        fs = 1.0 / np.median(np.diff(self.time))
+        nyquist = fs / 2.0
+        raw = self.tau.copy()
+        for cutoff in (0.0, nyquist, nyquist + 1e-9):
+            with self.subTest(cutoff=cutoff):
+                np.testing.assert_array_equal(
+                    POTTER_K_STIFFNESS._apply_highpass(raw, cutoff, fs), raw
+                )
+                np.testing.assert_array_equal(
+                    POTTER_K_STIFFNESS._apply_lowpass(raw, cutoff, fs), raw
+                )
+        for name in ("highpass_freq", "lowpass_freq"):
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    self.official(**{name: nyquist})
+                with self.assertRaises(ValueError):
+                    self.official(**{name: nyquist + 1e-9})
+
+    def test_cutoff_below_nyquist_and_combined_filters_match(self):
+        nyquist = 1.0 / np.median(np.diff(self.time)) / 2.0
+        for arguments in (
+            {"highpass_freq": 0.2},
+            {"lowpass_freq": nyquist - 1.0},
+            {"highpass_freq": 0.2, "lowpass_freq": 10.0},
+            {"highpass_freq": 10.0, "lowpass_freq": 1.0},
+        ):
+            with self.subTest(arguments=arguments):
+                self.assert_ols_parity(**arguments)
+
+    def test_negative_cutoffs_and_short_filter_window_contracts(self):
+        raw = np.arange(20.0)
+        np.testing.assert_array_equal(
+            POTTER_K_STIFFNESS._apply_highpass(raw, -1.0, 10.0), raw
+        )
+        np.testing.assert_array_equal(
+            POTTER_K_STIFFNESS._apply_lowpass(raw, -1.0, 10.0), raw
+        )
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            self.official(highpass_freq=-1.0)
+
+        short_time = np.linspace(-1.0, 1.0, 20)
+        short_history = {
+            "time": short_time,
+            "tau_local": 2.0 * short_time,
+            "LP_displacement": short_time,
+        }
+        short_config = {
+            "k_pre_start": -0.9,
+            "k_pre_end": -0.1,
+            "k_window_sec": 1.0,
+            "k_smooth_w": 1,
+            "k_highpass_freq": 0.5,
+        }
+        with mock.patch.object(
+            POTTER_K_STIFFNESS, "filtfilt", side_effect=ValueError("padlen")
+        ):
+            with self.assertRaisesRegex(ValueError, "padlen"):
+                POTTER_K_STIFFNESS.analyze_single_k(
+                    short_history, [{"event_time": 0.0}], 0, short_config
+                )
+        with mock.patch.object(k_stiffness, "filtfilt", side_effect=ValueError("padlen")):
+            official = calculate_event_loading_stiffness(
+                time=short_time, tau_signal=2.0 * short_time,
+                slip_signal=short_time, event_time=0.0,
+                pre_start=-0.9, pre_end=-0.1, window_sec=1.0,
+                smooth_w=1, highpass_freq=0.5,
+            )
+        self.assertEqual(official, {"valid": False})
+
+    def test_result_contract_characterization(self):
+        official = self.official()
+        potter = self.potter()
+        self.assertEqual(
+            set(official),
+            {
+                "valid", "k", "intercept", "coefficients", "relative_time",
+                "raw_tau", "raw_slip", "processed_tau", "processed_slip", "fit_mask",
+            },
+        )
+        self.assertEqual(set(potter), {"event_idx", "skipped", "trigger_time", "k", "k_coeffs"})
+        self.assertIsInstance(potter["k"], dict)
+        self.assertIsInstance(potter["k_coeffs"], list)
+        self.assertIsInstance(official["coefficients"], np.ndarray)
 
 
 if __name__ == "__main__":
