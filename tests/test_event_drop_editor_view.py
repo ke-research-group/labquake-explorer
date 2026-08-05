@@ -32,6 +32,21 @@ class FakeVariable:
         self.value = value
 
 
+class TraceVariable(FakeVariable):
+    def __init__(self, value, callback):
+        super().__init__(value)
+        self.callback = callback
+
+    def set(self, value):
+        super().set(value)
+        self.callback()
+
+
+class RaisingVariable(FakeVariable):
+    def set(self, value):
+        raise RuntimeError("control update failed")
+
+
 class FakeWidget:
     def __init__(self, value=""):
         self.value = value
@@ -80,6 +95,8 @@ def headless_view():
     view.selected_signal_name = None
     view.preview_result = None
     view.preview_parameters = None
+    view._updating_endpoint_control = False
+    view._active_endpoint = None
     view.parameter_vars = parameter_vars()
     view.result_vars = result_vars()
     view.status_var = FakeVariable()
@@ -187,6 +204,7 @@ class SingleSignalWorkflowTests(unittest.TestCase):
         view = headless_view()
         self.assertIsNone(view.selected_signal_name)
         self.assertIsNone(view.preview_result)
+        self.assertFalse(view._updating_endpoint_control)
         self.assertFalse(hasattr(view, "metric_bindings"))
         self.assertFalse(hasattr(view, "slip_bindings"))
 
@@ -351,8 +369,198 @@ class PlotAndDraggingTests(unittest.TestCase):
     def test_endpoint_change_updates_single_parameter(self):
         view = headless_view()
         view.preview_result = {"valid": True}
+        view.preview_parameters = {"old": True}
+        view.result_vars["valid"].set("True")
+        view._plot_preview = mock.Mock()
         view._on_endpoint_changed("pre_start", -0.75)
         self.assertEqual(view.parameter_vars["pre_start"].get(), "-0.75")
+        self.assertIsNone(view.preview_result)
+        self.assertIsNone(view.preview_parameters)
+        self.assertEqual(view.result_vars["valid"].get(), "—")
+        self.assertEqual(
+            view.status_var.get(),
+            "Fitting windows changed — recompute preview",
+        )
+        view._plot_preview.assert_not_called()
+        self.assertFalse(view._updating_endpoint_control)
+
+    def test_endpoint_control_trace_is_suppressed_during_motion(self):
+        view = headless_view()
+        view._plot_preview = mock.Mock()
+        view._on_parameter_changed = mock.Mock(wraps=view._on_parameter_changed)
+        view.parameter_vars["pre_start"] = TraceVariable(
+            "-1", view._on_parameter_changed
+        )
+        with (
+            mock.patch(
+                "labquake_explorer.ui.views.event_drop_editor_view."
+                "calculate_event_drop_metrics"
+            ) as event_calculator,
+            mock.patch(
+                "labquake_explorer.ui.views.event_drop_editor_view."
+                "calculate_interevent_displacement_metrics"
+            ) as interevent_calculator,
+            mock.patch(
+                "labquake_explorer.ui.views.event_drop_editor_view."
+                "messagebox.showerror"
+            ) as showerror,
+        ):
+            view._on_endpoint_changed("pre_start", -0.625)
+        view._on_parameter_changed.assert_called_once_with()
+        view._plot_preview.assert_not_called()
+        event_calculator.assert_not_called()
+        interevent_calculator.assert_not_called()
+        showerror.assert_not_called()
+        self.assertFalse(view._updating_endpoint_control)
+
+    def test_endpoint_control_flag_is_restored_when_update_fails(self):
+        view = headless_view()
+        view.parameter_vars["pre_start"] = RaisingVariable("-1")
+        with self.assertRaisesRegex(RuntimeError, "control update failed"):
+            view._on_endpoint_changed("pre_start", -0.5)
+        self.assertFalse(view._updating_endpoint_control)
+
+    def test_manual_parameter_edit_redraws_once_without_analysis(self):
+        view = headless_view()
+        view.preview_result = {"valid": True}
+        view.preview_parameters = {"old": True}
+        view.raw_ax = mock.Mock()
+        view._plot_preview = mock.Mock()
+        with (
+            mock.patch(
+                "labquake_explorer.ui.views.event_drop_editor_view."
+                "calculate_event_drop_metrics"
+            ) as event_calculator,
+            mock.patch(
+                "labquake_explorer.ui.views.event_drop_editor_view."
+                "calculate_interevent_displacement_metrics"
+            ) as interevent_calculator,
+        ):
+            view._on_parameter_changed()
+        self.assertIsNone(view.preview_result)
+        self.assertIsNone(view.preview_parameters)
+        view._plot_preview.assert_called_once_with()
+        event_calculator.assert_not_called()
+        interevent_calculator.assert_not_called()
+
+    def test_repeated_motion_keeps_connections_and_release_redraws_once(self):
+        view = headless_view()
+        view.parameter_vars["pre_start"] = TraceVariable(
+            "-1", view._on_parameter_changed
+        )
+        view._plot_preview = mock.Mock()
+        figure = Figure()
+        axis = figure.add_subplot(111)
+        line = axis.axvline(-1.0)
+        draggable = _DraggableVerticalLine(
+            line=line,
+            on_changed=lambda value: view._on_endpoint_changed(
+                "pre_start", value
+            ),
+            on_released=lambda: view._on_endpoint_released("pre_start"),
+            constrain=lambda value: value,
+            on_started=lambda: view._begin_endpoint_drag("pre_start"),
+        )
+        original_connections = list(draggable._connection_ids)
+        draggable.dragging = True
+        view._active_endpoint = "pre_start"
+
+        with (
+            mock.patch(
+                "labquake_explorer.ui.views.event_drop_editor_view."
+                "calculate_event_drop_metrics"
+            ) as event_calculator,
+            mock.patch(
+                "labquake_explorer.ui.views.event_drop_editor_view."
+                "calculate_interevent_displacement_metrics"
+            ) as interevent_calculator,
+            mock.patch(
+                "labquake_explorer.ui.views.event_drop_editor_view."
+                "messagebox.showerror"
+            ) as showerror,
+        ):
+            for position in (-0.9, -0.7, -0.4, -0.25):
+                draggable._on_motion(mock.Mock(inaxes=axis, xdata=position))
+                self.assertTrue(draggable.dragging)
+                self.assertEqual(
+                    draggable._connection_ids, original_connections
+                )
+                view._plot_preview.assert_not_called()
+            draggable._on_release(mock.Mock())
+
+        self.assertEqual(view.parameter_vars["pre_start"].get(), "-0.25")
+        np.testing.assert_allclose(line.get_xdata(), [-0.25, -0.25])
+        self.assertFalse(draggable.dragging)
+        self.assertIsNone(view._active_endpoint)
+        view._plot_preview.assert_called_once_with()
+        event_calculator.assert_not_called()
+        interevent_calculator.assert_not_called()
+        showerror.assert_not_called()
+
+    def test_press_motion_motion_release_lifecycle(self):
+        view = headless_view()
+        view.parameter_vars["pre_start"] = TraceVariable(
+            "-1", view._on_parameter_changed
+        )
+        view._plot_preview = mock.Mock()
+        figure = Figure()
+        axis = figure.add_subplot(111)
+        axis.set_xlim(-2.0, 1.0)
+        line = axis.axvline(-1.0)
+        figure.canvas.draw()
+        draggable = _DraggableVerticalLine(
+            line=line,
+            on_changed=lambda value: view._on_endpoint_changed(
+                "pre_start", value
+            ),
+            on_released=lambda: view._on_endpoint_released("pre_start"),
+            constrain=lambda value: value,
+            on_started=lambda: view._begin_endpoint_drag("pre_start"),
+        )
+        line_pixel_x = axis.transData.transform((-1.0, 0.0))[0]
+
+        draggable._on_press(
+            mock.Mock(
+                inaxes=axis,
+                xdata=-1.0,
+                x=line_pixel_x,
+                button=1,
+            )
+        )
+        self.assertTrue(draggable.dragging)
+        self.assertEqual(view._active_endpoint, "pre_start")
+        for position in (-0.8, -0.4):
+            draggable._on_motion(mock.Mock(inaxes=axis, xdata=position))
+        view._plot_preview.assert_not_called()
+        draggable._on_release(mock.Mock())
+
+        self.assertFalse(draggable.dragging)
+        self.assertIsNone(view._active_endpoint)
+        self.assertEqual(view.parameter_vars["pre_start"].get(), "-0.4")
+        view._plot_preview.assert_called_once_with()
+
+    def test_release_rebuilds_four_draggables_without_accumulation(self):
+        view = self.make_plot_view()
+        view.event = {"time": np.array([-1.0, 1.0]), "event_time": 0.0}
+        view.signal_candidates = {"chosen": np.array([1.0, 2.0])}
+        view.selected_signal_name = "chosen"
+        view._plot_preview()
+        first_generation = dict(view._endpoint_draggables)
+        self.assertEqual(len(first_generation), 4)
+        view._active_endpoint = "pre_start"
+
+        view._on_endpoint_released("pre_start")
+
+        self.assertIsNone(view._active_endpoint)
+        self.assertEqual(len(view._endpoint_draggables), 4)
+        for draggable in first_generation.values():
+            self.assertFalse(draggable.connected)
+        self.assertTrue(
+            all(
+                draggable.connected
+                for draggable in view._endpoint_draggables.values()
+            )
+        )
 
     def test_draggable_line_disconnects(self):
         figure = Figure()
@@ -364,6 +572,16 @@ class PlotAndDraggingTests(unittest.TestCase):
         self.assertTrue(draggable.connected)
         draggable.disconnect()
         self.assertFalse(draggable.connected)
+
+    def test_close_disconnects_all_endpoint_callbacks(self):
+        view = headless_view()
+        view.parent = SimpleNamespace(child_windows=[view])
+        view._disconnect_endpoint_lines = mock.Mock()
+        view.destroy = mock.Mock()
+        view.on_close()
+        view._disconnect_endpoint_lines.assert_called_once_with()
+        self.assertNotIn(view, view.parent.child_windows)
+        view.destroy.assert_called_once_with()
 
 
 class IntereventBindingTests(unittest.TestCase):

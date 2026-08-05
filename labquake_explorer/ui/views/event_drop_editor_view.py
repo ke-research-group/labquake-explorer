@@ -284,6 +284,7 @@ class EventDropEditorView(tk.Toplevel):
         self.preview_parameters: dict[str, Any] | None = None
         self._endpoint_draggables: dict[str, _DraggableVerticalLine] = {}
         self._active_endpoint: str | None = None
+        self._updating_endpoint_control = False
 
         self._set_event(event_idx)
         self._create_controls()
@@ -816,8 +817,11 @@ class EventDropEditorView(tk.Toplevel):
         self._clear_result_display()
         self.status_var.set("Fitting windows changed — recompute preview")
 
-    def _on_parameter_changed(self) -> None:
-        if not hasattr(self, "result_vars"):
+    def _on_parameter_changed(self, *args) -> None:
+        if (
+            not hasattr(self, "result_vars")
+            or getattr(self, "_updating_endpoint_control", False)
+        ):
             return
         self._invalidate_preview()
         if hasattr(self, "raw_ax"):
@@ -929,7 +933,12 @@ class EventDropEditorView(tk.Toplevel):
         return constrained
 
     def _on_endpoint_changed(self, endpoint: str, position: float) -> None:
-        self.parameter_vars[endpoint].set(f"{position:.6g}")
+        self._updating_endpoint_control = True
+        try:
+            self.parameter_vars[endpoint].set(f"{position:.6g}")
+        finally:
+            self._updating_endpoint_control = False
+        self._invalidate_preview()
 
     def _begin_endpoint_drag(self, endpoint: str) -> bool:
         if self._active_endpoint is not None:
