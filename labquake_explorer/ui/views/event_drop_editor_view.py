@@ -1,4 +1,4 @@
-"""Preview explicitly bound scalar and ordered slip event-drop signals."""
+"""Preview one explicitly selected event-local signal and inter-event metrics."""
 
 from __future__ import annotations
 
@@ -218,7 +218,7 @@ def format_preview_result(result: Mapping[str, Any]) -> dict[str, str]:
 def parse_interevent_parameters(
     push_speed: str,
     delay_sec: str,
-    lvdt_smooth_w: str,
+    dmax_smooth_w: str,
 ) -> dict[str, Any]:
     """Parse the explicit controls used by inter-event displacement preview."""
     try:
@@ -235,12 +235,12 @@ def parse_interevent_parameters(
     if not math.isfinite(delay):
         raise ValueError("delay_sec must be a finite number")
 
-    if re.fullmatch(r"[1-9]\d*", lvdt_smooth_w.strip()) is None:
-        raise ValueError("lvdt_smooth_w must be a positive integer")
+    if re.fullmatch(r"[1-9]\d*", dmax_smooth_w.strip()) is None:
+        raise ValueError("dmax_smooth_w must be a positive integer")
     return {
         "push_speed": speed,
         "delay_sec": delay,
-        "lvdt_smooth_w": int(lvdt_smooth_w),
+        "dmax_smooth_w": int(dmax_smooth_w),
     }
 
 
@@ -255,7 +255,7 @@ def format_interevent_result(result: Mapping[str, Any]) -> dict[str, str]:
 
 
 class EventDropEditorView(tk.Toplevel):
-    """Preview explicitly bound scalar and ordered slip event-drop signals."""
+    """Preview one explicitly selected event-local signal."""
 
     def __init__(self, parent, run_idx: int, event_idx: int):
         self.parent = parent
@@ -274,19 +274,13 @@ class EventDropEditorView(tk.Toplevel):
         self.previous_event_time: float | None = None
         self.full_run_signal_candidates: list[str] = []
         self.interevent_bindings: dict[str, str | None] = {
+            "dmax": None,
             "reference": None,
         }
         self.interevent_preview_results: dict[str, dict[str, Any]] = {}
         self.interevent_preview_parameters: dict[str, Any] | None = None
-        self.metric_bindings: dict[str, str | None] = {
-            "tau": None,
-            "mu": None,
-            "lvdt": None,
-        }
-        self.slip_bindings: list[str | None] = []
-        self.slip_rows: list[dict[str, Any]] = []
-        self.preview_results: dict[str, dict[str, Any]] = {}
-        self.active_metric_role: str | None = None
+        self.selected_signal_name: str | None = None
+        self.preview_result: dict[str, Any] | None = None
         self.preview_parameters: dict[str, Any] | None = None
         self._endpoint_draggables: dict[str, _DraggableVerticalLine] = {}
         self._active_endpoint: str | None = None
@@ -306,31 +300,10 @@ class EventDropEditorView(tk.Toplevel):
         self.event_combobox.grid(row=0, column=1, padx=(3, 10), sticky="w")
         self.event_combobox.bind("<<ComboboxSelected>>", self.on_event_changed)
 
-        ttk.Label(controls, text="Tau signal:").grid(row=0, column=2, sticky="e")
-        self.tau_signal_combobox = ttk.Combobox(
-            controls, width=20, state="readonly"
-        )
-        self.tau_signal_combobox.grid(row=0, column=3, padx=(3, 10), sticky="w")
-        self.tau_signal_combobox.bind(
-            "<<ComboboxSelected>>", self.on_tau_signal_changed
-        )
-
-        ttk.Label(controls, text="Mu signal:").grid(row=0, column=4, sticky="e")
-        self.mu_signal_combobox = ttk.Combobox(
-            controls, width=20, state="readonly"
-        )
-        self.mu_signal_combobox.grid(row=0, column=5, padx=(3, 10), sticky="w")
-        self.mu_signal_combobox.bind(
-            "<<ComboboxSelected>>", self.on_mu_signal_changed
-        )
-        ttk.Label(controls, text="LVDT signal:").grid(row=0, column=6, sticky="e")
-        self.lvdt_signal_combobox = ttk.Combobox(
-            controls, width=20, state="readonly"
-        )
-        self.lvdt_signal_combobox.grid(row=0, column=7, padx=(3, 10), sticky="w")
-        self.lvdt_signal_combobox.bind(
-            "<<ComboboxSelected>>", self.on_lvdt_signal_changed
-        )
+        ttk.Label(controls, text="Signal:").grid(row=0, column=2, sticky="e")
+        self.signal_combobox = ttk.Combobox(controls, width=20, state="readonly")
+        self.signal_combobox.grid(row=0, column=3, padx=(3, 10), sticky="w")
+        self.signal_combobox.bind("<<ComboboxSelected>>", self.on_signal_changed)
 
         defaults = {
             "half_win": str(compute_half_win()),
@@ -340,7 +313,7 @@ class EventDropEditorView(tk.Toplevel):
             "post_end": str(DEFAULT_POINTS[3]),
             "smooth_w": "",
         }
-        ttk.Label(controls, text="Tau / Mu fitting").grid(
+        ttk.Label(controls, text="Event drop fitting").grid(
             row=1, column=0, columnspan=6, sticky="w", pady=(4, 0)
         )
         self.parameter_vars: dict[str, tk.StringVar] = {}
@@ -360,85 +333,46 @@ class EventDropEditorView(tk.Toplevel):
                 row=3, column=column, padx=3
             )
 
-        ttk.Label(controls, text="LVDT fitting").grid(
-            row=4, column=0, columnspan=6, sticky="w", pady=(4, 0)
-        )
-        self.lvdt_parameter_vars: dict[str, tk.StringVar] = {}
-        for column, (label, key) in enumerate(labels):
-            ttk.Label(controls, text=label).grid(row=5, column=column, padx=3)
-            variable = tk.StringVar(value=defaults[key])
-            self.lvdt_parameter_vars[key] = variable
-            ttk.Entry(controls, textvariable=variable, width=11).grid(
-                row=6, column=column, padx=3
-            )
-
         self.preview_button = ttk.Button(
             controls, text="Preview / Recompute", command=self.recompute_preview
         )
-        self.preview_button.grid(row=6, column=6, padx=(10, 3))
+        self.preview_button.grid(row=3, column=6, padx=(10, 3))
 
         results = ttk.LabelFrame(self, text="Preview Result")
         results.pack(side=tk.TOP, fill=tk.X, padx=6)
         self.result_vars = {
-            role: {
-                key: tk.StringVar(value="—")
-                for key in (
-                    "valid",
-                    "delta",
-                    "magnitude",
-                    "val_pre_0",
-                    "val_post_0",
-                )
-            }
-            for role in ("tau", "mu", "lvdt")
+            key: tk.StringVar(value="—")
+            for key in (
+                "signal_name",
+                "valid",
+                "delta",
+                "magnitude",
+                "val_pre_0",
+                "val_post_0",
+            )
         }
         result_labels = (
+            ("Signal name", "signal_name"),
             ("Valid", "valid"),
             ("Signed delta", "delta"),
             ("Magnitude", "magnitude"),
             ("Pre fit at t=0", "val_pre_0"),
             ("Post fit at t=0", "val_post_0"),
         )
-        for row, role in enumerate(("tau", "mu", "lvdt")):
-            display_name = "LVDT" if role == "lvdt" else role.capitalize()
-            ttk.Label(results, text=display_name).grid(
-                row=row, column=0, padx=(6, 10), pady=3, sticky="w"
+        for column, (label, key) in enumerate(result_labels):
+            ttk.Label(results, text=f"{label}:").grid(
+                row=0, column=2 * column, padx=(6, 2), pady=3
             )
-            for column, (label, key) in enumerate(result_labels):
-                ttk.Label(results, text=f"{label}:").grid(
-                    row=row, column=2 * column + 1, padx=(6, 2), pady=3
-                )
-                ttk.Label(
-                    results, textvariable=self.result_vars[role][key]
-                ).grid(
-                    row=row, column=2 * column + 2, padx=(0, 8), pady=3
-                )
+            ttk.Label(results, textvariable=self.result_vars[key]).grid(
+                row=0, column=2 * column + 1, padx=(0, 8), pady=3
+            )
         self.status_var = tk.StringVar(value="Preview only — not saved")
         ttk.Label(results, textvariable=self.status_var).grid(
-            row=3, column=0, columnspan=11, padx=6, pady=(0, 3), sticky="w"
+            row=1, column=0, columnspan=12, padx=6, pady=(0, 3), sticky="w"
         )
 
-        slip = ttk.LabelFrame(self, text="Slip sensors (display order only)")
-        slip.pack(side=tk.TOP, fill=tk.X, padx=6, pady=(4, 0))
-        self.slip_rows_frame = ttk.Frame(slip)
-        self.slip_rows_frame.pack(side=tk.TOP, fill=tk.X)
-        ttk.Button(
-            slip, text="Add slip sensor", command=self.add_slip_sensor
-        ).pack(side=tk.TOP, anchor="w", padx=6, pady=3)
-
-        slip_parameters = ttk.LabelFrame(slip, text="Slip fitting")
-        slip_parameters.pack(side=tk.TOP, fill=tk.X, padx=6, pady=(0, 4))
-        self.slip_parameter_vars: dict[str, tk.StringVar] = {}
-        slip_labels = labels[:-1]
-        for column, (label, key) in enumerate(slip_labels):
-            ttk.Label(slip_parameters, text=label).grid(
-                row=0, column=column, padx=3
-            )
-            variable = tk.StringVar(value=defaults[key])
-            self.slip_parameter_vars[key] = variable
-            ttk.Entry(
-                slip_parameters, textvariable=variable, width=11
-            ).grid(row=1, column=column, padx=3)
+        for variable in self.parameter_vars.values():
+            variable.trace_add("write", lambda *args: self._on_parameter_changed())
 
         self._create_interevent_controls()
 
@@ -449,12 +383,12 @@ class EventDropEditorView(tk.Toplevel):
         defaults = {
             "push_speed": "3.508",
             "delay_sec": "0.05",
-            "lvdt_smooth_w": "100",
+            "dmax_smooth_w": "100",
         }
         labels = (
             ("Push speed", "push_speed"),
             ("Delay", "delay_sec"),
-            ("LVDT smooth window", "lvdt_smooth_w"),
+            ("D_max smooth window", "dmax_smooth_w"),
         )
         self.interevent_parameter_vars = {}
         for column, (label, key) in enumerate(labels):
@@ -467,14 +401,25 @@ class EventDropEditorView(tk.Toplevel):
                 row=0, column=2 * column + 1, padx=(0, 6), pady=3
             )
 
-        ttk.Label(section, text="Reference displacement signal").grid(
+        ttk.Label(section, text="D_max signal").grid(
             row=0, column=6, padx=(6, 2), pady=3
+        )
+        self.dmax_signal_combobox = ttk.Combobox(
+            section, width=20, state="readonly"
+        )
+        self.dmax_signal_combobox.grid(row=0, column=7, padx=(0, 6), pady=3)
+        self.dmax_signal_combobox.bind(
+            "<<ComboboxSelected>>", self.on_dmax_signal_changed
+        )
+
+        ttk.Label(section, text="Reference displacement signal").grid(
+            row=0, column=8, padx=(6, 2), pady=3
         )
         self.reference_signal_combobox = ttk.Combobox(
             section, width=20, state="readonly"
         )
         self.reference_signal_combobox.grid(
-            row=0, column=7, padx=(0, 6), pady=3
+            row=0, column=9, padx=(0, 6), pady=3
         )
         self.reference_signal_combobox.bind(
             "<<ComboboxSelected>>", self.on_reference_signal_changed
@@ -485,7 +430,7 @@ class EventDropEditorView(tk.Toplevel):
             command=self.recompute_interevent_preview,
         )
         self.interevent_preview_button.grid(
-            row=0, column=8, padx=(6, 3), pady=3
+            row=0, column=10, padx=(6, 3), pady=3
         )
 
         self.interevent_result_vars = {
@@ -520,7 +465,7 @@ class EventDropEditorView(tk.Toplevel):
             value="Preview only — not saved"
         )
         ttk.Label(section, textvariable=self.interevent_status_var).grid(
-            row=4, column=0, columnspan=9, padx=6, pady=(2, 3), sticky="w"
+            row=4, column=0, columnspan=11, padx=6, pady=(2, 3), sticky="w"
         )
 
         for name, variable in self.interevent_parameter_vars.items():
@@ -556,10 +501,8 @@ class EventDropEditorView(tk.Toplevel):
             f"runs/[{self.run_idx}]/events/[{self.event_idx}]"
         )
         self.signal_candidates = find_signal_candidates(self.event)
-        self.metric_bindings = {"tau": None, "mu": None, "lvdt": None}
-        self.slip_bindings = []
-        self.preview_results = {}
-        self.active_metric_role = None
+        self.selected_signal_name = None
+        self.preview_result = None
         self.preview_parameters = None
         self._refresh_interevent_context()
         self.interevent_preview_results = {}
@@ -721,7 +664,7 @@ class EventDropEditorView(tk.Toplevel):
         metrics_by_parameter = {
             "push_speed": ("D_Push",),
             "delay_sec": ("D_max", "D_reference"),
-            "lvdt_smooth_w": ("D_max",),
+            "dmax_smooth_w": ("D_max",),
         }
         metrics = metrics_by_parameter.get(parameter_name)
         if metrics is not None:
@@ -741,18 +684,41 @@ class EventDropEditorView(tk.Toplevel):
             "Reference binding changed — recompute preview",
         )
 
+    def on_dmax_signal_changed(self, event=None) -> None:
+        signal_name = self.dmax_signal_combobox.get()
+        if signal_name in self.full_run_signal_candidates:
+            self.interevent_bindings["dmax"] = signal_name
+        else:
+            self.interevent_bindings["dmax"] = None
+        self._invalidate_interevent_preview(
+            ("D_max",),
+            "D_max binding changed — recompute preview",
+        )
+
     def _refresh_interevent_widgets(self) -> None:
+        dmax_combobox = getattr(self, "dmax_signal_combobox", None)
         combobox = getattr(self, "reference_signal_combobox", None)
         button = getattr(self, "interevent_preview_button", None)
         status_var = getattr(self, "interevent_status_var", None)
-        if combobox is None or button is None or status_var is None:
+        if (
+            dmax_combobox is None
+            or combobox is None
+            or button is None
+            or status_var is None
+        ):
             return
 
         candidates = list(self.full_run_signal_candidates)
+        dmax = self.interevent_bindings.get("dmax")
+        if dmax not in candidates:
+            dmax = None
+            self.interevent_bindings["dmax"] = None
         reference = self.interevent_bindings.get("reference")
         if reference not in candidates:
             reference = None
             self.interevent_bindings["reference"] = None
+        dmax_combobox.configure(values=candidates)
+        dmax_combobox.set(dmax or "")
         combobox.configure(values=candidates)
         combobox.set(reference or "")
         self._clear_interevent_result_display()
@@ -768,20 +734,20 @@ class EventDropEditorView(tk.Toplevel):
         return parse_interevent_parameters(
             variables["push_speed"].get(),
             variables["delay_sec"].get(),
-            variables["lvdt_smooth_w"].get(),
+            variables["dmax_smooth_w"].get(),
         )
 
     def calculate_interevent_preview(self) -> dict[str, dict[str, Any]]:
         if self.current_event_time is None:
             raise ValueError("Current event has no finite event_time")
         parameters = self._read_interevent_parameters()
-        lvdt_signal = self._resolve_full_run_signal(
-            self.metric_bindings.get("lvdt")
+        dmax_signal = self._resolve_full_run_signal(
+            self.interevent_bindings.get("dmax")
         )
         reference_signal = self._resolve_full_run_signal(
             self.interevent_bindings.get("reference")
         )
-        has_run_signal = lvdt_signal is not None or reference_signal is not None
+        has_run_signal = dmax_signal is not None or reference_signal is not None
         full_time = self._get_full_run_time() if has_run_signal else None
         if has_run_signal and full_time is None:
             raise ValueError(
@@ -793,10 +759,10 @@ class EventDropEditorView(tk.Toplevel):
             previous_event_time=self.previous_event_time,
             push_speed=parameters["push_speed"],
             time=full_time,
-            lvdt_signal=lvdt_signal,
+            lvdt_signal=dmax_signal,
             reference_displacement_signal=reference_signal,
             delay_sec=parameters["delay_sec"],
-            lvdt_smooth_w=parameters["lvdt_smooth_w"],
+            lvdt_smooth_w=parameters["dmax_smooth_w"],
         )
         self.interevent_preview_results = results
         self.interevent_preview_parameters = parameters
@@ -825,19 +791,11 @@ class EventDropEditorView(tk.Toplevel):
 
     def _refresh_event_widgets(self) -> None:
         names = list(self.signal_candidates)
-        self.metric_bindings = {"tau": None, "mu": None, "lvdt": None}
-        self.slip_bindings = []
-        self.preview_results = {}
+        self.selected_signal_name = None
+        self.preview_result = None
         self.preview_parameters = None
-        self.active_metric_role = None
-        for combobox in (
-            self.tau_signal_combobox,
-            self.mu_signal_combobox,
-            self.lvdt_signal_combobox,
-        ):
-            combobox.configure(values=names)
-            combobox.set("")
-        self._rebuild_slip_rows()
+        self.signal_combobox.configure(values=names)
+        self.signal_combobox.set("")
         if names:
             self.preview_button.configure(state="disabled")
             self.status_var.set("Select a signal to enable preview")
@@ -848,37 +806,22 @@ class EventDropEditorView(tk.Toplevel):
         self._refresh_interevent_widgets()
         self._plot_preview()
 
-    def _clear_result_display(self, role: str | None = None) -> None:
-        if role and role.startswith("slip_"):
-            index = int(role.split("_", 1)[1]) - 1
-            if 0 <= index < len(self.slip_rows):
-                for variable in self.slip_rows[index]["result_vars"].values():
-                    variable.set("—")
-            return
-        roles = (role,) if role else ("tau", "mu", "lvdt")
-        for metric_role in roles:
-            for variable in self.result_vars[metric_role].values():
-                variable.set("—")
-        if role is None:
-            for row in getattr(self, "slip_rows", []):
-                for variable in row["result_vars"].values():
-                    variable.set("—")
+    def _clear_result_display(self) -> None:
+        for variable in self.result_vars.values():
+            variable.set("—")
 
     def _invalidate_preview(self) -> None:
-        if self.active_metric_role and self.active_metric_role.startswith("slip_"):
-            roles = tuple(
-                role for role in list(self.preview_results) if role.startswith("slip_")
-            )
-        elif self.active_metric_role == "lvdt":
-            roles = ("lvdt",)
-        else:
-            roles = ("tau", "mu")
-        for role in roles:
-            self.preview_results.pop(role, None)
+        self.preview_result = None
         self.preview_parameters = None
-        for role in roles:
-            self._clear_result_display(role)
+        self._clear_result_display()
         self.status_var.set("Fitting windows changed — recompute preview")
+
+    def _on_parameter_changed(self) -> None:
+        if not hasattr(self, "result_vars"):
+            return
+        self._invalidate_preview()
+        if hasattr(self, "raw_ax"):
+            self._plot_preview()
 
     def on_event_changed(self, event=None) -> None:
         try:
@@ -889,165 +832,28 @@ class EventDropEditorView(tk.Toplevel):
         except Exception as exc:
             messagebox.showerror("Event Drop Preview", f"Failed to load event: {exc}")
 
-    def _on_metric_signal_changed(self, role: str, combobox) -> None:
-        self.preview_results.pop(role, None)
+    def on_signal_changed(self, event=None) -> None:
+        self.preview_result = None
         self.preview_parameters = None
-        self._clear_result_display(role)
-        signal_name = combobox.get()
+        self._clear_result_display()
+        signal_name = self.signal_combobox.get()
         if signal_name in self.signal_candidates:
-            self.metric_bindings[role] = signal_name
-            self.active_metric_role = role
+            self.selected_signal_name = signal_name
             self.status_var.set("Preview only — not saved")
         else:
-            self.metric_bindings[role] = None
-            if self.active_metric_role == role:
-                self.active_metric_role = self._fallback_active_role()
-        has_binding = self._has_any_binding()
-        self.preview_button.configure(state="normal" if has_binding else "disabled")
-        if not has_binding:
+            self.selected_signal_name = None
+        self.preview_button.configure(
+            state="normal" if self.selected_signal_name else "disabled"
+        )
+        if self.selected_signal_name is None:
             self.status_var.set("Select a signal to enable preview")
         self._plot_preview()
 
-    def on_tau_signal_changed(self, event=None) -> None:
-        self._on_metric_signal_changed("tau", self.tau_signal_combobox)
-
-    def on_mu_signal_changed(self, event=None) -> None:
-        self._on_metric_signal_changed("mu", self.mu_signal_combobox)
-
-    def on_lvdt_signal_changed(self, event=None) -> None:
-        self._on_metric_signal_changed("lvdt", self.lvdt_signal_combobox)
-        self._invalidate_interevent_preview(
-            ("D_max",),
-            "LVDT binding changed — recompute preview",
-        )
-
-    def _slip_role(self, index: int) -> str:
-        return f"slip_{index + 1}"
-
-    def _binding_for_role(self, role: str) -> str | None:
-        if role.startswith("slip_"):
-            index = int(role.split("_", 1)[1]) - 1
-            return self.slip_bindings[index] if index < len(self.slip_bindings) else None
-        return self.metric_bindings.get(role)
-
-    def _fallback_active_role(self) -> str | None:
-        for role in ("tau", "mu", "lvdt"):
-            if self.metric_bindings[role]:
-                return role
-        for index, binding in enumerate(getattr(self, "slip_bindings", [])):
-            if binding:
-                return self._slip_role(index)
-        return None
-
-    def _has_any_binding(self) -> bool:
-        return any(self.metric_bindings.values()) or any(
-            getattr(self, "slip_bindings", [])
-        )
-
-    def add_slip_sensor(self) -> None:
-        self.slip_bindings.append(None)
-        self._rebuild_slip_rows()
-        self.preview_button.configure(
-            state="normal" if self._has_any_binding() else "disabled"
-        )
-
-    def remove_slip_sensor(self, index: int) -> None:
-        del self.slip_bindings[index]
-        self.preview_results = {
-            role: result
-            for role, result in self.preview_results.items()
-            if not role.startswith("slip_")
-        }
-        if self.active_metric_role and self.active_metric_role.startswith("slip_"):
-            self.active_metric_role = self._fallback_active_role()
-        self._rebuild_slip_rows()
-        self.preview_button.configure(
-            state="normal" if self._has_any_binding() else "disabled"
-        )
-        self._plot_preview()
-
-    def _rebuild_slip_rows(self) -> None:
-        for row in getattr(self, "slip_rows", []):
-            frame = row.get("frame")
-            if frame is not None:
-                frame.destroy()
-        self.slip_rows = []
-        if not hasattr(self, "slip_rows_frame"):
-            return
-        names = list(self.signal_candidates)
-        result_keys = ("valid", "delta", "magnitude", "val_pre_0", "val_post_0")
-        for index, binding in enumerate(self.slip_bindings):
-            frame = ttk.Frame(self.slip_rows_frame)
-            frame.pack(side=tk.TOP, fill=tk.X, padx=6, pady=2)
-            ttk.Label(frame, text=f"Slip {index + 1}").pack(side=tk.LEFT)
-            selector = ttk.Combobox(frame, width=20, state="readonly", values=names)
-            selector.pack(side=tk.LEFT, padx=4)
-            selector.set(binding or "")
-            selector.bind(
-                "<<ComboboxSelected>>",
-                lambda event, slot=index: self.on_slip_signal_changed(slot),
-            )
-            result_vars = {key: tk.StringVar(value="—") for key in result_keys}
-            for key, label in (
-                ("valid", "Valid"),
-                ("delta", "Signed delta"),
-                ("magnitude", "Magnitude"),
-                ("val_pre_0", "Pre t=0"),
-                ("val_post_0", "Post t=0"),
-            ):
-                ttk.Label(frame, text=f"{label}:").pack(side=tk.LEFT, padx=(5, 1))
-                ttk.Label(frame, textvariable=result_vars[key]).pack(side=tk.LEFT)
-            ttk.Button(
-                frame,
-                text="Remove",
-                command=lambda slot=index: self.remove_slip_sensor(slot),
-            ).pack(side=tk.RIGHT)
-            self.slip_rows.append(
-                {"frame": frame, "selector": selector, "result_vars": result_vars}
-            )
-
-    def on_slip_signal_changed(self, index: int) -> None:
-        role = self._slip_role(index)
-        signal_name = self.slip_rows[index]["selector"].get()
-        self.preview_results.pop(role, None)
-        self._clear_result_display(role)
-        if signal_name in self.signal_candidates:
-            self.slip_bindings[index] = signal_name
-            self.active_metric_role = role
-            self.status_var.set("Preview only — not saved")
-        else:
-            self.slip_bindings[index] = None
-            if self.active_metric_role == role:
-                self.active_metric_role = self._fallback_active_role()
-        self.preview_parameters = None
-        self.preview_button.configure(
-            state="normal" if self._has_any_binding() else "disabled"
-        )
-        if not self._has_any_binding():
-            self.status_var.set("Select a signal to enable preview")
-        self._plot_preview()
-
-    def _resolve_metric_signal(self, role: str) -> np.ndarray:
-        signal_name = self.metric_bindings.get(role)
+    def _resolve_selected_signal(self) -> np.ndarray:
+        signal_name = self.selected_signal_name
         if not signal_name or signal_name not in self.signal_candidates:
-            raise ValueError(f"No available signal is bound to {role}")
+            raise ValueError("No available event signal is selected")
         return self.signal_candidates[signal_name]
-
-    def _resolve_bound_metrics(self) -> dict[str, np.ndarray]:
-        signals = {}
-        for role in ("tau", "mu", "lvdt"):
-            if self.metric_bindings[role] is not None:
-                signals[role] = self._resolve_metric_signal(role)
-        for index, signal_name in enumerate(getattr(self, "slip_bindings", [])):
-            if signal_name is None:
-                continue
-            role = self._slip_role(index)
-            if signal_name not in self.signal_candidates:
-                raise ValueError(f"No available signal is bound to {role}")
-            signals[role] = self.signal_candidates[signal_name]
-        if not signals:
-            raise ValueError("Select at least one signal to enable preview")
-        return signals
 
     def _read_parameter_group(self, variables) -> dict[str, Any]:
         return parse_preview_parameters(
@@ -1059,69 +865,41 @@ class EventDropEditorView(tk.Toplevel):
             variables["smooth_w"].get(),
         )
 
-    def _read_bound_metric_parameters(self) -> dict[str, dict[str, Any]]:
-        parameters = {}
-        if self.metric_bindings["tau"] or self.metric_bindings["mu"]:
-            shared = self._read_parameter_group(self.parameter_vars)
-            for role in ("tau", "mu"):
-                if self.metric_bindings[role]:
-                    parameters[role] = dict(shared)
-        if self.metric_bindings["lvdt"]:
-            parameters["lvdt"] = dict(
-                self._read_parameter_group(self.lvdt_parameter_vars)
-            )
-        if any(getattr(self, "slip_bindings", [])):
-            slip = parse_preview_parameters(
-                self.slip_parameter_vars["half_win"].get(),
-                self.slip_parameter_vars["pre_start"].get(),
-                self.slip_parameter_vars["pre_end"].get(),
-                self.slip_parameter_vars["post_start"].get(),
-                self.slip_parameter_vars["post_end"].get(),
-                "",
-            )
-            for index, binding in enumerate(self.slip_bindings):
-                if binding:
-                    parameters[self._slip_role(index)] = dict(slip)
-        return parameters
-
     def calculate_preview(self) -> dict[str, dict[str, Any]]:
-        """Calculate all explicitly bound event-drop metrics in memory."""
-        signals = self._resolve_bound_metrics()
-        parameters = self._read_bound_metric_parameters()
+        """Calculate the selected event-local signal drop in memory."""
+        signal = self._resolve_selected_signal()
+        parameter_values = self._read_parameter_group(self.parameter_vars)
+        signals = {"signal": signal}
+        parameters = {"signal": parameter_values}
         results = calculate_event_drop_metrics(
             time=self.event["time"],
             event_time=self.event["event_time"],
             signals=signals,
             parameters=parameters,
         )
-        self.preview_results = results
-        self.preview_parameters = parameters
-        return results
+        self.preview_result = results["signal"]
+        self.preview_parameters = parameter_values
+        return self.preview_result
 
     def recompute_preview(self) -> None:
         try:
-            results = self.calculate_preview()
+            result = self.calculate_preview()
             self._clear_result_display()
-            for role, result in results.items():
-                display = format_preview_result(result)
-                if role.startswith("slip_"):
-                    index = int(role.split("_", 1)[1]) - 1
-                    variables = self.slip_rows[index]["result_vars"]
-                else:
-                    variables = self.result_vars[role]
-                for key, variable in variables.items():
-                    variable.set(display[key])
+            display = format_preview_result(result)
+            self.result_vars["signal_name"].set(self.selected_signal_name or "—")
+            for key in ("valid", "delta", "magnitude", "val_pre_0", "val_post_0"):
+                self.result_vars[key].set(display[key])
             self.status_var.set("Preview only — not saved")
             self._plot_preview()
         except ValueError as exc:
-            self.preview_results = {}
+            self.preview_result = None
             self.preview_parameters = None
             self._clear_result_display()
             self.status_var.set(str(exc))
             messagebox.showerror("Event Drop Preview", str(exc))
 
     def _current_points(self) -> tuple[float, float, float, float] | None:
-        variables = self._active_parameter_vars()
+        variables = self.parameter_vars
         try:
             points = tuple(
                 float(variables[key].get())
@@ -1134,7 +912,7 @@ class EventDropEditorView(tk.Toplevel):
         return points
 
     def _constrain_endpoint(self, endpoint: str, position: float) -> float:
-        variables = self._active_parameter_vars()
+        variables = self.parameter_vars
         try:
             half_win = float(variables["half_win"].get())
             if not math.isfinite(half_win) or half_win < 0:
@@ -1151,15 +929,7 @@ class EventDropEditorView(tk.Toplevel):
         return constrained
 
     def _on_endpoint_changed(self, endpoint: str, position: float) -> None:
-        self._active_parameter_vars()[endpoint].set(f"{position:.6g}")
-        self._invalidate_preview()
-
-    def _active_parameter_vars(self):
-        if self.active_metric_role and self.active_metric_role.startswith("slip_"):
-            return self.slip_parameter_vars
-        if self.active_metric_role == "lvdt":
-            return self.lvdt_parameter_vars
-        return self.parameter_vars
+        self.parameter_vars[endpoint].set(f"{position:.6g}")
 
     def _begin_endpoint_drag(self, endpoint: str) -> bool:
         if self._active_endpoint is not None:
@@ -1217,8 +987,7 @@ class EventDropEditorView(tk.Toplevel):
         self.raw_ax.clear()
         self.fit_ax.clear()
 
-        role = self.active_metric_role
-        signal_name = self._binding_for_role(role) if role else None
+        signal_name = self.selected_signal_name
         if signal_name in self.signal_candidates:
             time = np.asarray(self.event["time"], dtype=float)
             relative_time = time - float(self.event["event_time"])
@@ -1251,7 +1020,7 @@ class EventDropEditorView(tk.Toplevel):
             axis.axvline(0.0, color="gray", linestyle=":", linewidth=1)
             axis.grid(True, alpha=0.25)
 
-        preview_result = self.preview_results.get(role) if role else None
+        preview_result = self.preview_result
         if preview_result and preview_result.get("valid") and points is not None:
             pre_x = np.linspace(min(points[0], points[1]), 0.0, 100)
             post_x = np.linspace(0.0, max(points[2], points[3]), 100)
