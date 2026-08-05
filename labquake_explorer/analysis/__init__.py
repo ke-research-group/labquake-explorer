@@ -45,6 +45,15 @@ from .pzt_analysis_egf import (
     egf_calib_interp_for,
     fit_egf_omega_n,
 )
+from .pzt_source_parameters import (
+    BACSourceParameterResult,
+    TIM_DEFAULT_DENSITY_KG_M3,
+    TIM_DEFAULT_P_WAVE_SPEED_M_S,
+    TIM_DEFAULT_RADIATION_PATTERN_FACTOR,
+    TIM_DEFAULT_SHEAR_WAVE_SPEED_M_S,
+    TIM_DEFAULT_SOURCE_MODEL_K,
+    calculate_bac_source_parameters,
+)
 
 __all__ = [
     "calculate_2pt_trend_drop",
@@ -86,4 +95,11 @@ __all__ = [
     "compute_egf_spectrum_at_trigger",
     "fit_egf_omega_n",
     "calc_mw_from_amp",
+    "BACSourceParameterResult",
+    "TIM_DEFAULT_DENSITY_KG_M3",
+    "TIM_DEFAULT_P_WAVE_SPEED_M_S",
+    "TIM_DEFAULT_SHEAR_WAVE_SPEED_M_S",
+    "TIM_DEFAULT_SOURCE_MODEL_K",
+    "TIM_DEFAULT_RADIATION_PATTERN_FACTOR",
+    "calculate_bac_source_parameters",
 ]
