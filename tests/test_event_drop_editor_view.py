@@ -12,6 +12,7 @@ from matplotlib.figure import Figure
 
 from labquake_explorer.ui import labquake_explorer as explorer_module
 from labquake_explorer.ui.labquake_explorer import LabquakeExplorer
+from labquake_explorer.ui.views import event_drop_editor_view as event_drop_module
 from labquake_explorer.ui.views import EventDropEditorView as ExportedEventDropEditorView
 from labquake_explorer.ui.views.event_drop_editor_view import (
     EventDropEditorView,
@@ -1092,14 +1093,94 @@ class FocusedEventSwitchingTests(unittest.TestCase):
         view._refresh_interevent_widgets()
         self.assertEqual(view.interevent_bindings, {"dmax": None, "reference": None})
 
+    def test_event_switch_expected_exception_tuple_is_narrow(self):
+        expected = event_drop_module._EVENT_SWITCH_EXPECTED_EXCEPTIONS
+        self.assertEqual(expected, (ValueError, TypeError, IndexError, KeyError))
+        for excluded in (
+            Exception,
+            BaseException,
+            AttributeError,
+            RuntimeError,
+            AssertionError,
+        ):
+            self.assertNotIn(excluded, expected)
+
     @mock.patch("labquake_explorer.ui.views.event_drop_editor_view.messagebox.showerror")
-    def test_on_event_changed_broadly_reports_expected_and_programming_errors(self, showerror):
-        for error in (ValueError("bad selector"), KeyError("event"), RuntimeError("bug"), AttributeError("bug")):
+    def test_expected_event_switch_errors_are_reported_once(self, showerror):
+        for error_type in (ValueError, TypeError, IndexError, KeyError):
+            with self.subTest(error=error_type.__name__):
+                showerror.reset_mock()
+                view = self._switching_view()
+                view.data_manager = mock.Mock()
+                error = error_type(f"{error_type.__name__} detail")
+                view._set_event = mock.Mock(side_effect=error)
+                with mock.patch.object(event_drop_module, "calculate_event_drop_metrics") as event_calc, \
+                     mock.patch.object(event_drop_module, "calculate_interevent_displacement_metrics") as d_calc:
+                    view.on_event_changed()
+                showerror.assert_called_once_with(
+                    "Event Drop Preview", f"Failed to load event: {error}"
+                )
+                event_calc.assert_not_called()
+                d_calc.assert_not_called()
+                self.assertFalse(view.data_manager.method_calls)
+
+    @mock.patch("labquake_explorer.ui.views.event_drop_editor_view.messagebox.showerror")
+    def test_programming_errors_propagate_without_dialog(self, showerror):
+        for error_type in (AttributeError, RuntimeError, AssertionError):
+            with self.subTest(error=error_type.__name__):
+                showerror.reset_mock()
+                view = self._switching_view()
+                view.data_manager = mock.Mock()
+                view._set_event = mock.Mock(side_effect=error_type("programming bug"))
+                with mock.patch.object(event_drop_module, "calculate_event_drop_metrics") as event_calc, \
+                     mock.patch.object(event_drop_module, "calculate_interevent_displacement_metrics") as d_calc, \
+                     self.assertRaisesRegex(error_type, "programming bug"):
+                    view.on_event_changed()
+                showerror.assert_not_called()
+                event_calc.assert_not_called()
+                d_calc.assert_not_called()
+                self.assertFalse(view.data_manager.method_calls)
+
+    @mock.patch("labquake_explorer.ui.views.event_drop_editor_view.messagebox.showerror")
+    def test_invalid_selector_is_reported_before_event_load(self, showerror):
+        view = self._switching_view()
+        view.event_combobox.set("not an integer")
+        view._set_event = mock.Mock()
+        view.on_event_changed()
+        view._set_event.assert_not_called()
+        showerror.assert_called_once()
+        self.assertEqual(showerror.call_args.args[0], "Event Drop Preview")
+        self.assertIn("invalid literal", showerror.call_args.args[1])
+
+    @mock.patch("labquake_explorer.ui.views.event_drop_editor_view.messagebox.showerror")
+    def test_canonical_event_read_errors_are_reported(self, showerror):
+        for error in (KeyError("missing event"), IndexError("event index")):
             with self.subTest(error=type(error).__name__):
+                showerror.reset_mock()
                 view = self._switching_view()
                 view._set_event = mock.Mock(side_effect=error)
                 view.on_event_changed()
-        self.assertEqual(showerror.call_count, 4)
+                showerror.assert_called_once_with(
+                    "Event Drop Preview", f"Failed to load event: {error}"
+                )
+
+    @mock.patch("labquake_explorer.ui.views.event_drop_editor_view.messagebox.showerror")
+    def test_refresh_and_plot_programming_errors_propagate(self, showerror):
+        view = self._switching_view()
+        view._set_event = mock.Mock()
+        view._refresh_event_widgets = mock.Mock(
+            side_effect=AttributeError("refresh bug")
+        )
+        with self.assertRaisesRegex(AttributeError, "refresh bug"):
+            view.on_event_changed()
+        showerror.assert_not_called()
+
+        view = self._switching_view()
+        view._set_event = mock.Mock()
+        view._plot_preview = mock.Mock(side_effect=RuntimeError("plot bug"))
+        with self.assertRaisesRegex(RuntimeError, "plot bug"):
+            view.on_event_changed()
+        showerror.assert_not_called()
 
     def test_event_selector_uses_zero_based_canonical_positions(self):
         view = headless_view()

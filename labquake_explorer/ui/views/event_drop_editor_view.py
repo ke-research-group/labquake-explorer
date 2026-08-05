@@ -23,6 +23,9 @@ from labquake_explorer.analysis.event_drop import (
 
 DEFAULT_POINTS = (-1.0, -0.5, 0.5, 1.0)
 
+# Only expected selector and canonical-data errors become user-facing dialogs.
+_EVENT_SWITCH_EXPECTED_EXCEPTIONS = (ValueError, TypeError, IndexError, KeyError)
+
 
 class _DraggableVerticalLine:
     """Make one Matplotlib vertical line horizontally draggable."""
@@ -833,7 +836,7 @@ class EventDropEditorView(tk.Toplevel):
             self._set_event(event_idx)
             self.title(f"Event Drop Preview - Event {event_idx}")
             self._refresh_event_widgets()
-        except Exception as exc:
+        except _EVENT_SWITCH_EXPECTED_EXCEPTIONS as exc:
             messagebox.showerror("Event Drop Preview", f"Failed to load event: {exc}")
 
     def on_signal_changed(self, event=None) -> None:
