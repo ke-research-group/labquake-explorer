@@ -1,98 +1,55 @@
+"""Pick rupture-front arrival times on the strain-gauge array of one event.
+
+The figure stacks the four mechanical traces above the strain waveforms,
+each waveform drawn at its location along the fault.  One draggable marker
+per enabled channel marks the arrival; a straight line through the markers
+of the *fitting* channels gives the rupture speed ``Cf``.
+
+Results are written into the event's existing layout:
+
+* ``event['rupture_speed']`` (only when the fit is well-posed; a degenerate
+  fit removes the key so downstream views fall back to their defaults)
+* ``event['strain']['enabled_channels']``, ``event['strain']['fitting_channels']``
+* ``event['strain']['original']['picked_idx']``,
+  ``event['strain']['original']['rupture_arrival_time']``
+"""
+from __future__ import annotations
+
+import math
 import tkinter as tk
-from tkinter import ttk
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-import numpy as np
-import scipy
-from scipy import signal
+from tkinter import messagebox, ttk
 import warnings
+
+import matplotlib.patches as patches
+import numpy as np
+from scipy import signal
+
 from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import EVENT
+from labquake_explorer.ui.views.base import EventView
+
+# Experiments from this number on use the 16-channel layout with three
+# extra gauges at the ends of the fault; older ones use paired gauges.
+NEW_LAYOUT_EXP_NUMBER = 5958
+
+# Savitzky-Golay polynomial order; the window must be longer than this.
+FILTER_POLYORDER = 2
+MIN_FILTER_WINDOW = FILTER_POLYORDER + 1
+DEFAULT_FILTER_WINDOW = 51
+
+_RankWarning = getattr(np, "exceptions", np).RankWarning
+
 
 @register_view("Pick Arrivals", kinds=[EVENT], order=20)
-class DynamicStrainArrivalPickerView(tk.Toplevel):
-    @classmethod
-    def from_context(cls, app, ctx):
-        return cls(app, ctx.run_idx, ctx.event_idx)
+class DynamicStrainArrivalPickerView(EventView):
+    window_title = "Pick Arrivals"
 
-    def __init__(self, parent, run_idx, event_idx):
-        self.parent = parent
-        super().__init__(self.parent.root)
-        self.title("Pick Arrivals")
-
-        # Configure row and column properties
-        # 7 columns, 4 rows
-        self.grid_rowconfigure(1, weight=1)
-        self.grid_columnconfigure(5, weight=1)
-
-
-        # [0, 0]
-        ttk.Label(self, text="Event Index:").grid(row=0, column=0, padx=5, pady=5, sticky="e")
-        self.event_combobox = ttk.Combobox(self, width=10)
-        # [0, 1]
-        self.event_combobox.grid(row=0, column=1, padx=5, pady=5)
-        self.enabled_channels_mb = tk.Menubutton(self, text="Enabled Channels")
-        # [0, 2]
-        self.enabled_channels_mb.grid(row=0, column=2, padx=5, pady=5)
-        self.enabled_channels_mb.menu = tk.Menu(self.enabled_channels_mb, tearoff=0)
-        self.enabled_channels_mb["menu"] = self.enabled_channels_mb.menu
-        self.fitting_channels_mb = tk.Menubutton(self, text="Fitting Channels")
-        # [0, 3]
-        self.fitting_channels_mb.grid(row=0, column=3, padx=5, pady=5)
-        self.fitting_channels_mb.menu = tk.Menu(self.fitting_channels_mb, tearoff=0)
-        self.fitting_channels_mb["menu"] = self.fitting_channels_mb.menu
-        # [0, 4]
-        self.cf_label = ttk.Label(self, text="Cf=0.00m/s")
-        self.cf_label.grid(row=0, column=4, padx=5, pady=5, sticky="e")
-        # [0, 5]
-        self.magic_button = tk.Button(self, text="Magic", command=self.magic)
-        self.magic_button.grid(row=0, column=5, padx=5, pady=5, sticky="e")
-        # [0, 6]
-        self.save_button = tk.Button(self, text="Save", command=self.save)
-        self.save_button.grid(row=0, column=6, padx=5, pady=5, sticky="e")
-
-        # [1, 0::]
-        self.fig = plt.figure(figsize=(7, 7), constrained_layout=True)
-        self.canvas = FigureCanvasTkAgg(self.fig, master=self)
-        self.canvas_widget = self.canvas.get_tk_widget()
-        self.canvas_widget.grid(row=1, column=0, columnspan=8, padx=5, pady=5, sticky="nsew")
-        self.axs = None
-
-
-        # [2, 0::]
-        toolbar_frame = ttk.Frame(self)
-        toolbar_frame.grid(row=2, column=0, columnspan=7, padx=0, pady=0, sticky="ew")
-        toolbar = NavigationToolbar2Tk(self.canvas, toolbar_frame)
-        toolbar.update()
-
-
-        # [3, 0]
-        ttk.Label(self, text="Filter:", justify="left").grid(row=3, column=0, padx=5, pady=5, sticky="ew")
-        self.filter_combobox = ttk.Combobox(self, state="disabled")
-        # [3, 1]
-        self.filter_combobox.grid(row=3, column=1, padx=5, pady=5, sticky="ew")
-        self.filter_combobox["values"] = ("scipy.savgol_filter")
-        self.filter_combobox.current(0)
-        # [3, 2]
-        ttk.Label(self, text="Window length", justify="right").grid(row=3, column=2, padx=5, pady=5, sticky="w")
-        # [3, 3]
-        self.filter_window_length = tk.StringVar(value=51)
-        self.filter_window_length_box = ttk.Spinbox(self, from_=2, to=201, increment=2, textvariable=self.filter_window_length)
-        self.filter_window_length_box.grid(row=3, column=3, padx=5, pady=5, sticky="ew")
-        # [3, 4]
-        self.filter_toggle = tk.Button(self, text="Filter Off", relief="raised", command=self.toggle_filter)
-        self.filter_toggle.grid(row=3, column=4, padx=5, pady=5, sticky="ew")
-        
-
-        # Data
-        self.run_idx = run_idx
-        self.event_idx = event_idx
-        self.event = None
+    def __init__(self, app, run_idx, event_idx):
         self.enabled_channels = None
         self.fitting_channels = None
         self.picked_idx = None
+        self.lines = []
+        self.axs = None
         self.fitting_markers = []
         self.not_fitting_markers = []
         self.offset = [0, 0]
@@ -102,266 +59,123 @@ class DynamicStrainArrivalPickerView(tk.Toplevel):
         self.fitted_line = None
         self.filtering = False
         self.xlim = None
-        self.init_event_combobox()
-        self.on_selected_event_changed()
-        self.on_resize()
+        super().__init__(app, run_idx, event_idx)
 
-        # Event bindings
-        self.fig.canvas.mpl_connect("pick_event", self.on_pick)
-        self.fig.canvas.mpl_connect("motion_notify_event", self.on_motion)
-        self.fig.canvas.mpl_connect("button_press_event", self.on_press)
-        self.fig.canvas.mpl_connect("button_release_event", self.on_release)
-        self.fig.canvas.mpl_connect("resize_event", self.on_resize)
-        self.fig.canvas.mpl_connect("scroll_event", self.on_resize)
-        self.event_combobox.bind("<<ComboboxSelected>>", self.on_selected_event_changed)
+    # ------------------------------------------------------------------ ui
+    def build_ui(self):
+        # 7 columns, 4 rows: controls / figure / toolbar / filter row
+        self.grid_rowconfigure(1, weight=1)
+        self.grid_columnconfigure(5, weight=1)
+
+        self.build_event_selector(self, row=0, column=0)
+
+        self.enabled_channels_mb = tk.Menubutton(self, text="Enabled Channels")
+        self.enabled_channels_mb.grid(row=0, column=2, padx=5, pady=5)
+        self.enabled_channels_mb.menu = tk.Menu(self.enabled_channels_mb, tearoff=0)
+        self.enabled_channels_mb["menu"] = self.enabled_channels_mb.menu
+        self.enabled_channels_mb.items = []
+
+        self.fitting_channels_mb = tk.Menubutton(self, text="Fitting Channels")
+        self.fitting_channels_mb.grid(row=0, column=3, padx=5, pady=5)
+        self.fitting_channels_mb.menu = tk.Menu(self.fitting_channels_mb, tearoff=0)
+        self.fitting_channels_mb["menu"] = self.fitting_channels_mb.menu
+        self.fitting_channels_mb.items = []
+
+        self.cf_label = ttk.Label(self, text="Cf = n/a")
+        self.cf_label.grid(row=0, column=4, padx=5, pady=5, sticky="e")
+        self.magic_button = tk.Button(self, text="Magic", command=self.magic)
+        self.magic_button.grid(row=0, column=5, padx=5, pady=5, sticky="e")
+        self.save_button = tk.Button(self, text="Save", command=self.save)
+        self.save_button.grid(row=0, column=6, padx=5, pady=5, sticky="e")
+
+        # figure (row 1) and toolbar (row 2)
+        self.make_figure(figsize=(7, 7), row=1, column=0, columnspan=7, padx=5, pady=5, sticky="nsew")
+        self.figure.set_layout_engine("constrained")
+        self.fig = self.figure  # legacy alias
+
+        # filter row
+        ttk.Label(self, text="Filter:", justify="left").grid(row=3, column=0, padx=5, pady=5, sticky="ew")
+        self.filter_combobox = ttk.Combobox(self, state="disabled")
+        self.filter_combobox.grid(row=3, column=1, padx=5, pady=5, sticky="ew")
+        self.filter_combobox["values"] = ("scipy.savgol_filter",)
+        self.filter_combobox.current(0)
+        ttk.Label(self, text="Window length", justify="right").grid(row=3, column=2, padx=5, pady=5, sticky="w")
+        self.filter_window_length = tk.StringVar(value=str(DEFAULT_FILTER_WINDOW))
+        self.filter_window_length_box = ttk.Spinbox(self, from_=MIN_FILTER_WINDOW, to=201, increment=2,
+                                                    textvariable=self.filter_window_length)
+        self.filter_window_length_box.grid(row=3, column=3, padx=5, pady=5, sticky="ew")
+        self.filter_toggle = tk.Button(self, text="Filter Off", relief="raised", command=self.toggle_filter)
+        self.filter_toggle.grid(row=3, column=4, padx=5, pady=5, sticky="ew")
+
+        self.figure.canvas.mpl_connect("pick_event", self.on_pick)
+        self.figure.canvas.mpl_connect("motion_notify_event", self.on_motion)
+        self.figure.canvas.mpl_connect("button_press_event", self.on_press)
+        self.figure.canvas.mpl_connect("button_release_event", self.on_release)
+        self.figure.canvas.mpl_connect("resize_event", self.on_resize)
+        self.figure.canvas.mpl_connect("scroll_event", self.on_resize)
         self.filter_window_length_box.bind("<ButtonRelease>", self.on_filter_window_length_box_changed)
 
-    def plot(self):
-        exp_number = int(self.parent.data_manager.get_data("name")[1:5])
-        # print(exp_number)
-        linestyle = ".-"
+    # ------------------------------------------------------------- loading
+    def exp_number(self) -> int:
+        """Experiment number parsed from the name, e.g. 'p5958' -> 5958 (0 if unparsable)."""
+        try:
+            return int(self.experiment_name()[1:5])
+        except ValueError:
+            return 0
 
-        self.fig.clear()
-        self.fitting_markers = []
-        self.not_fitting_markers = []
-        self.fitted_line = []
-        gs = self.fig.add_gridspec(5, hspace=0, height_ratios=[1, 1, 1, 1, 10])
-        self.axs = gs.subplots(sharex=True)
-        self.axs[0].set_ylabel(r"$\tau$ (MPa)")
-        self.axs[1].set_ylabel(r"$\mu$")
-        self.axs[2].set_ylabel(r"$\delta_\mathrm{LP}\ \mathrm{({\mu}m)}$")
-        self.axs[3].set_ylabel(r"$\delta\ \mathrm{({\mu}m)}$")
+    @staticmethod
+    def strain_block(event):
+        """The event's ``strain`` dict when it carries full-rate data, else None."""
+        strain = event.get("strain") if isinstance(event, dict) else None
+        if isinstance(strain, dict) and isinstance(strain.get("original"), dict):
+            return strain
+        return None
 
-        t = self.event["time"] - self.event["event_time"]
-        self.axs[0].plot(t, self.event["shear_stress"], linestyle, color="C0")
-        self.axs[1].plot(t, self.event["friction"], linestyle, color="C0")
-        self.axs[2].plot(t, self.event["LP_displacement"] - self.event["LP_displacement"][0], linestyle, color="C0")
-        self.axs[3].plot(t, self.event["displacement"] - self.event["displacement"][0], linestyle, color="C0")
+    def set_event(self, event_idx: int) -> None:
+        """Switch events, but refuse (with a warning) an event without strain data.
 
-        tt = self.event["strain"]["original"]["time"] - self.event["event_time"]
-        y = np.copy(self.event["strain"]["original"]["raw"])
-
-        n_channels = y.shape[0]
-        if self.enabled_channels is None:
-            if "enabled_channels" in self.event:
-                self.enabled_channels = self.event["strain"]["enabled_channels"]
-            else:
-                if exp_number >= 5958:
-                    self.enabled_channels = [i < 13 for i in range(n_channels)]
-                else:
-                    self.enabled_channels = [i % 2 == 0 for i in range(n_channels)]
-        if self.fitting_channels is None:
-            if "fitting_channels" in self.event:
-                self.fitting_channels = self.event["strain"]["fitting_channels"]
-            else:
-                if exp_number >= 5958:
-                    self.fitting_channels = [False, True, True, True, True, True, True, True, True, False, False, False, False, False, False, False]
-                else: 
-                    # self.fitting_channels = [i % 2 == 0 for i in range(n_channels)]
-                    self.fitting_channels = [False, False, False, False, False, False, True, False, True, False, True, False, True, False, False, False]
-        if (not "locations" in self.event["strain"]) or (not len(self.event["strain"]["locations"]) == n_channels):
-
-            if exp_number >= 5958:
-                self.event["strain"]["locations"] = [2 + 12 * i for i in range(16)]
-                self.event["strain"]["locations"][-3:] = [2, 74, 146]
-            else:
-                self.event["strain"]["locations"] = [10.5 + 12 * int(i / 2) for i in range(n_channels)]
-        
-        self.lines = [None for i in range(n_channels)]
-
-        if self.filtering:
-            nf = int(self.filter_window_length.get())
-            for i in range(y.shape[0]):
-                y[i, :] = scipy.signal.savgol_filter(y[i, :], nf, 2)
-        line_idx = 0
-        ratios = np.ones(y.shape[0])
-        for i in range(y.shape[0]):
-            if not self.enabled_channels[i]:
-                continue
-            loc = self.event["strain"]["locations"][i]
-            self.axs[4].plot([tt[0], tt[-1]], [loc, loc], "k:", zorder=-101)
-            ratios[i] = -12 / (y[i, :].max() - y[i, :].min())
-            self.lines[i] = self.axs[4].plot(tt, y[i, :] * ratios[i] + loc, color="C%d" % line_idx, zorder=-100)
-            line_idx += 1
-        self.axs[4].set_ylabel("location along fault (mm)")
-        self.axs[4].set_xlabel("time - %f (s)" %  self.event["event_time"])
-        if exp_number >= 5958:
-            self.axs[4].set_ylim(160, -10)
-        else:
-            self.axs[4].set_ylim(105, 0)
-        if self.xlim is None:
-            self.axs[0].set_xlim(tt[0], tt[-1])
-        else:
-            self.axs[0].set_xlim(self.xlim)
-        
-        self.fig.suptitle("%s run%02d event%d" % (self.parent.data_manager.get_data("name"), 
-                                                  self.run_idx, 
-                                                  self.event_idx))
-        
-        if self.picked_idx is None:
-            if "picked_idx" in self.event["strain"]["original"]:
-                self.picked_idx = self.event["strain"]["original"]["picked_idx"]
-            else:
-                middle_idx = int(y.shape[1] / 2)
-                self.picked_idx = [middle_idx for i in range(n_channels)]
-        self.draw_markers()
-
-    def draw_markers(self):
-        width, height = self.get_circle_dims()
-        for marker in self.fitting_markers:
-            marker.remove()
-        for marker in self.not_fitting_markers:
-            marker.remove()
-        self.fitting_markers = []
-        self.not_fitting_markers = []
-        for i in range(len(self.picked_idx)):
-            if not self.enabled_channels[i]:
-                continue
-            idx = self.picked_idx[i]
-            if self.fitting_channels[i]:
-                color = "red"
-            else:
-                color = "black"
-            (x , y) = self.lines[i][0].get_data()
-            marker = patches.Ellipse((x[idx], y[idx]), width=width, height=height, color=color, fill=False, lw=2, picker=8, label=str(i))
-            self.axs[4].add_patch(marker)
-            if self.fitting_channels[i]:
-                self.fitting_markers.append(marker)
-            else:
-                self.not_fitting_markers.append(marker)
-        self.canvas.draw()
-
-
-    def on_pick(self, event):
-        if self.current_artist is None:
-            self.current_artist = event.artist
-            if isinstance(event.artist, patches.Ellipse):
-                x0, y0 = self.current_artist.center
-                x1, y1 = event.mouseevent.xdata, event.mouseevent.ydata
-                self.offset = [(x0 - x1), (y0 - y1)]
-
-    def on_motion(self, event):
-        if not self.currently_dragging:
+        The check happens before ``EventView.set_event`` touches ``event_idx``,
+        ``event``, the title or the combobox, so a refused switch leaves the
+        view exactly as it was.
+        """
+        event_idx = int(event_idx)
+        try:
+            candidate = self.data_manager.get_data(f"{self.run_path}/events/[{event_idx}]")
+        except (KeyError, IndexError, TypeError):
+            candidate = None
+        if self.strain_block(candidate) is None:
+            self.refresh_event_selector()  # combobox may already show the refused index
+            messagebox.showwarning(
+                "No strain data",
+                f"Event {event_idx} has no strain data to pick arrivals on; "
+                f"staying on event {self.event_idx}.",
+                parent=self,
+            )
             return
-        if self.current_artist is None:
-            return
-        if isinstance(self.current_artist, patches.Ellipse):
-                try:
-                    channel = int(self.current_artist.get_label())
-                    dx, dy = self.offset
-                    cx, cy = event.xdata + dx, event.ydata + dy
-                    xl = self.axs[4].get_xlim()
-                    yl = self.axs[4].get_ylim()
-                    yw = yl[-1] - yl[0]
-                    xw = xl[-1] - xl[0]
-                    (x , y) = self.lines[channel][0].get_data()
-                    idx = np.argmin(((x - cx) / xw) ** 2 + ((y - cy) / yw) ** 2)
-                    self.current_artist.set_center((x[idx], y[idx]))
-                    self.picked_idx[channel] = idx
-                    self.update_fitted_line()
-                except:
-                    pass
+        super().set_event(event_idx)
 
-    def on_press(self, event):
-        self.currently_dragging = True
+    def on_event_loaded(self):
+        strain = self.strain_block(self.event)
+        if strain is None:
+            if self.axs is None:  # first load: nothing to show, do not leave a dead window
+                self.on_close()
+            raise ValueError(f"{self.event_path} has no strain data to pick arrivals on")
+        original = strain["original"]
 
-    def on_release(self, event):
-        self.current_artist = None
-        self.currently_dragging = False
-        self.on_resize()
-
-    def get_circle_dims(self):
-        # self.update()
-        # self.canvas.draw()
-        xl = self.axs[4].get_xlim()
-        yl = self.axs[4].get_ylim()
-        ratio = (yl[-1] - yl[0]) / (xl[-1] - xl[0])
-        bbox = self.axs[4].get_window_extent()
-        ax_size = [bbox.width, bbox.height]
-        ratio *= ax_size[0] / ax_size[1]
-        width = (xl[-1] - xl[0]) / ax_size[0] * 0.1 * self.fig.dpi
-        return width, width * ratio
-
-    def on_resize(self, event=None):
-        self.canvas.draw()
-        if not self.axs is None:
-            width, height = self.get_circle_dims()
-            for marker in self.fitting_markers:
-                marker.set_width(width)
-                marker.set_height(height)
-            for marker in self.not_fitting_markers:
-                marker.set_width(width)
-                marker.set_height(height)
-            self.canvas.draw()
-        self.xlim = self.axs[0].get_xlim()
-    
-    def update_fitted_line(self):
-        x = np.empty(len(self.fitting_markers))
-        y = np.empty(len(self.fitting_markers))
-        for i in range(len(self.fitting_markers)):
-            idx = int(self.fitting_markers[i].get_label())
-            x[i] = self.fitting_markers[i].get_center()[0]
-            y[i] = self.event["strain"]["locations"][idx]
-        a = np.polyfit(y, x, 1)
-        if self.fitted_line:
-            self.fitted_line[0].remove()
-        self.fitted_line = self.axs[4].plot(a[0] * y + a[1], y, "r--")
-        self.canvas.draw()
-        warnings.filterwarnings("ignore", message="divide by zero encountered in double_scalars")
-        self.rupture_speed = -1e-3 / a[0]
-        warnings.filterwarnings("default", message="divide by zero encountered in double_scalars")
-        if np.abs(self.rupture_speed) < 1e4:
-            self.cf_label.configure(text=f"Cf = {self.rupture_speed:.2f} m/s")
-        else:
-            self.cf_label.configure(text=f"Cf = {self.rupture_speed:.2e} m/s")
-        self.update()
-    
-    def save(self):
-        self.event["strain"]["enabled_channels"] = self.enabled_channels
-        self.event["strain"]["fitting_channels"] = self.fitting_channels
-        self.event["rupture_speed"] = self.rupture_speed
-        self.event["strain"]["original"]["picked_idx"] = self.picked_idx
-        self.event["strain"]["original"]["rupture_arrival_time"] = np.array([self.event["strain"]["original"]["time"][i] for i in self.picked_idx])
-        self.parent.refresh_tree()
-        print(f"Saved runs[{self.run_idx}]/events[{self.event_idx}] to data.")
-
-    def init_event_combobox(self):
-        n_events = len(self.parent.data_manager.get_data(f"runs/[{self.run_idx}]/events"))
-        options = [f"{i}" for i in range(n_events)]
-        self.event_combobox.config(values=options, state="readonly")
-        self.event_combobox.current(self.event_idx)
-
-    def init_enabled_channels_mb(self):
-        n = len(self.enabled_channels)
-        self.enabled_channels_mb.menu.delete(0, "end")
-        self.enabled_channels_mb.items = [tk.IntVar() for i in range(n)]
-        for i in range(n):
-            self.enabled_channels_mb.items[i].set(self.enabled_channels[i])
-            self.enabled_channels_mb.menu.add_checkbutton( label="channel %d" %i, variable=self.enabled_channels_mb.items[i], command=self.enabled_channels_changed)
-
-    def init_fitting_channels_mb(self):
-        n = len(self.fitting_channels)
-        self.fitting_channels_mb.menu.delete(0, "end")
-        self.fitting_channels_mb.items = [tk.IntVar() for i in range(n)]
-        for i in range(n):
-            self.fitting_channels_mb.items[i].set(self.fitting_channels[i])
-            self.fitting_channels_mb.menu.add_checkbutton( label="channel %d" %i, variable=self.fitting_channels_mb.items[i], command=self.fitting_channels_changed)
-
-    def on_selected_event_changed(self, event=None):
-        self.event_idx = int(self.event_combobox.get())
-        self.event = self.parent.data_manager.get_data(f"runs/[{self.run_idx}]/events/[{self.event_idx}]")
-        if "enabled_channels" in self.event["strain"]:
-            self.enabled_channels = self.event["strain"]["enabled_channels"]
+        # saved channel state lives in the strain dict, not on the event
+        if "enabled_channels" in strain:
+            self.enabled_channels = [bool(v) for v in strain["enabled_channels"]]
         else:
             self.enabled_channels = None
-        if "fitting_channels" in self.event["strain"]:
-            self.fitting_channels = self.event["strain"]["fitting_channels"]
+        if "fitting_channels" in strain:
+            self.fitting_channels = [bool(v) for v in strain["fitting_channels"]]
         else:
             self.fitting_channels = None
-        if "picked_idx" in self.event["strain"]["original"]:
-            self.picked_idx = self.event["strain"]["original"]["picked_idx"]
+        if "picked_idx" in original:
+            self.picked_idx = [int(v) for v in original["picked_idx"]]
         else:
             self.picked_idx = None
+
         self.xlim = None
         self.fitting_markers = []
         self.not_fitting_markers = []
@@ -374,61 +188,333 @@ class DynamicStrainArrivalPickerView(tk.Toplevel):
         self.init_enabled_channels_mb()
         self.init_fitting_channels_mb()
         self.update_fitted_line()
-    
+
+    # ------------------------------------------------------------ defaults
+    @staticmethod
+    def default_enabled_channels(n_channels: int, exp_number: int) -> list:
+        if exp_number >= NEW_LAYOUT_EXP_NUMBER:
+            return [i < 13 for i in range(n_channels)]
+        return [i % 2 == 0 for i in range(n_channels)]
+
+    @staticmethod
+    def default_fitting_channels(n_channels: int, exp_number: int) -> list:
+        if exp_number >= NEW_LAYOUT_EXP_NUMBER:
+            base = [False] + [True] * 8 + [False] * 7
+        else:
+            base = [i in (6, 8, 10, 12) for i in range(16)]
+        return (base + [False] * n_channels)[:n_channels]
+
+    @staticmethod
+    def default_locations(n_channels: int, exp_number: int) -> list:
+        """Gauge positions along the fault in mm."""
+        if exp_number >= NEW_LAYOUT_EXP_NUMBER:
+            locs = [2 + 12 * i for i in range(16)]
+            locs[-3:] = [2, 74, 146]
+            return (locs + [locs[-1]] * n_channels)[:n_channels]
+        return [10.5 + 12 * (i // 2) for i in range(n_channels)]
+
+    # ---------------------------------------------------------------- plot
+    def filter_window(self) -> int:
+        """Savgol window length from the spinbox, as typed (even values are
+        fine for scipy's savgol_filter); clamped to > polyorder, 51 if unparsable."""
+        try:
+            n = int(float(self.filter_window_length.get()))
+        except (ValueError, tk.TclError):
+            n = DEFAULT_FILTER_WINDOW
+        return max(n, MIN_FILTER_WINDOW)
+
+    def plot(self):
+        exp_number = self.exp_number()
+        strain = self.event["strain"]
+        original = strain["original"]
+        linestyle = ".-"
+
+        self.figure.clear()
+        self.fitting_markers = []
+        self.not_fitting_markers = []
+        self.fitted_line = None
+        gs = self.figure.add_gridspec(5, hspace=0, height_ratios=[1, 1, 1, 1, 10])
+        self.axs = gs.subplots(sharex=True)
+        self.axs[0].set_ylabel(r"$\tau$ (MPa)")
+        self.axs[1].set_ylabel(r"$\mu$")
+        self.axs[2].set_ylabel(r"$\delta_\mathrm{LP}\ \mathrm{({\mu}m)}$")
+        self.axs[3].set_ylabel(r"$\delta\ \mathrm{({\mu}m)}$")
+
+        event_time = self.event["event_time"]
+        t = np.asarray(self.event["time"]) - event_time
+        self.axs[0].plot(t, self.event["shear_stress"], linestyle, color="C0")
+        self.axs[1].plot(t, self.event["friction"], linestyle, color="C0")
+        lp = np.asarray(self.event["LP_displacement"])
+        self.axs[2].plot(t, lp - lp[0], linestyle, color="C0")
+        disp = np.asarray(self.event["displacement"])
+        self.axs[3].plot(t, disp - disp[0], linestyle, color="C0")
+
+        tt = np.asarray(original["time"]) - event_time
+        y = np.array(original["raw"], dtype=float, copy=True)
+        n_channels = y.shape[0]
+
+        if self.enabled_channels is None or len(self.enabled_channels) != n_channels:
+            self.enabled_channels = self.default_enabled_channels(n_channels, exp_number)
+        if self.fitting_channels is None or len(self.fitting_channels) != n_channels:
+            self.fitting_channels = self.default_fitting_channels(n_channels, exp_number)
+        if "locations" not in strain or len(strain["locations"]) != n_channels:
+            strain["locations"] = self.default_locations(n_channels, exp_number)
+
+        if self.filtering:
+            nf = self.filter_window()
+            # keep the spinbox showing the window that was actually applied
+            if self.filter_window_length.get() != str(nf):
+                self.filter_window_length.set(str(nf))
+            for i in range(n_channels):
+                y[i, :] = signal.savgol_filter(y[i, :], nf, FILTER_POLYORDER)
+
+        self.lines = [None] * n_channels
+        line_idx = 0
+        for i in range(n_channels):
+            if not self.enabled_channels[i]:
+                continue
+            loc = strain["locations"][i]
+            self.axs[4].plot([tt[0], tt[-1]], [loc, loc], "k:", zorder=-101)
+            span = y[i, :].max() - y[i, :].min()
+            ratio = -12 / span if span > 0 else 0.0
+            self.lines[i] = self.axs[4].plot(tt, y[i, :] * ratio + loc, color="C%d" % line_idx, zorder=-100)[0]
+            line_idx += 1
+        self.axs[4].set_ylabel("location along fault (mm)")
+        self.axs[4].set_xlabel("time - %f (s)" % event_time)
+        if exp_number >= NEW_LAYOUT_EXP_NUMBER:
+            self.axs[4].set_ylim(160, -10)
+        else:
+            self.axs[4].set_ylim(105, 0)
+        if self.xlim is None:
+            self.axs[0].set_xlim(tt[0], tt[-1])
+        else:
+            self.axs[0].set_xlim(self.xlim)
+        self.figure.suptitle(self.figure_title())
+
+        if self.picked_idx is None or len(self.picked_idx) != n_channels:
+            middle_idx = y.shape[1] // 2
+            self.picked_idx = [middle_idx] * n_channels
+        self.draw_markers()
+
+    def draw_markers(self):
+        width, height = self.get_circle_dims()
+        for marker in self.fitting_markers + self.not_fitting_markers:
+            try:
+                marker.remove()
+            except (ValueError, NotImplementedError):
+                pass
+        self.fitting_markers = []
+        self.not_fitting_markers = []
+        for i, idx in enumerate(self.picked_idx):
+            if not self.enabled_channels[i] or self.lines[i] is None:
+                continue
+            color = "red" if self.fitting_channels[i] else "black"
+            x, y = self.lines[i].get_data()
+            marker = patches.Ellipse((x[idx], y[idx]), width=width, height=height, color=color,
+                                     fill=False, lw=2, picker=8, label=str(i))
+            self.axs[4].add_patch(marker)
+            if self.fitting_channels[i]:
+                self.fitting_markers.append(marker)
+            else:
+                self.not_fitting_markers.append(marker)
+        self.canvas.draw()
+
+    def get_circle_dims(self):
+        xl = self.axs[4].get_xlim()
+        yl = self.axs[4].get_ylim()
+        ratio = (yl[-1] - yl[0]) / (xl[-1] - xl[0])
+        bbox = self.axs[4].get_window_extent()
+        ax_size = [bbox.width, bbox.height]
+        ratio *= ax_size[0] / ax_size[1]
+        width = (xl[-1] - xl[0]) / ax_size[0] * 0.1 * self.figure.dpi
+        return width, width * ratio
+
+    def on_resize(self, event=None):
+        self.canvas.draw()
+        if self.axs is not None:
+            width, height = self.get_circle_dims()
+            for marker in self.fitting_markers + self.not_fitting_markers:
+                marker.set_width(width)
+                marker.set_height(height)
+            self.canvas.draw()
+            self.xlim = self.axs[0].get_xlim()
+
+    # ------------------------------------------------------------- dragging
+    def on_pick(self, event):
+        if self.toolbar_active():
+            return
+        if self.current_artist is None and isinstance(event.artist, patches.Ellipse):
+            self.current_artist = event.artist
+            x0, y0 = self.current_artist.center
+            x1, y1 = event.mouseevent.xdata, event.mouseevent.ydata
+            if x1 is None or y1 is None:
+                self.offset = [0, 0]
+            else:
+                self.offset = [(x0 - x1), (y0 - y1)]
+
+    def on_press(self, event):
+        if self.toolbar_active():
+            return
+        self.currently_dragging = True
+
+    def on_release(self, event):
+        self.current_artist = None
+        self.currently_dragging = False
+        self.on_resize()
+
+    def on_motion(self, event):
+        if self.toolbar_active():
+            return
+        if not self.currently_dragging or self.current_artist is None:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        if not isinstance(self.current_artist, patches.Ellipse):
+            return
+        try:
+            channel = int(self.current_artist.get_label())
+            dx, dy = self.offset
+            cx, cy = event.xdata + dx, event.ydata + dy
+            xl = self.axs[4].get_xlim()
+            yl = self.axs[4].get_ylim()
+            yw = yl[-1] - yl[0]
+            xw = xl[-1] - xl[0]
+            x, y = self.lines[channel].get_data()
+            idx = int(np.argmin(((x - cx) / xw) ** 2 + ((y - cy) / yw) ** 2))
+            self.current_artist.set_center((x[idx], y[idx]))
+            self.picked_idx[channel] = idx
+            self.update_fitted_line()
+        except Exception as e:
+            print(f"Error in on_motion: {e}")
+
+    # ------------------------------------------------------------------ fit
+    @staticmethod
+    def fit_arrival_line(locations, times):
+        """Least-squares ``time = slope * location + intercept``; None if ill-posed.
+
+        Ill-posed means fewer than two picks, fewer than two distinct locations,
+        all picked times identical (no propagation to measure: polyfit would
+        return a slope of ~1e-20 rather than 0 whenever the common time is not
+        exactly 0), a rank-deficient fit, or non-finite coefficients.
+        """
+        locations = np.asarray(locations, dtype=float)
+        times = np.asarray(times, dtype=float)
+        if len(times) < 2 or len(np.unique(locations)) < 2:
+            return None
+        if not np.all(np.isfinite(times)) or np.ptp(times) == 0:
+            return None
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", _RankWarning)
+                coeffs = np.polyfit(locations, times, 1)
+        except Exception:
+            return None
+        if not np.all(np.isfinite(coeffs)):
+            return None
+        return float(coeffs[0]), float(coeffs[1])
+
+    def update_fitted_line(self):
+        if self.fitted_line is not None:
+            try:
+                self.fitted_line.remove()
+            except ValueError:
+                pass
+            self.fitted_line = None
+        locations = self.event["strain"]["locations"]
+        x = [marker.get_center()[0] for marker in self.fitting_markers]
+        y = [locations[int(marker.get_label())] for marker in self.fitting_markers]
+        self.rupture_speed = math.nan
+        fit = self.fit_arrival_line(y, x)
+        if fit is not None:
+            slope, intercept = fit
+            yy = np.asarray(y, dtype=float)
+            self.fitted_line = self.axs[4].plot(slope * yy + intercept, yy, "r--")[0]
+            if slope != 0:
+                self.rupture_speed = -1e-3 / slope  # mm/s -> m/s, sign = propagation direction
+        self.canvas.draw()
+        self.update_cf_label()
+        self.update_idletasks()
+
+    def has_rupture_speed(self) -> bool:
+        return self.rupture_speed is not None and bool(np.isfinite(self.rupture_speed))
+
+    def update_cf_label(self):
+        cf = self.rupture_speed
+        if not self.has_rupture_speed():
+            text = "Cf = n/a"
+        elif abs(cf) < 1e4:
+            text = f"Cf = {cf:.2f} m/s"
+        else:
+            text = f"Cf = {cf:.2e} m/s"
+        self.cf_label.configure(text=text)
+
+    # ---------------------------------------------------------------- save
+    def save(self):
+        strain = self.event["strain"]
+        original = strain["original"]
+        picked = [int(i) for i in self.picked_idx]
+        strain["enabled_channels"] = [bool(v) for v in self.enabled_channels]
+        strain["fitting_channels"] = [bool(v) for v in self.fitting_channels]
+        original["picked_idx"] = picked
+        original["rupture_arrival_time"] = np.asarray(original["time"])[picked]
+        if self.has_rupture_speed():
+            rupture_speed = float(self.rupture_speed)
+            self.data_manager.set_data(f"{self.event_path}/rupture_speed", rupture_speed, True)
+            self.event["rupture_speed"] = rupture_speed
+        else:
+            # A degenerate fit has no speed; do not leave a nan (or a stale value
+            # from an earlier save) for the CZM fitter to pick up as Cf.
+            self.event.pop("rupture_speed", None)
+            print(f"No rupture speed saved for runs[{self.run_idx}]/events[{self.event_idx}]: "
+                  "the arrival picks do not define a line (Cf = n/a).")
+        self.app.refresh_tree()
+        print(f"Saved runs[{self.run_idx}]/events[{self.event_idx}] to data.")
+
+    # --------------------------------------------------------------- menus
+    @staticmethod
+    def _fill_channel_menu(menubutton, flags, command):
+        menubutton.menu.delete(0, "end")
+        menubutton.items = [tk.IntVar(value=int(bool(flag))) for flag in flags]
+        for i, var in enumerate(menubutton.items):
+            menubutton.menu.add_checkbutton(label="channel %d" % i, variable=var, command=command)
+
+    def init_enabled_channels_mb(self):
+        self._fill_channel_menu(self.enabled_channels_mb, self.enabled_channels, self.enabled_channels_changed)
+
+    def init_fitting_channels_mb(self):
+        self._fill_channel_menu(self.fitting_channels_mb, self.fitting_channels, self.fitting_channels_changed)
 
     def enabled_channels_changed(self):
-        n = len(self.enabled_channels)
-        for i in range(n):
-            self.enabled_channels[i] = self.enabled_channels_mb.items[i].get()
+        self.enabled_channels = [bool(var.get()) for var in self.enabled_channels_mb.items]
         self.plot()
         self.update_fitted_line()
 
     def fitting_channels_changed(self):
-        n = len(self.fitting_channels)
-        for i in range(n):
-            self.fitting_channels[i] = self.fitting_channels_mb.items[i].get()
+        self.fitting_channels = [bool(var.get()) for var in self.fitting_channels_mb.items]
         self.draw_markers()
         self.update_fitted_line()
 
+    # -------------------------------------------------------------- filter
     def toggle_filter(self):
         self.filtering = not self.filtering
         if self.filtering:
-            self.filter_toggle.config(text="Filter On")
-            self.filter_toggle.config(relief="sunken")
+            self.filter_toggle.config(text="Filter On", relief="sunken")
         else:
-            self.filter_toggle.config(text="Filter Off")
-            self.filter_toggle.config(relief="raised")
+            self.filter_toggle.config(text="Filter Off", relief="raised")
         self.plot()
         self.update_fitted_line()
 
     def on_filter_window_length_box_changed(self, event=None):
-        if int(self.filter_window_length.get()) % 2 == 0:
-            self.filter_window_length.set(int(self.filter_window_length.get()))
         self.plot()
         self.update_fitted_line()
 
+    # --------------------------------------------------------------- magic
     def magic(self):
-        # self.event["strain"]["enabled_channels"] = [1,0, 1,0, 1,0, 1,0, 1,0, 1,0, 1,0, 1,0]
-        # self.event["strain"]["fitting_channels"] = [0,0, 1,0, 1,0, 0,0, 0,0, 0,0, 0,0, 0,0]
-        # self.on_selected_event_changed()
-        # (x , y) = self.lines[0][0].get_data()
-        # self.event["strain"]["original"]["picked_idx"][0] = np.argmin(y)
-        # (x , y) = self.lines[2][0].get_data()
-        # self.event["strain"]["original"]["picked_idx"][2] = np.argmin(y)
-        # (x , y) = self.lines[4][0].get_data()
-        # self.event["strain"]["original"]["picked_idx"][4] = np.argmin(y)
-        # self.on_selected_event_changed()
-
-        # self.event["strain"]["enabled_channels"] = [0,1, 0,1, 0,1, 0,1, 0,1, 0,1, 0,1, 0,1]
-        # self.event["strain"]["fitting_channels"] = [0,0, 0,0, 0,0, 0,0, 0,1, 0,1, 0,1, 0,1]
-        # self.on_selected_event_changed()
-
-        for i in range(len(self.lines)):
-            if self.lines[i] is None:
+        """Auto-pick: the extreme of each enabled (plotted) trace."""
+        for i, line in enumerate(self.lines):
+            if line is None:
                 continue
-            (x , y) = self.lines[i][0].get_data()
-            self.picked_idx[i] = np.argmin(y)
+            x, y = line.get_data()
+            self.picked_idx[i] = int(np.argmin(y))
         self.draw_markers()
-
-if __name__ == "__main__":
-    pass
+        self.update_fitted_line()
