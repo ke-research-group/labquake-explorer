@@ -40,14 +40,18 @@ class BaseView(tk.Toplevel):
     def from_context(cls, app, ctx: TreeContext):
         return cls(app)
 
-    def make_figure(self, master=None, figsize=(10, 6), dpi=100, toolbar=True, **grid):
+    def make_figure(self, master=None, figsize=(10, 6), dpi=100, toolbar=True,
+                    figure_kwargs=None, **grid):
         """Create a Figure + Tk canvas (+ toolbar) and grid them into ``master``.
 
         ``grid`` keywords are passed to ``canvas_widget.grid``; the toolbar is
-        placed in the next row with the same column span.  Returns the figure.
+        placed in the next row with the same column span.  ``figure_kwargs``
+        (e.g. ``{"layout": "constrained"}``) go to ``Figure``.  Without grid
+        keywords only the figure/canvas are created and the caller places
+        ``self.canvas_widget`` (and a toolbar) itself.  Returns the figure.
         """
         master = master or self
-        self.figure = Figure(figsize=figsize, dpi=dpi)
+        self.figure = Figure(figsize=figsize, dpi=dpi, **(figure_kwargs or {}))
         self.canvas = FigureCanvasTkAgg(self.figure, master=master)
         self.canvas_widget = self.canvas.get_tk_widget()
         if grid:
@@ -72,7 +76,15 @@ class BaseView(tk.Toplevel):
 
 
 class EventView(BaseView):
-    """A view of one event, with an event selector and a result namespace."""
+    """A view of one event, with an event selector and a result namespace.
+
+    Construction order: the subclass sets plain attributes, then calls
+    ``super().__init__``, which loads ``self.event``, calls ``build_ui()``
+    (create widgets and Tk variables here; the Toplevel exists by now), sets
+    the title, and calls ``on_event_loaded()``.  If any of those raise, the
+    half-built window is unregistered and destroyed before the exception
+    propagates.
+    """
 
     result_key: Optional[str] = None
 
@@ -82,11 +94,19 @@ class EventView(BaseView):
         self.event: dict = {}
         self.run: Optional[dict] = None
         super().__init__(app, title=title)
-        self.event = self.data_manager.get_data(self.event_path)
-        self.event_combobox: Optional[ttk.Combobox] = None
-        self.build_ui()
-        self.update_title()
-        self.on_event_loaded()
+        try:
+            self.event = self.data_manager.get_data(self.event_path)
+            self.event_combobox: Optional[ttk.Combobox] = None
+            self.build_ui()
+            self.update_title()
+            self.on_event_loaded()
+        except Exception:
+            self.app.unregister_child(self)
+            try:
+                self.destroy()
+            except tk.TclError:
+                pass
+            raise
 
     @classmethod
     def from_context(cls, app, ctx: TreeContext):
@@ -182,6 +202,12 @@ class EventView(BaseView):
         self.event[self.result_key] = results
         self.app.refresh_tree()
 
+    def save_field(self, relative_path: str, value, refresh: bool = True) -> None:
+        """Persist one value under ``event/<relative_path>`` (for views without a single result key)."""
+        self.data_manager.set_data(f"{self.event_path}/{relative_path}", value, True)
+        if refresh:
+            self.app.refresh_tree()
+
 
 class RunView(BaseView):
     """A view of one run, with a result namespace under ``runs/[r]/<result_key>``."""
@@ -191,10 +217,18 @@ class RunView(BaseView):
     def __init__(self, app, run_idx: int, title: Optional[str] = None):
         self.run_idx = int(run_idx)
         super().__init__(app, title=title)
-        self.run = self.data_manager.get_data(self.run_path)
-        self.build_ui()
-        self.title(f"{title or self.window_title} - run{self.run_idx:02d}")
-        self.on_run_loaded()
+        try:
+            self.run = self.data_manager.get_data(self.run_path)
+            self.build_ui()
+            self.title(f"{title or self.window_title} - run{self.run_idx:02d}")
+            self.on_run_loaded()
+        except Exception:
+            self.app.unregister_child(self)
+            try:
+                self.destroy()
+            except tk.TclError:
+                pass
+            raise
 
     @classmethod
     def from_context(cls, app, ctx: TreeContext):

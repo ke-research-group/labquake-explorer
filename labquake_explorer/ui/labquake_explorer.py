@@ -234,7 +234,7 @@ class LabquakeExplorer:
             self.child_windows.append(view)
 
     def unregister_child(self, view: tk.Toplevel) -> None:
-        if view in self.child_windows:
+        while view in self.child_windows:
             self.child_windows.remove(view)
 
     def run_action(self, action: Action, ctx: TreeContext) -> None:
@@ -363,12 +363,11 @@ class LabquakeExplorer:
         if type(data) is np.ndarray:
             print(f"plotting {item}")
             view = SimplePlotView(self)
-            self.set_window_icon(view)
             view.ax.plot(data)
             view.ax.set_xlabel('index')
             view.ax.set_ylabel(item)
             view.ax.set_title(path.replace('/[', '['))
-            self.child_windows.append(view)
+            view.canvas.draw_idle()
         elif type(data) is dict:
             print('dict')
         elif type(data) is list:
