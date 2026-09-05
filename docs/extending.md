@@ -79,7 +79,9 @@ seconds relative to `event_time`.
 | `pre_trend`, `post_trend`, `pre_trend_x`, `post_trend_x` | fit records of the four trend lines |
 
 Version 1 dicts (six indices, absolute `stress_drop`) are still read; the post
-range falls back to defaults.
+range falls back to defaults. "Apply to All Events" converts the current
+windows (relative times) to picks on every event of the run and saves each
+result, so one carefully placed set of windows can be propagated.
 
 ### `czm_parms` (CZMFitterView)
 
