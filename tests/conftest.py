@@ -3,8 +3,7 @@ from tkinter import messagebox
 
 import pytest
 
-from labquake_explorer.ui.labquake_explorer import LabquakeExplorer
-from tests.synthetic import make_experiment
+from tests.synthetic import make_experiment, make_experiment_with_strain
 
 
 @pytest.fixture(scope="session")
@@ -45,14 +44,21 @@ def experiment():
 
 
 @pytest.fixture
-def app(tk_root, experiment):
-    """A LabquakeExplorer with a synthetic experiment loaded into its tree."""
-    data, truth = experiment
+def experiment_with_strain():
+    data, truth = make_experiment_with_strain(recurrence=12.0)
+    return data, truth
+
+
+def _make_app(tk_root, data, truth):
+    from labquake_explorer.ui.labquake_explorer import LabquakeExplorer
     application = LabquakeExplorer(tk_root)
     application.data_manager.data = data
     application.refresh_tree()
     application.truth = truth
-    yield application
+    return application
+
+
+def _close_app(application):
     for window in list(application.child_windows):
         try:
             window.destroy()
@@ -63,3 +69,19 @@ def app(tk_root, experiment):
         application.data_tree.destroy()
     except tk.TclError:
         pass
+
+
+@pytest.fixture
+def app(tk_root, experiment):
+    """A LabquakeExplorer with a synthetic experiment loaded into its tree."""
+    application = _make_app(tk_root, *experiment)
+    yield application
+    _close_app(application)
+
+
+@pytest.fixture
+def app_with_strain(tk_root, experiment_with_strain):
+    """Same as ``app`` but every event carries a synthetic strain block."""
+    application = _make_app(tk_root, *experiment_with_strain)
+    yield application
+    _close_app(application)

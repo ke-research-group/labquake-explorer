@@ -162,3 +162,63 @@ def make_experiment(name: str = "p0001", n_runs: int = 1, window: float = 5.0, *
         runs.append(run)
         truth.append(ssr)
     return {"name": name, "runs": runs}, truth
+
+
+# ----------------------------------------------------------------------------
+# strain-gauge array (for CZM fitter / arrival picker tests)
+# ----------------------------------------------------------------------------
+def add_strain(
+    event: dict,
+    n_channels: int = 16,
+    fs: float = 2.0e5,
+    half_window: float = 0.01,
+    rupture_speed: float = 1000.0,
+    rise_time: float = 2.0e-5,
+    amplitude: float = 0.5,
+    locations_mm: np.ndarray | None = None,
+    noise: float = 0.0,
+    seed: int = 0,
+) -> dict:
+    """Attach a synthetic ``strain`` block to an event dict and return it.
+
+    Each channel shows a smoothed step (tanh) arriving at
+    ``event_time + (location - location[0]) / rupture_speed``; channel 14 has
+    the opposite sign so it can stand in for Eyy.  Layout matches what
+    EventProcessor produces: ``strain.original.time/raw`` at full rate and a
+    100x downsampled ``strain.time/raw``.
+    """
+    rng = np.random.default_rng(seed)
+    if locations_mm is None:
+        locations_mm = 10.5 + 12.0 * (np.arange(n_channels) // 2)
+    locations_mm = np.asarray(locations_mm, dtype=float)
+    event_time = float(event["event_time"])
+    n = int(round(2 * half_window * fs)) + 1
+    tt = event_time - half_window + np.arange(n) / fs
+    arrivals = event_time + (locations_mm - locations_mm[0]) * 1e-3 / rupture_speed
+    raw = np.zeros((n_channels, n))
+    for i in range(n_channels):
+        sign = -1.0 if i == 14 else 1.0
+        raw[i] = sign * amplitude * 0.5 * (1.0 + np.tanh((tt - arrivals[i]) / rise_time))
+        if noise:
+            raw[i] += rng.normal(0.0, noise, n)
+    event["strain"] = {
+        "filename": "synthetic.tpc5",
+        "filename_downsampled": "",
+        "time": tt[::100].copy(),
+        "raw": raw[:, ::100].copy(),
+        "original": {"time": tt, "raw": raw},
+    }
+    event["strain_truth"] = {
+        "arrival_times": arrivals,
+        "locations_mm": locations_mm,
+        "rupture_speed": rupture_speed,
+    }
+    return event["strain"]
+
+
+def make_experiment_with_strain(**kwargs) -> tuple[dict, list[StickSlipRun]]:
+    data, truth = make_experiment(**kwargs)
+    for run in data["runs"]:
+        for event in run["events"]:
+            add_strain(event)
+    return data, truth
