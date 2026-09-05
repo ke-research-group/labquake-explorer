@@ -8,11 +8,13 @@ setup(
         "numpy",
         "h5py",
         "matplotlib",
+        "scipy",
+        "pandas",
     ],
     entry_points={
         'console_scripts': [
             'labquake-explorer=labquake_explorer.main:main',
         ],
     },
-    python_requires='>=3.7',
+    python_requires='>=3.10',
 )
