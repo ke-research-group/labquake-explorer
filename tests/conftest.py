@@ -40,7 +40,7 @@ def no_dialogs(monkeypatch):
 
 @pytest.fixture
 def experiment():
-    data, truth = make_experiment()
+    data, truth = make_experiment(recurrence=12.0)
     return data, truth
 
 
