@@ -98,7 +98,7 @@ class EventProcessor:
             tt = ts[idx_before:idx_after]
 
             idx_before_strain = np.argmin(np.abs(run_data['strain']['time'] - time_before))
-            idx_after_strain = np.argmin(np.abs(run_data['strain']['time'] - time_before))
+            idx_after_strain = np.argmin(np.abs(run_data['strain']['time'] - time_after))
             idx_event_strain = range(idx_before_strain, idx_after_strain + 1)
             
             # Extract strain data

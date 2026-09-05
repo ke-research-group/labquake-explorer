@@ -163,36 +163,45 @@ class DataManager:
         return event
 
     def get_data(self, path: str) -> Any:
-        """Get data at specified path"""
-        if not path:  # Handle empty path
-            return current
+        """Get data at specified path (e.g. 'runs/[0]/events/[3]/shear_stress')."""
         if not self.data:
             raise ValueError("No data loaded")
-        parts = [p for p in path.split('/') if p]  # Split and filter out empty parts
         current = self.data
-        for key in parts:
-            if key.startswith('[') and key.endswith(']'):
-                key = int(key[1:-1])  # Convert list index to integer
+        for key in self._split(path):
             current = current[key]
         return current
 
+    @staticmethod
+    def _split(path: str) -> list:
+        parts = []
+        for part in path.replace("\\", "/").split("/"):
+            if not part:
+                continue
+            if part.startswith('[') and part.endswith(']'):
+                parts.append(int(part[1:-1]))
+            else:
+                parts.append(part)
+        return parts
+
     def set_data(self, path: str, value: Any, add_key: bool = False) -> None:
-        """Set data at specified path"""
+        """Set data at specified path.
+
+        With ``add_key=True`` missing intermediate dictionaries are created;
+        otherwise a missing parent raises KeyError.
+        """
         if not self.data:
             raise ValueError("No data loaded")
-            
-        parts = path.split('/')
+        parts = self._split(path)
+        if not parts:
+            raise ValueError("Cannot set the root")
         current = self.data
-        
-        for i, part in enumerate(parts[:-1]):
-            if part[0] == '[' and part[-1] == ']':
-                part = int(part[1:-1])
+        for part in parts[:-1]:
+            if isinstance(current, dict) and part not in current:
+                if not add_key:
+                    raise KeyError(f"Key '{part}' not found in path '{path}'")
+                current[part] = {}
             current = current[part]
-            
-        last_key = parts[-1]
-        if last_key[0] == '[' and last_key[-1] == ']':
-            last_key = int(last_key[1:-1])
-        current[last_key] = value
+        current[parts[-1]] = value
 
     def delete_data(self, path: str) -> None:
         """Delete data at specified path
