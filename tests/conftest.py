@@ -1,4 +1,5 @@
 import tkinter as tk
+from tkinter import messagebox
 
 import pytest
 
@@ -18,6 +19,23 @@ def tk_root():
         root.destroy()
     except tk.TclError:
         pass
+
+
+@pytest.fixture(autouse=True)
+def no_dialogs(monkeypatch):
+    """Never block on a modal dialog under pytest; errors become failures."""
+    calls = []
+
+    def fail(title, message, **kwargs):
+        calls.append((title, message))
+        raise AssertionError(f"dialog {title!r}: {message}")
+
+    monkeypatch.setattr(messagebox, "showerror", fail)
+    monkeypatch.setattr(messagebox, "showwarning", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(messagebox, "showinfo", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(messagebox, "askokcancel", lambda *a, **k: True)
+    monkeypatch.setattr(messagebox, "askyesno", lambda *a, **k: True)
+    return calls
 
 
 @pytest.fixture

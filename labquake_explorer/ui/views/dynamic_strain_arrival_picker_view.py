@@ -8,8 +8,15 @@ import numpy as np
 import scipy
 from scipy import signal
 import warnings
+from labquake_explorer.ui.actions import register_view
+from labquake_explorer.ui.context import EVENT
 
+@register_view("Pick Arrivals", kinds=[EVENT], order=20)
 class DynamicStrainArrivalPickerView(tk.Toplevel):
+    @classmethod
+    def from_context(cls, app, ctx):
+        return cls(app, ctx.run_idx, ctx.event_idx)
+
     def __init__(self, parent, run_idx, event_idx):
         self.parent = parent
         super().__init__(self.parent.root)

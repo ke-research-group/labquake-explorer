@@ -7,9 +7,16 @@ from matplotlib.figure import Figure
 import numpy as np
 from scipy import stats
 import os
+from labquake_explorer.ui.actions import register_view
+from labquake_explorer.ui.context import EVENT
 
 
+@register_view("Analyze Event", kinds=[EVENT], order=10)
 class EventAnalyzerView(tk.Toplevel):
+    @classmethod
+    def from_context(cls, app, ctx):
+        return cls(app, ctx.run_idx, ctx.event_idx)
+
     def __init__(self, parent, run_idx, event_idx, item_y="shear_stress", item_x="displacement"):
         self.parent = parent
         super().__init__(self.parent.root)

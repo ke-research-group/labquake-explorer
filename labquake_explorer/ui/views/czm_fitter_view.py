@@ -7,10 +7,17 @@ from scipy import signal, optimize
 from matplotlib.widgets import Cursor
 from labquake_explorer.utils.cohesive_crack import CohesiveCrack
 from labquake_explorer.data.data_processor import DataProcessor
+from labquake_explorer.ui.actions import register_view
+from labquake_explorer.ui.context import EVENT
 
 
 
+@register_view("Fit Cohesive Zone Model", kinds=[EVENT], order=30)
 class CZMFitterView(tk.Toplevel):
+    @classmethod
+    def from_context(cls, app, ctx):
+        return cls(app, ctx.run_idx, ctx.event_idx)
+
     def __init__(self, parent, run_idx, event_idx):
         self.parent = parent
         super().__init__(self.parent.root)

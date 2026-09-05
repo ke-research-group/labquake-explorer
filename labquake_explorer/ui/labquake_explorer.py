@@ -9,11 +9,16 @@ from typing import Optional, List, Dict, Any
 
 from labquake_explorer.data.data_manager import DataManager
 from labquake_explorer.utils.config import LabquakeExplorerConfig
-from labquake_explorer.ui.views import (
-    SimplePlotView, PointsSelectorView, IndexPickerView,
-    SlopeAnalyzerView, DynamicStrainArrivalPickerView, CZMFitterView,
-    EventAnalyzerView
+from labquake_explorer.ui.context import (
+    TreeContext, resolve_context,
+    ARRAY, RUN_ARRAY, EVENT_ARRAY, EVENT_INDICES, STRING,
 )
+from labquake_explorer.ui.actions import Action, actions_for, register_action
+# Importing the views package registers every view's context-menu action.
+from labquake_explorer.ui.views import (
+    SimplePlotView, PointsSelectorView, IndexPickerView, SlopeAnalyzerView,
+)
+
 
 class LabquakeExplorer:
     def __init__(self, root: tk.Tk):
@@ -31,14 +36,6 @@ class LabquakeExplorer:
         self.create_widgets()
         self.setup_bindings()
 
-        # debug
-        # file_path = Path("/Users/hueyke/Library/CloudStorage/SynologyDrive-KeResearch-data/PSU/Gc-dataset/p5993ec.npz")
-        # file_path = Path("smb://KeResearchNAS._smb._tcp.local/data/PSU/Gc-dataset/p5993ec.npz")
-        # self.data_manager.load_file(file_path)
-        # self.save_button.configure(state="normal")
-        # self.refresh_tree()
-        # print(f"File loaded: {file_path}")
-
     def setup_window(self) -> None:
         screen_height = self.root.winfo_screenheight()
         window_height = screen_height - (self.config.WINDOW_GAP * 3)
@@ -55,34 +52,8 @@ class LabquakeExplorer:
         self.root.focus_force()
 
     def create_widgets(self) -> None:
-        self.create_context_menus()
         self.create_buttons()
         self.init_data_tree()
-
-    def create_context_menus(self) -> None:
-        self.run_menu = tk.Menu(self.root, tearoff=0)
-        self.run_menu.add_command(label="Pick Events", command=self.pick_events)
-
-        self.event_menu = tk.Menu(self.root, tearoff=0)
-        self.event_menu.add_command(label="Analyze Event", command=self.analyze_event)
-        self.event_menu.add_command(label="Pick Arrivals", command=self.pick_strain_array_arrivals)
-        self.event_menu.add_command(label="Fit Cohesive Zone Model", command=self.fit_cohesive_zone_model)
-
-        self.array_menu = tk.Menu(self.root, tearoff=0)
-        self.array_menu.add_command(label="Pick Indices", command=self.pick_indices)
-        self.array_menu.add_command(label="Extract Slopes", command=self.extract_slope)
-        self.array_menu.add_command(label="Extract Run", command=self.pick_run)
-
-        self.event_indices_menu = tk.Menu(self.root, tearoff=0)
-        self.event_indices_menu.add_command(label="Extract Events", command=self.extract_events)
-
-        self.event_array_menu = tk.Menu(self.root, tearoff=0)
-        self.event_array_menu.add_command(label="Pick Indices", command=self.pick_indices)
-        self.event_array_menu.add_command(label="Extract Slopes", command=self.extract_slope)
-        self.event_array_menu.add_command(label="Min/Max", command=self.min_max)
-
-        self.string_menu = tk.Menu(self.root, tearoff=0)
-        self.string_menu.add_command(label="Edit String", command=self.edit_string)
 
     def create_buttons(self) -> None:
         buttons = [
@@ -177,10 +148,6 @@ class LabquakeExplorer:
 
     def build_tree(self, data: Dict[str, Any], parent_iid: str) -> None:
         """Recursively build tree view from data"""
-        parent_label = ""
-        if parent_iid:
-            parent_item = self.data_tree.item(parent_iid)
-            parent_label = parent_item["text"].split(":")[0].strip()
         if isinstance(data, dict):
             for key, value in data.items():
                 label = self.format_tree_label(key, value)
@@ -237,16 +204,58 @@ class LabquakeExplorer:
             parent_iid = self.data_tree.parent(parent_iid)
         i = clean_up_text(self.data_tree.item(item, "text"))
         return os.path.join(*node, i), i
-    
 
-    def pick_events(self) -> None:
-        path, item = self.get_full_path()
+    def find_item(self, target_path: str, item: str = "") -> Optional[str]:
+        """Find the tree item id whose full path equals ``target_path``."""
+        for child in self.data_tree.get_children(item):
+            if self.get_full_path(child)[0] == target_path:
+                return child
+            found = self.find_item(target_path, child)
+            if found:
+                return found
+        return None
+
+    def context_at(self, item=None) -> TreeContext:
+        """Resolve the selected (or given) tree item into a TreeContext."""
+        path, _ = self.get_full_path(item)
+        try:
+            value = self.data_manager.get_data(path)
+        except Exception:
+            value = None
+        return resolve_context(path, value)
+
+    # ------------------------------------------------------------------
+    # child window bookkeeping
+    # ------------------------------------------------------------------
+    def register_child(self, view: tk.Toplevel) -> None:
+        """Track a child window: set its icon and keep it for cleanup."""
+        self.set_window_icon(view)
+        if view not in self.child_windows:
+            self.child_windows.append(view)
+
+    def unregister_child(self, view: tk.Toplevel) -> None:
+        if view in self.child_windows:
+            self.child_windows.remove(view)
+
+    def run_action(self, action: Action, ctx: TreeContext) -> None:
+        try:
+            action.run(self, ctx)
+        except Exception as e:
+            messagebox.showerror("Error", f"{action.label} failed: {e}")
+            raise
+
+    # ------------------------------------------------------------------
+    # context-menu actions that are commands rather than views
+    # ------------------------------------------------------------------
+    @register_action("Pick Events", kinds=[RUN_ARRAY], order=10)
+    def pick_events(self, ctx: TreeContext) -> None:
+        path = ctx.path
         y = self.data_manager.get_data(path)
         x = np.arange(len(y))
-        save_path = path[:path.rfind('/')+1] + "event_indices"
+        save_path = f"{ctx.parent_path}/event_indices"
         parent_id = self.data_tree.parent(self.data_tree.selection()[0])
         if self.has_child_named(parent_id, "event_indices"):
-            picked_idx = self.data_manager.get_data(self.get_full_path(parent_id)[0] + "/event_indices")
+            picked_idx = self.data_manager.get_data(save_path)
         else:
             picked_idx = []
         def save_and_refresh(data):
@@ -254,103 +263,38 @@ class LabquakeExplorer:
             self.refresh_tree()
         view = PointsSelectorView(self, x, y, picked_idx, add_remove_enabled=True, 
                                  callback=save_and_refresh,
-                                 xlabel='index', ylabel=item, title=path)
-        self.set_window_icon(view)
-        self.child_windows.append(view)
+                                 xlabel='index', ylabel=ctx.key, title=path)
+        self.register_child(view)
 
-    def min_max(self):
-        path, item = self.get_full_path()
+    @register_action("Min/Max", kinds=[EVENT_ARRAY], order=30)
+    def min_max(self, ctx: TreeContext) -> None:
+        path = ctx.path
         y = self.data_manager.get_data(path)
         x = np.arange(len(y))
         idx_min = np.argmin(y)
         idx_max = np.argmax(y)
         picked_idx = [idx_max, idx_min]
         view = PointsSelectorView(self, x, y, picked_idx, add_remove_enabled=False,
-                                 xlabel='index', ylabel=item, title=path)
-        self.set_window_icon(view)
-        self.child_windows.append(view)
+                                 xlabel='index', ylabel=ctx.key, title=path)
+        self.register_child(view)
 
+    @register_action("Pick Indices", kinds=[ARRAY, RUN_ARRAY, EVENT_ARRAY], order=20)
+    def pick_indices(self, ctx: TreeContext) -> None:
+        view = IndexPickerView(self, item_y=ctx.path)
+        self.register_child(view)
 
-    def pick_strain_array_arrivals(self):
-        path, item = self.get_full_path()
-        # Extract index between 'runs/[' and the next ']'
-        run_start = path.find('runs/[') + 6
-        run_end = path.find(']', run_start)
-        run_idx = int(path[run_start:run_end])
+    @register_action("Extract Slopes", kinds=[ARRAY, RUN_ARRAY, EVENT_ARRAY], order=21)
+    def extract_slope(self, ctx: TreeContext) -> None:
+        view = SlopeAnalyzerView(self, item_y=ctx.path)
+        self.register_child(view)
 
-        # Extract index between 'events/[' and the next ']'
-        event_start = path.find('events/[') + 8
-        event_end = path.find(']', event_start)
-        event_idx = int(path[event_start:event_end])
-
-        view = DynamicStrainArrivalPickerView(self, run_idx, event_idx)
-        self.set_window_icon(view)
-        self.child_windows.append(view)
-
-    def fit_cohesive_zone_model(self):
-        path, item = self.get_full_path()
-        # Extract index between 'runs/[' and the next ']'
-        run_start = path.find('runs/[') + 6
-        run_end = path.find(']', run_start)
-        run_idx = int(path[run_start:run_end])
-
-        # Extract index between 'events/[' and the next ']'
-        event_start = path.find('events/[') + 8
-        event_end = path.find(']', event_start)
-        event_idx = int(path[event_start:event_end])
-
-        view = CZMFitterView(self, run_idx, event_idx)
-        self.set_window_icon(view)
-        self.child_windows.append(view)
-
-    def analyze_event(self):
-        path, item = self.get_full_path()
-        # Extract index between 'runs/[' and the next ']'
-        run_start = path.find('runs/[') + 6
-        run_end = path.find(']', run_start)
-        run_idx = int(path[run_start:run_end])
-
-        # Extract index between 'events/[' and the next ']'
-        event_start = path.find('events/[') + 8
-        event_end = path.find(']', event_start)
-        event_idx = int(path[event_start:event_end])
-
-        view = EventAnalyzerView(self, run_idx, event_idx)
-        self.set_window_icon(view)
-        self.child_windows.append(view)
-
-    def pick_indices(self):
-        item = self.data_tree.selection()[0]
-        view = IndexPickerView(self, item_y=self.get_full_path(item)[0])
-        self.set_window_icon(view)
-        self.child_windows.append(view)
-
-    def extract_slope(self):
-        item = self.data_tree.selection()[0]
-        view = SlopeAnalyzerView(self, item_y=self.get_full_path(item)[0])
-        self.set_window_icon(view)
-        self.child_windows.append(view)
-
-    def pick_run(self):
-        item_id = self.data_tree.selection()[0]
-        item_path, item_name = self.get_full_path(item_id)
-
-        y = self.get_data(self.data, item_path)
-        x = np.arange(len(y))
-        picked_idx = [int(len(y)/3), int(len(y)/3*2)]
-        view = PointsSelectorView(self, x, y, picked_idx, add_remove_enabled=False, 
-                                 callback=lambda idx: self.extract_run(idx),
-                                 xlabel='index', ylabel=item_name, title=item_path)
-        self.set_window_icon(view)
-        self.child_windows.append(view)
-
-    def extract_events(self):
+    @register_action("Extract Events", kinds=[EVENT_INDICES], order=10)
+    def extract_events(self, ctx: TreeContext) -> None:
         """Handle UI for event extraction and delegate to EventProcessor"""
-        # Get selected item and paths
         item_id = self.data_tree.selection()[0]
         parent = self.data_tree.parent(item_id)
-        event_indices_path = self.get_full_path()[0]
-        parent_path = self.get_full_path(parent)[0]
+        event_indices_path = ctx.path
+        parent_path = ctx.parent_path
         events_path = f"{parent_path}/events"
 
         # Check for existing events
@@ -367,7 +311,7 @@ class LabquakeExplorer:
         window = simpledialog.askfloat(
             'Set event time window length', 
             'Please set the duration before and after the event to be extracted.',
-            initialvalue=5
+            initialvalue=self.config.DEFAULT_WINDOW_SIZE
         )
         if window is None:
             print('Event extraction aborted.')
@@ -395,9 +339,10 @@ class LabquakeExplorer:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to extract events: {str(e)}")
 
-    def edit_string(self):
+    @register_action("Edit String", kinds=[STRING], order=10)
+    def edit_string(self, ctx: TreeContext) -> None:
         """Edit a string value in the data structure"""
-        path, item = self.get_full_path()
+        path = ctx.path
         data = self.data_manager.get_data(path)
 
         new_string = simpledialog.askstring('Edit String', f'{path}', initialvalue=data)
@@ -407,7 +352,10 @@ class LabquakeExplorer:
         
         self.data_manager.set_data(path, new_string)
         self.refresh_tree()
-            
+
+    # ------------------------------------------------------------------
+    # tree interaction
+    # ------------------------------------------------------------------
     def on_double_click(self, event):
         path, item = self.get_full_path()
         print(f"Double-clicked on item: {path}")
@@ -432,6 +380,17 @@ class LabquakeExplorer:
         if self.active_context_menu:
             self.active_context_menu.unpost()
 
+    def build_context_menu(self, ctx: TreeContext) -> Optional[tk.Menu]:
+        """Build a context menu from the registered actions for ``ctx.kind``."""
+        actions = actions_for(ctx.kind)
+        if not actions:
+            return None
+        menu = tk.Menu(self.root, tearoff=0)
+        for action in actions:
+            menu.add_command(label=action.label,
+                             command=lambda a=action: self.run_action(a, ctx))
+        return menu
+
     def on_right_click(self, event):
         # Clear previous menu
         if self.active_context_menu:
@@ -445,36 +404,8 @@ class LabquakeExplorer:
         if not item:
             return
 
-        # data-structure-specific context menus
-        item_label = self.data_tree.item(item)['text'].split(':')
-        parent = self.data_tree.parent(item)
-        parent_name = self.data_tree.item(parent)['text'].split(':')[0] if parent else ""
-        grandparent = self.data_tree.parent(parent)
-        grandparent_name = self.data_tree.item(grandparent)['text'].split(':')[0] if grandparent else ""
-
-        if grandparent_name == "runs":
-            if item_label[0] == "event_indices":
-                self.active_context_menu = self.event_indices_menu
-            elif len(item_label) > 1 and "array" in item_label[1]:
-                self.active_context_menu = self.run_menu
-        elif grandparent_name == "events":
-            if len(item_label) > 1 and "array" in item_label[1]:
-                self.active_context_menu = self.event_array_menu
-            else:
-                self.active_context_menu = self.event_menu
-        elif parent_name == "events":
-            self.active_context_menu = self.event_menu
-
-        # general purpose context menus
-        if not self.active_context_menu:
-            path, _ = self.get_full_path()
-            data = self.data_manager.get_data(path)
-            if isinstance(data, str):
-                self.active_context_menu = self.string_menu
-            elif len(item_label) > 1 and "array" in item_label[1] and parent_name == "":
-                self.active_context_menu = self.array_menu
-
-        # post context menu
+        ctx = self.context_at(item)
+        self.active_context_menu = self.build_context_menu(ctx)
         if self.active_context_menu:
             self.active_context_menu.post(event.x_root, event.y_root)
     
