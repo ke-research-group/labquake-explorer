@@ -30,6 +30,7 @@ def test_context_menus_from_registry(app):
     assert labels(app, "name")[1] == ["Edit String"]
     assert labels(app, "runs/[0]/name")[1] == ["Edit String"]
     assert labels(app, "runs")[1] == []
+    assert "Inter-event Metrics" in labels(app, "runs/[0]")[1]
 
 
 def test_run_action_opens_registered_view(app):
