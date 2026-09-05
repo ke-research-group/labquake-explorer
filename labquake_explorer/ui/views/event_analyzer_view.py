@@ -4,7 +4,7 @@ import matplotlib.patches as patches
 import numpy as np
 
 from labquake_explorer.analysis.event_metrics import (
-    EventPicks, analyze_event, picks_from_result,
+    EventPicks, analyze_event, picks_from_result, picks_from_windows, windows_from_result,
 )
 from labquake_explorer.analysis.fitting import METHODS
 from labquake_explorer.ui.actions import register_view
@@ -63,6 +63,9 @@ class EventAnalyzerView(EventView):
         self.build_event_selector(event_selection_frame, row=0, column=0)
         self.save_button = ttk.Button(event_selection_frame, text="Save Event", command=self.save_event, width=15)
         self.save_button.grid(row=1, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
+        self.apply_all_button = ttk.Button(event_selection_frame, text="Apply to All Events",
+                                           command=self.apply_to_all_events, width=18)
+        self.apply_all_button.grid(row=2, column=0, columnspan=2, padx=5, pady=2, sticky="ew")
 
         data_frame = ttk.LabelFrame(self, text="Data Fields")
         data_frame.grid(row=0, column=1, rowspan=2, columnspan=2, padx=5, pady=5, sticky="nsew")
@@ -403,6 +406,56 @@ class EventAnalyzerView(EventView):
             self.canvas.draw()
 
     # ---------------------------------------------------------------- save
+    def apply_to_all_events(self, confirm=True):
+        """Apply the current relative-time windows to every event of the run and save.
+
+        Returns the number of events written.  Events whose fields are missing
+        are skipped.
+        """
+        if self.result is None:
+            self.update_analysis()
+        windows = windows_from_result(self.result or {})
+        if windows is None:
+            return 0
+        n_events = self.n_events()
+        if confirm and not messagebox.askokcancel(
+                "Apply to all events",
+                f"Recompute and overwrite event_analysis for all {n_events} events of run {self.run_idx} "
+                f"using the current windows?", icon=messagebox.WARNING):
+            return 0
+        written = 0
+        for j in range(n_events):
+            event = self.data_manager.get_data(f"{self.run_path}/events/[{j}]")
+            try:
+                t = np.asarray(event['time'], dtype=float)
+                x = np.asarray(self.get_field_of(event, self.item_x), dtype=float)
+                y = np.asarray(self.get_field_of(event, self.item_y), dtype=float)
+                event_time = float(event['event_time'])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not (t.size and t.size == x.size == y.size):
+                continue
+            picks = picks_from_windows(t - event_time, windows["loading"], windows["unloading"],
+                                       windows["rupture"], windows["post"])
+            result = analyze_event(t, x, y, event_time, picks, method=self.fit_method,
+                                   x_field=self.item_x or "", y_field=self.item_y or "")
+            self.data_manager.set_data(f"{self.run_path}/events/[{j}]/event_analysis", result, True)
+            event['event_analysis'] = result
+            written += 1
+        self.app.refresh_tree()
+        self.set_event(self.event_idx)
+        return written
+
+    @staticmethod
+    def get_field_of(event, path):
+        current = event
+        for part in (path or "").split('/'):
+            if isinstance(current, dict) and part in current:
+                current = current[part]
+            else:
+                raise KeyError(path)
+        return current
+
     def save_event(self):
         """Save the analysis results to the data manager"""
         if self.result is None:

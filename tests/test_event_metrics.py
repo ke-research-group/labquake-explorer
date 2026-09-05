@@ -122,3 +122,20 @@ def test_picks_from_saved_results_v1_and_v2():
     assert picks_from_result(v2, 5) is None       # out of range
     assert picks_from_result({"x": 1}, 10) is None
     assert picks_from_result(None, 10) is None
+
+
+def test_picks_from_windows_and_back(event_and_truth):
+    from labquake_explorer.analysis.event_metrics import picks_from_windows, windows_from_result
+    event, truth = event_and_truth
+    t_rel = event["time"] - event["event_time"]
+    picks = picks_from_windows(t_rel, (-4.0, -1.0), (-0.002, 0.002), (-0.001, 0.001), (0.5, 2.5))
+    assert t_rel[picks.loading[0]] == pytest.approx(-4.0, abs=1e-3)
+    assert t_rel[picks.post[1]] == pytest.approx(2.5, abs=1e-3)
+    res = analyze_event(event["time"], event["displacement"], event["shear_stress"], event["event_time"], picks)
+    windows = windows_from_result(res)
+    assert windows["loading"] == pytest.approx((-4.0, -1.0), abs=1e-3)
+    assert windows["post"] == pytest.approx((0.5, 2.5), abs=1e-3)
+    assert windows_from_result({"version": 1}) is None
+    assert picks_from_windows(t_rel, (-4, -1), (-1, 0), (0, 1)).post is None
+    with pytest.raises(ValueError):
+        picks_from_windows([], (-4, -1), (-1, 0), (0, 1))

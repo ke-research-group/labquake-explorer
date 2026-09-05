@@ -212,3 +212,37 @@ def picks_from_result(result: dict, n: int) -> Optional[EventPicks]:
     if any(i >= n or i < 0 for i in picks.to_list()):
         return None
     return picks
+
+
+def picks_from_windows(t_rel, loading, unloading, rupture, post=None) -> EventPicks:
+    """Convert relative-time windows (seconds from event_time) to sample picks.
+
+    Each endpoint snaps to the nearest sample of ``t_rel``.  Used to apply one
+    event's windows to other events of the same run.
+    """
+    t_rel = np.asarray(t_rel, dtype=float)
+    if t_rel.size == 0:
+        raise ValueError("empty event")
+
+    def nearest(value):
+        return int(np.argmin(np.abs(t_rel - float(value))))
+
+    def pair(window):
+        return (nearest(window[0]), nearest(window[1]))
+
+    return EventPicks(pair(loading), pair(unloading), pair(rupture),
+                      None if post is None else pair(post))
+
+
+def windows_from_result(result: dict) -> Optional[dict]:
+    """The four relative-time windows stored in a version-2 result, or None."""
+    try:
+        windows = {
+            "loading": tuple(result["loading_window"]),
+            "unloading": tuple(result["unloading_window"]),
+            "rupture": tuple(result["rupture_window"]),
+            "post": tuple(result["post_window"]) if result.get("post_window") else None,
+        }
+    except (KeyError, TypeError):
+        return None
+    return windows

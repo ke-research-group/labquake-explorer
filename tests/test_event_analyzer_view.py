@@ -108,3 +108,32 @@ def test_close_unregisters(app):
     assert v in app.child_windows
     v.on_close()
     assert v not in app.child_windows
+
+
+def test_apply_to_all_events_uses_relative_windows(app, view):
+    truth = app.truth[0]
+    for point, t_rel in ((0, -4.0), (1, -1.0), (4, -0.001), (5, 0.001), (6, 0.5), (7, 2.5)):
+        view.move_point(point, idx_at(view, t_rel))
+    n = view.apply_to_all_events(confirm=False)
+    events = app.data_manager.get_data("runs/[0]/events")
+    assert n == len(events)
+    for event in events:
+        r = event["event_analysis"]
+        assert r["version"] == RESULT_VERSION
+        assert r["loading_window"] == pytest.approx([-4.0, -1.0], abs=2e-3)
+        assert r["stress_drop_trend"] == pytest.approx(truth.stress_drop, abs=1e-6)
+        assert r["displacement"] == pytest.approx(truth.slip, abs=3e-3)
+    # the view is still on the same event, with the saved picks
+    assert view.event_idx == 1
+    assert view.picked_idx == (events[1]["event_analysis"]["loading_indices"]
+                               + events[1]["event_analysis"]["unloading_indices"]
+                               + [events[1]["event_analysis"]["rupture_start_index"],
+                                  events[1]["event_analysis"]["rupture_end_index"]]
+                               + events[1]["event_analysis"]["post_indices"])
+
+
+def test_apply_to_all_events_cancelled(app, view, monkeypatch):
+    from tkinter import messagebox
+    monkeypatch.setattr(messagebox, "askokcancel", lambda *a, **k: False)
+    assert view.apply_to_all_events() == 0
+    assert "event_analysis" not in app.data_manager.get_data("runs/[0]/events/[0]")
