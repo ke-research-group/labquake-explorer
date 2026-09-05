@@ -2,22 +2,32 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import matplotlib.patches as patches
 import numpy as np
-from scipy import stats
 
+from labquake_explorer.analysis.event_metrics import (
+    EventPicks, analyze_event, picks_from_result,
+)
+from labquake_explorer.analysis.fitting import METHODS
 from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import EVENT
 from labquake_explorer.ui.views.base import EventView
 
+FIT_METHOD_LABELS = {"ols": "OLS", "theilsen": "Theil-Sen"}
+MARKER_COLORS = ['#33CCC4', '#33CCC4', '#CC3366', '#CC3366',
+                 '#33CC66', '#33CC66', '#9966CC', '#9966CC']
+
 
 @register_view("Analyze Event", kinds=[EVENT], order=10)
 class EventAnalyzerView(EventView):
-    """Pick loading/unloading ranges and rupture start/end on one event.
+    """Pick ranges on one event and compute its mechanical metrics.
 
-    Six draggable markers snapped to samples:
-      0,1  loading range   -> loading stiffness (linear regression of Y on X)
-      2,3  unloading range -> unloading stiffness
-      4,5  rupture start/end -> stress drop and displacement
-    Results are saved under ``event['event_analysis']``.
+    Eight draggable markers snapped to samples:
+      0,1  loading range    -> loading stiffness dY/dX; also the pre-event trend Y(t)
+      2,3  unloading range  -> unloading stiffness dY/dX
+      4,5  rupture start/end -> stress drop Y4-Y5 and slip X5-X4
+      6,7  post-event range -> post-event trend Y(t)
+    The trend-extrapolated drop is pre-trend(t_event) - post-trend(t_event).
+    Numbers come from :func:`labquake_explorer.analysis.event_metrics.analyze_event`
+    and are saved under ``event['event_analysis']`` (schema version 2).
     """
 
     window_title = "Event Analyzer"
@@ -26,8 +36,9 @@ class EventAnalyzerView(EventView):
     def __init__(self, app, run_idx, event_idx, item_y="shear_stress", item_x="displacement"):
         self.item_y = item_y
         self.item_x = item_x
-        self.data_x = []
-        self.data_y = []
+        self.data_x = np.array([])
+        self.data_y = np.array([])
+        self.data_t = np.array([])
         self.markers = []
         self.current_artist = None
         self.currently_dragging = False
@@ -35,7 +46,9 @@ class EventAnalyzerView(EventView):
         self.picked_idx = []
         self.loading_line = None
         self.rupture_line = None
+        self.post_line = None
         self.rupture_span = None
+        self.result = None
         super().__init__(app, run_idx, event_idx)
 
     # ------------------------------------------------------------------ ui
@@ -53,29 +66,43 @@ class EventAnalyzerView(EventView):
 
         data_frame = ttk.LabelFrame(self, text="Data Fields")
         data_frame.grid(row=0, column=1, rowspan=2, columnspan=2, padx=5, pady=5, sticky="nsew")
-        tk.Label(data_frame, text="X Data:", width=8, anchor="e").grid(row=0, column=0, padx=5, pady=5, sticky="e")
+        tk.Label(data_frame, text="X Data:", width=8, anchor="e").grid(row=0, column=0, padx=5, pady=3, sticky="e")
         self.data_x_combo = ttk.Combobox(data_frame, state="readonly", width=20)
-        self.data_x_combo.grid(row=0, column=1, padx=5, pady=5, sticky="w")
-        tk.Label(data_frame, text="Y Data:", width=8, anchor="e").grid(row=1, column=0, padx=5, pady=5, sticky="e")
+        self.data_x_combo.grid(row=0, column=1, padx=5, pady=3, sticky="w")
+        tk.Label(data_frame, text="Y Data:", width=8, anchor="e").grid(row=1, column=0, padx=5, pady=3, sticky="e")
         self.data_y_combo = ttk.Combobox(data_frame, state="readonly", width=20)
-        self.data_y_combo.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+        self.data_y_combo.grid(row=1, column=1, padx=5, pady=3, sticky="w")
+        tk.Label(data_frame, text="Fit:", width=8, anchor="e").grid(row=2, column=0, padx=5, pady=3, sticky="e")
+        self.fit_combo = ttk.Combobox(data_frame, state="readonly", width=20,
+                                      values=[FIT_METHOD_LABELS[m] for m in METHODS])
+        self.fit_combo.current(0)
+        self.fit_combo.grid(row=2, column=1, padx=5, pady=3, sticky="w")
         self.data_y_combo.bind("<<ComboboxSelected>>", self.data_selected)
         self.data_x_combo.bind("<<ComboboxSelected>>", self.data_selected)
+        self.fit_combo.bind("<<ComboboxSelected>>", lambda e: self.update_analysis())
 
         results_frame = ttk.LabelFrame(self, text="Analysis Results")
         results_frame.grid(row=0, column=3, rowspan=2, columnspan=1, padx=5, pady=5, sticky="nsew")
-        tk.Label(results_frame, text="Loading Stiffness:", anchor="e", width=18).grid(row=0, column=0, padx=5, pady=2, sticky="e")
-        self.loading_slope_text = tk.Entry(results_frame, state="readonly", width=12, justify="right")
-        self.loading_slope_text.grid(row=0, column=1, padx=5, pady=2, sticky="w")
-        tk.Label(results_frame, text="Unloading Stiffness:", anchor="e", width=18).grid(row=1, column=0, padx=5, pady=2, sticky="e")
-        self.rupture_slope_text = tk.Entry(results_frame, state="readonly", width=12, justify="right")
-        self.rupture_slope_text.grid(row=1, column=1, padx=5, pady=2, sticky="w")
-        tk.Label(results_frame, text="Stress Drop:", anchor="e", width=12).grid(row=0, column=2, padx=5, pady=2, sticky="e")
-        self.stress_drop_text = tk.Entry(results_frame, state="readonly", width=12, justify="right")
-        self.stress_drop_text.grid(row=0, column=3, padx=5, pady=2, sticky="w")
-        tk.Label(results_frame, text="Displacement:", anchor="e", width=12).grid(row=1, column=2, padx=5, pady=2, sticky="e")
-        self.displacement_text = tk.Entry(results_frame, state="readonly", width=12, justify="right")
-        self.displacement_text.grid(row=1, column=3, padx=5, pady=2, sticky="w")
+        self.result_entries = {}
+        layout = [
+            ("Loading Stiffness:", "loading_stiffness", 0, 0),
+            ("Unloading Stiffness:", "unloading_stiffness", 1, 0),
+            ("Loading R²:", "loading_r2", 2, 0),
+            ("Stress Drop:", "stress_drop", 0, 2),
+            ("Displacement:", "displacement", 1, 2),
+            ("Stress Drop (trend):", "stress_drop_trend", 2, 2),
+            ("Displacement (trend):", "displacement_trend", 3, 2),
+        ]
+        for text, key, row, col in layout:
+            tk.Label(results_frame, text=text, anchor="e", width=19).grid(row=row, column=col, padx=5, pady=2, sticky="e")
+            entry = tk.Entry(results_frame, state="readonly", width=12, justify="right")
+            entry.grid(row=row, column=col + 1, padx=5, pady=2, sticky="w")
+            self.result_entries[key] = entry
+        # legacy attribute names used by older code/tests
+        self.loading_slope_text = self.result_entries["loading_stiffness"]
+        self.rupture_slope_text = self.result_entries["unloading_stiffness"]
+        self.stress_drop_text = self.result_entries["stress_drop"]
+        self.displacement_text = self.result_entries["displacement"]
 
         self.make_figure(figsize=(10, 6), row=2, column=0, columnspan=4, padx=5, pady=5, sticky="nsew")
         self.figure.set_facecolor('#f5f5f5')
@@ -91,28 +118,24 @@ class EventAnalyzerView(EventView):
     def on_event_loaded(self):
         self.init_comboboxes()
         saved = self.load_results()
-        if saved and all(k in saved for k in ('loading_indices', 'unloading_indices',
-                                               'rupture_start_index', 'rupture_end_index')):
-            self.picked_idx = [
-                saved['loading_indices'][0], saved['loading_indices'][1],
-                saved['unloading_indices'][0], saved['unloading_indices'][1],
-                saved['rupture_start_index'], saved['rupture_end_index'],
-            ]
-        else:
-            self._set_default_point_positions()
+        picks = picks_from_result(saved, len(self.data_y)) if saved else None
+        if picks is None:
+            picks = EventPicks.defaults(len(self.data_y))
+        if saved and saved.get("fit_method") in METHODS:
+            self.fit_combo.set(FIT_METHOD_LABELS[saved["fit_method"]])
+        self.picked_idx = picks.to_list()
         self.plot_picked_points()
 
+    @property
+    def fit_method(self) -> str:
+        label = self.fit_combo.get()
+        for key, value in FIT_METHOD_LABELS.items():
+            if value == label:
+                return key
+        return "ols"
+
     def _set_default_point_positions(self):
-        """Helper method to set default point positions"""
-        n = len(self.data_y)
-        self.picked_idx = [
-            int(n * 0.25),     # Loading slope start
-            int(n * 0.35),    # Loading slope end
-            int(n * 0.5),     # Rupture slope start
-            int(n * 0.6),     # Rupture slope end
-            int(n * 0.4),     # Rupture start
-            int(n * 0.7)      # Rupture end
-        ]
+        self.picked_idx = EventPicks.defaults(len(self.data_y)).to_list()
 
     def init_comboboxes(self):
         """Initialize comboboxes with event fields of the same length as time"""
@@ -138,9 +161,7 @@ class EventAnalyzerView(EventView):
         self.data_x_combo.config(values=matching_fields)
         self.data_y_combo.config(values=matching_fields)
         
-        if self.item_x and self.item_x in matching_fields:
-            self.data_x_combo.set(self.item_x)
-        else:
+        if not (self.item_x and self.item_x in matching_fields):
             displacement_fields = [f for f in matching_fields if 'displacement' in f.lower()]
             if displacement_fields:
                 self.item_x = displacement_fields[0]
@@ -148,11 +169,9 @@ class EventAnalyzerView(EventView):
                 self.item_x = 'time'
             elif matching_fields:
                 self.item_x = matching_fields[0]
-            self.data_x_combo.set(self.item_x)
+        self.data_x_combo.set(self.item_x or "")
         
-        if self.item_y and self.item_y in matching_fields:
-            self.data_y_combo.set(self.item_y)
-        else:
+        if not (self.item_y and self.item_y in matching_fields):
             stress_fields = [f for f in matching_fields if 'shear_stress' in f.lower()]
             other_stress = [f for f in matching_fields if 'stress' in f.lower()]
             if stress_fields:
@@ -161,7 +180,7 @@ class EventAnalyzerView(EventView):
                 self.item_y = other_stress[0]
             elif matching_fields:
                 self.item_y = matching_fields[0]
-            self.data_y_combo.set(self.item_y)
+        self.data_y_combo.set(self.item_y or "")
         
         self.plot_data()
     
@@ -170,11 +189,8 @@ class EventAnalyzerView(EventView):
         self.item_y = self.data_y_combo.get()
         self.item_x = self.data_x_combo.get()
         self.plot_data()
-        if len(self.data_y) > 0 and len(self.picked_idx) == 6:
-            max_idx = len(self.data_y) - 1
-            if any(idx > max_idx for idx in self.picked_idx):
-                self._set_default_point_positions()
-        else:
+        n = len(self.data_y)
+        if not (n > 0 and len(self.picked_idx) == 8 and max(self.picked_idx) < n):
             self._set_default_point_positions()
         self.plot_picked_points()
 
@@ -191,21 +207,27 @@ class EventAnalyzerView(EventView):
 
     def plot_data(self):
         """Plot the selected data"""
-        if self.item_y is None:
+        if not self.item_y:
             return
         self.ax.clear()
-        if self.item_x is None:
-            self.data_y = self.get_field(self.item_y)
-            if self.data_y is None:
+        data_y = self.get_field(self.item_y)
+        if data_y is None:
+            return
+        self.data_y = np.asarray(data_y, dtype=float)
+        if self.item_x:
+            data_x = self.get_field(self.item_x)
+            if data_x is None:
                 return
-            self.data_x = np.arange(len(self.data_y))
-            self.ax.set_xlabel("Index")
-        else:
-            self.data_x = self.get_field(self.item_x)
-            self.data_y = self.get_field(self.item_y)
-            if self.data_x is None or self.data_y is None:
-                return
+            self.data_x = np.asarray(data_x, dtype=float)
             self.ax.set_xlabel(self.item_x)
+        else:
+            self.data_x = np.arange(len(self.data_y), dtype=float)
+            self.ax.set_xlabel("Index")
+        time = self.event.get('time')
+        if time is not None and len(time) == len(self.data_y):
+            self.data_t = np.asarray(time, dtype=float)
+        else:
+            self.data_t = np.arange(len(self.data_y), dtype=float)
         self.ax.plot(self.data_x, self.data_y, zorder=-100, linewidth=1.5)
         self.ax.set_ylabel(self.item_y)
         self.ax.grid(True, linestyle='--', alpha=0.3)
@@ -217,38 +239,35 @@ class EventAnalyzerView(EventView):
     
     def plot_picked_points(self):
         """Plot the marker points and connecting lines"""
-        if not self.picked_idx or len(self.picked_idx) != 6 or len(self.data_y) == 0:
+        if len(self.picked_idx) != 8 or len(self.data_y) == 0:
             return
         width, height = self.get_circle_dims()
         for marker in self.markers:
             if marker in self.ax.patches:
                 marker.remove()
         self.markers = []
-        if self.loading_line and self.loading_line in self.ax.lines:
-            self.loading_line.remove()
-        if self.rupture_line and self.rupture_line in self.ax.lines:
-            self.rupture_line.remove()
+        for line in (self.loading_line, self.rupture_line, self.post_line):
+            if line is not None and line in self.ax.lines:
+                line.remove()
         self._remove_span()
 
-        max_idx = len(self.data_y) - 1
-        if any(idx > max_idx for idx in self.picked_idx):
+        if max(self.picked_idx) >= len(self.data_y):
             self._set_default_point_positions()
                     
-        colors = ['#33CCC4', '#33CCC4', '#CC3366', '#CC3366', '#33CC66', '#33CC66']
         for i, idx in enumerate(self.picked_idx):
-            if idx >= len(self.data_x) or idx >= len(self.data_y):
-                continue
             marker = patches.Ellipse((self.data_x[idx], self.data_y[idx]), width=width, height=height, 
-                                     color=colors[i], fill=False, lw=2, picker=8, label=str(i))
+                                     color=MARKER_COLORS[i], fill=False, lw=2, picker=8, label=str(i))
             self.ax.add_patch(marker)
             self.markers.append(marker)
         
-        self.loading_line, = self.ax.plot(*self._segment(0, 1), '--', color='#33CCC4',
-                                          linewidth=2, zorder=-50, label='Loading Stiffness')
-        self.rupture_line, = self.ax.plot(*self._segment(2, 3), '--', color='#CC3366',
-                                          linewidth=2, zorder=-50, label='Unloading Stiffness')
+        self.loading_line, = self.ax.plot(*self._segment(0, 1), '--', color=MARKER_COLORS[0],
+                                          linewidth=2, zorder=-50, label='Loading')
+        self.rupture_line, = self.ax.plot(*self._segment(2, 3), '--', color=MARKER_COLORS[2],
+                                          linewidth=2, zorder=-50, label='Unloading')
+        self.post_line, = self.ax.plot(*self._segment(6, 7), '--', color=MARKER_COLORS[6],
+                                       linewidth=2, zorder=-50, label='Post-event')
         self.rupture_span = self.ax.axvspan(self.data_x[self.picked_idx[4]], self.data_x[self.picked_idx[5]],
-                                            alpha=0.15, color='#33CC66', zorder=-100)
+                                            alpha=0.15, color=MARKER_COLORS[4], zorder=-100)
         self.canvas.draw()
         self.update_analysis()
 
@@ -275,29 +294,40 @@ class EventAnalyzerView(EventView):
         width = (xl[-1] - xl[0]) / fig_size[0] * 0.15
         return width, width * ratio
 
+    # ------------------------------------------------------------ analysis
     def update_analysis(self):
-        """Update all calculated values using linear regression for slope calculations"""
-        if len(self.picked_idx) != 6:
+        """Recompute all metrics from the current picks and show them."""
+        if len(self.picked_idx) != 8 or len(self.data_y) == 0:
             return
+        picks = EventPicks.from_list(self.picked_idx)
+        event_time = self.event.get('event_time', self.data_t[0] if len(self.data_t) else 0.0)
         try:
-            loading_indices = range(min(self.picked_idx[0], self.picked_idx[1]), max(self.picked_idx[0], self.picked_idx[1]) + 1)
-            rupture_indices = range(min(self.picked_idx[2], self.picked_idx[3]), max(self.picked_idx[2], self.picked_idx[3]) + 1)
-            x_loading = [self.data_x[i] for i in loading_indices]
-            y_loading = [self.data_y[i] for i in loading_indices]
-            x_rupture = [self.data_x[i] for i in rupture_indices]
-            y_rupture = [self.data_y[i] for i in rupture_indices]
-            slope_loading = stats.linregress(x_loading, y_loading).slope
-            slope_rupture = stats.linregress(x_rupture, y_rupture).slope
-            x4, y4 = self.data_x[self.picked_idx[4]], self.data_y[self.picked_idx[4]]
-            x5, y5 = self.data_x[self.picked_idx[5]], self.data_y[self.picked_idx[5]]
-            stress_drop = abs(y4 - y5)
-            displacement = abs(x5 - x4)
-            self.set_textbox(self.loading_slope_text, f"{slope_loading:.6g}")
-            self.set_textbox(self.rupture_slope_text, f"{slope_rupture:.6g}")
-            self.set_textbox(self.stress_drop_text, f"{stress_drop:.6g}")
-            self.set_textbox(self.displacement_text, f"{displacement:.6g}")
-        except (IndexError, ZeroDivisionError, ValueError) as e:
+            self.result = analyze_event(self.data_t, self.data_x, self.data_y, float(event_time), picks,
+                                        method=self.fit_method, x_field=self.item_x or "",
+                                        y_field=self.item_y or "")
+        except ValueError as e:
             print(f"Error calculating values: {e}")
+            return
+        r = self.result
+        values = {
+            "loading_stiffness": r["loading_stiffness"],
+            "unloading_stiffness": r["unloading_stiffness"],
+            "loading_r2": r["loading_fit"]["r2"],
+            "stress_drop": r["stress_drop"],
+            "displacement": r["displacement"],
+            "stress_drop_trend": r["stress_drop_trend"],
+            "displacement_trend": r["displacement_trend"],
+        }
+        for key, value in values.items():
+            self.set_textbox(self.result_entries[key], self.format_value(value))
+
+    @staticmethod
+    def format_value(value) -> str:
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return "n/a"
+        return "n/a" if not np.isfinite(value) else f"{value:.6g}"
     
     def set_textbox(self, textbox, text):
         """Helper method to set text in a readonly textbox"""
@@ -322,6 +352,25 @@ class EventAnalyzerView(EventView):
         self.current_artist = None
         self.currently_dragging = False
         self.on_resize(None)
+
+    def move_point(self, point_idx: int, idx: int) -> None:
+        """Move marker ``point_idx`` to sample ``idx`` and refresh lines and results."""
+        idx = int(min(max(idx, 0), len(self.data_y) - 1))
+        self.picked_idx[point_idx] = idx
+        if point_idx < len(self.markers):
+            self.markers[point_idx].set_center((self.data_x[idx], self.data_y[idx]))
+        if point_idx in (0, 1):
+            self.loading_line.set_data(*self._segment(0, 1))
+        elif point_idx in (2, 3):
+            self.rupture_line.set_data(*self._segment(2, 3))
+        elif point_idx in (4, 5):
+            self._remove_span()
+            self.rupture_span = self.ax.axvspan(self.data_x[self.picked_idx[4]], self.data_x[self.picked_idx[5]],
+                                                alpha=0.15, color=MARKER_COLORS[4], zorder=-100)
+        elif point_idx in (6, 7):
+            self.post_line.set_data(*self._segment(6, 7))
+        self.update_analysis()
+        self.canvas.draw_idle()
     
     def on_motion(self, event):
         """Handle mouse motion events for dragging markers"""
@@ -340,19 +389,7 @@ class EventAnalyzerView(EventView):
             xw = xl[-1] - xl[0]
             distances = ((self.data_x - cx) / xw) ** 2 + ((self.data_y - cy) / yw) ** 2
             idx = int(np.argmin(distances))
-            self.current_artist.set_center((self.data_x[idx], self.data_y[idx]))
-            point_idx = int(self.current_artist.get_label())
-            self.picked_idx[point_idx] = idx
-            if point_idx in (0, 1):
-                self.loading_line.set_data(*self._segment(0, 1))
-            elif point_idx in (2, 3):
-                self.rupture_line.set_data(*self._segment(2, 3))
-            elif point_idx in (4, 5):
-                self._remove_span()
-                self.rupture_span = self.ax.axvspan(self.data_x[self.picked_idx[4]], self.data_x[self.picked_idx[5]],
-                                                    alpha=0.15, color='#33CC66', zorder=-100)
-            self.update_analysis()
-            self.canvas.draw_idle()
+            self.move_point(int(self.current_artist.get_label()), idx)
         except Exception as e:
             print(f"Error in on_motion: {e}")
     
@@ -366,23 +403,13 @@ class EventAnalyzerView(EventView):
             self.canvas.draw()
 
     # ---------------------------------------------------------------- save
-    def collect_results(self):
-        return {
-            'loading_indices': [int(self.picked_idx[0]), int(self.picked_idx[1])],
-            'unloading_indices': [int(self.picked_idx[2]), int(self.picked_idx[3])],
-            'rupture_start_index': int(self.picked_idx[4]),
-            'rupture_end_index': int(self.picked_idx[5]),
-            'loading_stiffness': float(self.loading_slope_text.get()),
-            'unloading_stiffness': float(self.rupture_slope_text.get()),
-            'stress_drop': float(self.stress_drop_text.get()),
-            'displacement': float(self.displacement_text.get()),
-        }
-
     def save_event(self):
         """Save the analysis results to the data manager"""
-        if len(self.picked_idx) != 6:
+        if self.result is None:
+            self.update_analysis()
+        if self.result is None:
             return
         try:
-            self.save_results(self.collect_results())
+            self.save_results(dict(self.result))
         except Exception as e:
             messagebox.showerror("Save Failed", f"Error saving results: {e}")
