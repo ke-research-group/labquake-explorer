@@ -43,3 +43,24 @@ def test_run_action_opens_registered_view(app):
     assert isinstance(view, EventAnalyzerView)
     assert (view.run_idx, view.event_idx) == (0, 1)
     view.destroy()
+
+
+def test_double_click_run_opens_signal_overlay(app):
+    from labquake_explorer.ui.views import RunSignalsView
+    item = app.find_item("runs/[0]")
+    app.data_tree.selection_set(item)
+    app.on_double_click(None)
+    assert isinstance(app.child_windows[-1], RunSignalsView)
+    assert "Plot Run Signals" in labels(app, "runs/[0]")[1]
+    app.child_windows[-1].on_close()
+
+
+def test_double_click_array_opens_simple_plot_once(app):
+    from labquake_explorer.ui.views import SimplePlotView
+    item = app.find_item("runs/[0]/shear_stress")
+    app.data_tree.selection_set(item)
+    app.on_double_click(None)
+    views = [w for w in app.child_windows if isinstance(w, SimplePlotView)]
+    assert len(views) == 1 and app.child_windows.count(views[0]) == 1
+    views[0].on_close()
+    assert views[0] not in app.child_windows

@@ -11,12 +11,12 @@ from labquake_explorer.data.data_manager import DataManager
 from labquake_explorer.utils.config import LabquakeExplorerConfig
 from labquake_explorer.ui.context import (
     TreeContext, resolve_context,
-    ARRAY, RUN_ARRAY, EVENT_ARRAY, EVENT_INDICES, STRING,
+    ARRAY, RUN, RUN_ARRAY, EVENT_ARRAY, EVENT_INDICES, STRING,
 )
 from labquake_explorer.ui.actions import Action, actions_for, register_action
 # Importing the views package registers every view's context-menu action.
 from labquake_explorer.ui.views import (
-    SimplePlotView, PointsSelectorView, IndexPickerView, SlopeAnalyzerView,
+    SimplePlotView, PointsSelectorView, IndexPickerView, SlopeAnalyzerView, RunSignalsView,
 )
 
 
@@ -360,7 +360,10 @@ class LabquakeExplorer:
         path, item = self.get_full_path()
         print(f"Double-clicked on item: {path}")
         data = self.data_manager.get_data(path)
-        if type(data) is np.ndarray:
+        ctx = resolve_context(path, data)
+        if ctx.kind == RUN:
+            RunSignalsView(self, ctx.run_idx)
+        elif type(data) is np.ndarray:
             print(f"plotting {item}")
             view = SimplePlotView(self)
             view.ax.plot(data)
