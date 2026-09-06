@@ -16,10 +16,44 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Any, Optional
 
+import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
 from labquake_explorer.ui.context import TreeContext
+
+
+def event_list(run) -> list:
+    """The ``events`` container of a run dict as a list (``[]`` when absent).
+
+    Never truth-tests the container: an empty ``events`` list comes back
+    from an HDF5 file as an empty ``ndarray``, whose ``bool()`` raises.
+    Only list/tuple containers are events; anything else (an empty array,
+    a scalar, None) means "no events".
+    """
+    events = run.get("events") if isinstance(run, dict) else None
+    return list(events) if isinstance(events, (list, tuple)) else []
+
+
+def nearest_sample(x, y, cx: float, cy: float, xlim, ylim) -> Optional[int]:
+    """Index of the finite sample of ``(x, y)`` nearest to ``(cx, cy)``.
+
+    Distances are measured in axes-normalised units (``xlim``/``ylim`` are
+    the axis ranges).  Samples with a non-finite coordinate are never
+    candidates (a plain ``argmin`` returns the first NaN); ``None`` when no
+    finite sample exists.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    xw = float(xlim[-1] - xlim[0]) or 1.0
+    yw = float(ylim[-1] - ylim[0]) or 1.0
+    with np.errstate(invalid="ignore"):
+        d = ((x - cx) / xw) ** 2 + ((y - cy) / yw) ** 2
+    finite = np.isfinite(d)
+    if not finite.any():
+        return None
+    d = np.where(finite, d, np.inf)
+    return int(np.argmin(d))
 
 
 class BaseView(tk.Toplevel):

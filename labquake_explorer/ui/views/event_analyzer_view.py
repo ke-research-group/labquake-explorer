@@ -9,7 +9,7 @@ from labquake_explorer.analysis.event_metrics import (
 from labquake_explorer.analysis.fitting import METHODS
 from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import EVENT
-from labquake_explorer.ui.views.base import EventView
+from labquake_explorer.ui.views.base import EventView, nearest_sample
 
 FIT_METHOD_LABELS = {"ols": "OLS", "theilsen": "Theil-Sen"}
 MARKER_COLORS = ['#33CCC4', '#33CCC4', '#CC3366', '#CC3366',
@@ -119,8 +119,16 @@ class EventAnalyzerView(EventView):
         self.figure.canvas.mpl_connect('resize_event', self.on_resize)
 
     def on_event_loaded(self):
-        self.init_comboboxes()
         saved = self.load_results()
+        # a v2 record remembers the fields it was analysed on: show (and re-save)
+        # the same pair, not the constructor defaults (init_comboboxes falls
+        # back when a remembered field no longer exists)
+        if saved:
+            for attr, key in (("item_x", "x_field"), ("item_y", "y_field")):
+                field = saved.get(key)
+                if isinstance(field, str) and field:
+                    setattr(self, attr, field)
+        self.init_comboboxes()
         picks = picks_from_result(saved, len(self.data_y)) if saved else None
         if picks is None:
             picks = EventPicks.defaults(len(self.data_y))
@@ -386,12 +394,10 @@ class EventAnalyzerView(EventView):
         try:
             dx, dy = self.offset
             cx, cy = event.xdata + dx, event.ydata + dy
-            xl = self.ax.get_xlim()
-            yl = self.ax.get_ylim()
-            yw = yl[-1] - yl[0]
-            xw = xl[-1] - xl[0]
-            distances = ((self.data_x - cx) / xw) ** 2 + ((self.data_y - cy) / yw) ** 2
-            idx = int(np.argmin(distances))
+            # nearest FINITE sample: a NaN gap must never capture the marker
+            idx = nearest_sample(self.data_x, self.data_y, cx, cy, self.ax.get_xlim(), self.ax.get_ylim())
+            if idx is None:
+                return
             self.move_point(int(self.current_artist.get_label()), idx)
         except Exception as e:
             print(f"Error in on_motion: {e}")

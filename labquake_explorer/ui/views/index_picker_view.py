@@ -17,7 +17,7 @@ import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
-from labquake_explorer.ui.views.base import BaseView
+from labquake_explorer.ui.views.base import BaseView, nearest_sample
 
 
 def split_item_path(path: Optional[str]) -> tuple[str, Optional[str]]:
@@ -225,12 +225,15 @@ class ArrayPairView(BaseView):
         return width, width * ratio
 
     def nearest_index(self, cx: float, cy: float) -> int:
-        """Sample nearest to (cx, cy) in axes-normalized distance."""
-        xl = self.ax.get_xlim()
-        yl = self.ax.get_ylim()
-        xw = xl[-1] - xl[0]
-        yw = yl[-1] - yl[0]
-        return int(np.argmin(((self.data_x - cx) / xw) ** 2 + ((self.data_y - cy) / yw) ** 2))
+        """Finite sample nearest to (cx, cy) in axes-normalized distance.
+
+        NaN samples are never candidates; with no finite sample at all the
+        drag is refused (ValueError, caught by ``on_motion``).
+        """
+        idx = nearest_sample(self.data_x, self.data_y, cx, cy, self.ax.get_xlim(), self.ax.get_ylim())
+        if idx is None:
+            raise ValueError("no finite samples to snap to")
+        return idx
 
     # ------------------------------------------------------------- dragging
     def on_pick(self, event):

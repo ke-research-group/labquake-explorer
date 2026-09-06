@@ -46,6 +46,23 @@ def test_context_paths():
     assert ctx.event_path == "runs/[1]/events/[4]"
     assert ctx.parent_path == "runs/[1]/events/[4]"
     assert resolve_context("runs/[1]", {}).event_path is None
+    assert resolve_context("name", "x").parent_path == ""
+    assert resolve_context("", None).parent_path == ""
+
+
+def test_backslash_paths_resolve_like_slash_paths():
+    """A tree path joined with os.path.join on Windows carries backslashes;
+    the parent path (used to place event_indices / events) must not."""
+    ctx = resolve_context("runs\\[0]\\shear_stress", np.arange(10))
+    assert ctx.kind == C.RUN_ARRAY and ctx.run_idx == 0
+    assert ctx.parent_path == "runs/[0]"
+    ctx = resolve_context("runs\\[0]\\event_indices", [1, 2, 3])
+    assert ctx.kind == C.EVENT_INDICES
+    assert ctx.parent_path == "runs/[0]"
+    ctx = resolve_context("runs\\[0]\\events\\[1]\\displacement", np.arange(10))
+    assert ctx.kind == C.EVENT_ARRAY
+    assert ctx.parent_path == "runs/[0]/events/[1]"
+    assert ctx.event_path == "runs/[0]/events/[1]"
 
 
 def test_single_element_array_is_not_an_array():

@@ -1,4 +1,5 @@
 import tkinter as tk
+from pathlib import Path
 from tkinter import messagebox
 
 import pytest
@@ -69,6 +70,17 @@ def _close_app(application):
         application.data_tree.destroy()
     except tk.TclError:
         pass
+    # The session root is shared by every app instance: drop everything the
+    # app gridded into it (buttons, context menus, stray Toplevels) so widgets
+    # and their callbacks do not accumulate across tests.
+    try:
+        for widget in list(application.root.winfo_children()):
+            try:
+                widget.destroy()
+            except tk.TclError:
+                pass
+    except tk.TclError:
+        pass
 
 
 @pytest.fixture
@@ -85,3 +97,23 @@ def app_with_strain(tk_root, experiment_with_strain):
     application = _make_app(tk_root, *experiment_with_strain)
     yield application
     _close_app(application)
+
+
+@pytest.fixture
+def app_from_file(tk_root):
+    """Factory: a fresh LabquakeExplorer with a saved file loaded through
+    ``DataManager.load_file`` (the user's reload path); closed at teardown."""
+    made = []
+
+    def make(path):
+        from labquake_explorer.ui.labquake_explorer import LabquakeExplorer
+        application = LabquakeExplorer(tk_root)
+        application.data_manager.load_file(Path(path))
+        application.current_file_path = Path(path)
+        application.refresh_tree()
+        made.append(application)
+        return application
+
+    yield make
+    for application in made:
+        _close_app(application)

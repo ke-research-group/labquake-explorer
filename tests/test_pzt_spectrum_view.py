@@ -315,6 +315,37 @@ def test_compute_source(view):
     assert "uncalibrated" in view.status_var.get()
 
 
+def test_free_surface_factor_reaches_the_moment(brune_app, view):
+    """The typed free-surface factor divides M0, is stored in the constants and
+    restored on reopen; an unusable value is a status message, not a dialog."""
+    fit = calibrated_compute(view)
+    set_medium(view, "P", 0.52)
+    view.free_surface_var.set("1.7")
+    assert view.compute_source(), view.status_var.get()
+    sd = view.record["source"]
+    assert sd["seismic_moment_nm"] == pytest.approx(
+        src.seismic_moment(fit.omega0, RHO, VP, DIST, 0.52, 1.7), rel=1e-12)
+    assert sd["seismic_moment_nm"] == pytest.approx(
+        src.seismic_moment(fit.omega0, RHO, VP, DIST, 0.52) / 1.7, rel=1e-12)
+    assert sd["constants"]["free_surface_factor"] == 1.7
+    assert view.save()
+    view.on_close()
+    v2 = PZTSpectrumView(brune_app, 0, EVENT)
+    try:
+        assert v2.free_surface_var.get() == "1.7"
+        assert v2.record["source"]["constants"]["free_surface_factor"] == 1.7
+        for bad in ("0", "-2", "nan", "abc", ""):
+            v2.free_surface_var.set(bad)
+            assert not v2.compute_source()
+            assert "free-surface factor" in v2.status_var.get()
+        v2.free_surface_var.set("1.0")
+        assert v2.compute_source()
+        assert v2.record["source"]["seismic_moment_nm"] == pytest.approx(
+            src.seismic_moment(fit.omega0, RHO, VP, DIST, 0.52), rel=1e-12)
+    finally:
+        v2.on_close()
+
+
 def test_compute_source_s_phase_uses_vs(view):
     fit = calibrated_compute(view)
     set_medium(view, "S", 0.6)
@@ -437,6 +468,59 @@ def test_channel_keys_are_not_digit_strings_and_legacy_keys_are_read(brune_app, 
     channels = view.event["pzt_spectrum"]["channels"]
     assert set(channels) == {"ch3", "ch5"}
     assert not any(k.isdigit() for k in channels)
+
+
+def test_saved_record_without_channel_field_can_be_saved(brune_app, view):
+    """A partial / hand-edited record lacking ``channel`` opens as a saved
+    record; Save files it under the channel it was found at instead of raising."""
+    view.event["pzt_spectrum"] = {"version": RESULT_VERSION, "channels": {"ch2": {"pre_ms": 1.0}}}
+    view.on_close()
+    v2 = PZTSpectrumView(brune_app, 0, EVENT)
+    try:
+        assert v2.current_channel() == 2
+        assert "showing saved record" in v2.status_var.get()
+        assert v2.pre_var.get() == "1"
+        assert v2.record["channel"] == 2
+        assert v2.save()
+        channels = v2.event["pzt_spectrum"]["channels"]
+        assert set(channels) == {"ch2"} and channels["ch2"]["channel"] == 2
+        assert "channel 2 saved" in v2.status_var.get()
+        # a record with no channel and no selection is refused with a status line
+        v2.record = {"pre_ms": 1.0}
+        v2.channel_combobox.set("")
+        assert not v2.save()
+        assert "no channel" in v2.status_var.get()
+    finally:
+        v2.on_close()
+
+
+def test_legacy_digit_keyed_channels_loaded_as_a_list_are_read(brune_app, view):
+    """A legacy ``channels`` map keyed '0'..'n-1' comes back from an unmarked
+    (older) HDF5 file as a LIST; its entries are channels 0..n-1 and a later
+    Save keeps them (renamed) instead of silently dropping them."""
+    fit = calibrated_compute(view)
+    rec = view.record
+    view.event["pzt_spectrum"] = {"version": RESULT_VERSION,
+                                  "channels": [dict(rec, channel=0), dict(rec, channel=1), "junk"]}
+    view.on_close()
+    v2 = PZTSpectrumView(brune_app, 0, EVENT)
+    try:
+        assert set(v2.saved_channels()) == {0, 1}
+        assert v2.current_channel() == 0
+        assert "showing saved record" in v2.status_var.get()
+        assert v2.result_vars["fc"].get() == f"{fit.fc:.4g} Hz"
+        v2.set_channel(1)
+        assert "showing saved record" in v2.status_var.get()
+        v2.set_channel(BRUNE_CH)
+        v2.calibration_path_var.set(brune_app.calibration_csv)
+        v2.unit_combobox.set("V/m")
+        assert v2.compute() and v2.save()
+        channels = v2.event["pzt_spectrum"]["channels"]
+        assert isinstance(channels, dict)
+        assert set(channels) == {"ch0", "ch1", "ch3"}          # the legacy records are kept and renamed
+        assert channels["ch1"]["channel"] == 1
+    finally:
+        v2.on_close()
 
 
 def test_restore_accepts_array_valued_fields(brune_app, view):

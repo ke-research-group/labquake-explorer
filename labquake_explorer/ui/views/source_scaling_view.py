@@ -15,12 +15,21 @@ Quality gating.  The spectrum module reports, per channel, whether the
 corner frequency is band-limited (``fit['band_limited']``), sits at a bound
 of the fit (``fit['at_bounds']['ln_fc']``) or comes from an unconverged
 solver (``fit['converged']``), and the source module whether the far-field
-assumption holds (``source['far_field_ok']``, from ``kR``).  A band-limited
-or at-bound fc is a bound, not a measurement, and it biases the exponent
-toward zero, so such records are EXCLUDED from the fit by default; they are
-still listed (``flags`` column) and plotted as open symbols.  The *include
-flagged fits* checkbox overrides the gating; the choice and the number of
-excluded events are stored with the result.
+assumption holds (``source['far_field_ok']``, from ``kR`` evaluated at the
+LOW EDGE of the fitted band, i.e. the plateau).  A band-limited or at-bound
+fc is a bound, not a measurement, and it biases the exponent toward zero, so
+such records are EXCLUDED from the fit by default; they are still listed
+(``flags`` column) and plotted as open symbols.  The *include flagged fits*
+checkbox overrides the gating; the choice and the number of excluded events
+are stored with the result.
+
+The near-field flag is a WARNING, not a default exclusion: ``kR`` at the
+plateau frequency (default fmin 1 kHz) is far below 3 for every laboratory
+source-sensor distance (kR >= 3 at 1 kHz needs R >= 2.9 m for P at 6 km/s),
+so gating on it would exclude every record without telling apart good and
+bad ones.  Near-field records are listed with the ``kR`` code and counted in
+the status line; the *exclude near-field* checkbox (off by default, stored
+with the result) turns the warning into an exclusion.
 
 Channel ``all`` combines, per event, the channels that pass the gating (all
 channels when the override is on; the flagged ones only when nothing else is
@@ -58,7 +67,8 @@ from labquake_explorer.analysis.scaling import (
 from labquake_explorer.analysis.source import moment_magnitude, stress_drop_eshelby
 from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import RUN
-from labquake_explorer.ui.views.base import RunView
+from labquake_explorer.ui.views.base import RunView, event_list
+from labquake_explorer.ui.views.pzt_spectrum_view import parse_channel_key
 
 RESULT_VERSION = 2
 PZT_KEY = "pzt_spectrum"
@@ -90,13 +100,16 @@ FIELDS = PZT_FIELDS + MECH_FIELDS
 FLAG_BAND_LIMITED = "band-limited"
 FLAG_AT_BOUND = "fc at bound"
 FLAG_NOT_CONVERGED = "not converged"
-FLAG_NEAR_FIELD = "near-field (kR < 3)"
+FLAG_NEAR_FIELD = "near-field (kR < 3 at band low edge)"
 FLAG_CODES = {
     FLAG_BAND_LIMITED: "band",
     FLAG_AT_BOUND: "bound",
     FLAG_NOT_CONVERGED: "nconv",
     FLAG_NEAR_FIELD: "kR",
 }
+#: Flags that exclude a record from the fit by default (fit-quality flags).
+#: ``FLAG_NEAR_FIELD`` joins them only when the user asks (see module docstring).
+EXCLUDING_FLAGS = (FLAG_BAND_LIMITED, FLAG_AT_BOUND, FLAG_NOT_CONVERGED)
 #: Medium / model constants that must agree across the records entering one fit.
 #: Geometry-dependent entries (distance, radiation coefficient, free-surface
 #: factor) legitimately differ per sensor and event and are not compared.
@@ -145,6 +158,50 @@ def _is_true(value) -> bool:
         return bool(value)
     except (TypeError, ValueError):
         return False
+
+
+def _float_list(value, n: Optional[int] = None) -> list[float]:
+    """Stored sequence (list, tuple or ndarray) as floats, NaN where unusable.
+
+    ``n`` forces the length (padded with NaN / truncated).  Never truth-tests
+    the value: HDF5 hands stored lists back as arrays.
+    """
+    if value is None:
+        items = []
+    else:
+        try:
+            items = [_finite(v) for v in np.asarray(value, dtype=object).ravel()]
+        except (TypeError, ValueError):
+            items = []
+    if n is not None:
+        items = (items + [float("nan")] * n)[:n]
+    return items
+
+
+def _int_list(value) -> list[int]:
+    """Stored sequence of indices as Python ints (unusable entries dropped)."""
+    if value is None:
+        return []
+    try:
+        items = np.asarray(value, dtype=object).ravel()
+    except (TypeError, ValueError):
+        return []
+    out = []
+    for v in items:
+        f = _finite(v)
+        if np.isfinite(f):
+            out.append(int(f))
+    return out
+
+
+def excluding_flags(flags: list[str], exclude_near_field: bool = False) -> list[str]:
+    """The subset of ``flags`` that excludes a record from the fit.
+
+    Fit-quality flags (``EXCLUDING_FLAGS``) always exclude; ``FLAG_NEAR_FIELD``
+    only when ``exclude_near_field``.
+    """
+    keep = set(EXCLUDING_FLAGS) | ({FLAG_NEAR_FIELD} if exclude_near_field else set())
+    return [f for f in flags if f in keep]
 
 
 def _channel_items(channels) -> list[tuple[str, dict]]:
@@ -209,15 +266,17 @@ def _record_constants(source: dict) -> dict:
     return out
 
 
-def pzt_channel_records(event: dict) -> dict[str, dict]:
+def pzt_channel_records(event: dict, exclude_near_field: bool = False) -> dict[str, dict]:
     """Per-channel PZT source values of one event: ``{channel: {field: ...}}``.
 
     Only channels with a valid ``source`` dict are returned (``valid`` False
     or a numpy False skips the channel).  Every numeric field is a float
     (NaN when missing); in addition each record carries ``band_limited``,
     ``at_bound_fc``, ``converged``, ``far_field_ok`` (Python bools or None
-    when not reported), ``flags`` (see :func:`channel_flags`), ``flagged``,
-    ``phase`` and ``constants`` (the ``CONSTANT_KEYS`` subset).
+    when not reported), ``flags`` (all flags, see :func:`channel_flags`),
+    ``gating_flags`` (the ones that exclude it, see :func:`excluding_flags`),
+    ``flagged`` (excluded from the fit by default), ``phase`` and
+    ``constants`` (the ``CONSTANT_KEYS`` subset).
     """
     out: dict[str, dict] = {}
     pzt = event.get(PZT_KEY) if isinstance(event, dict) else None
@@ -230,6 +289,7 @@ def pzt_channel_records(event: dict) -> dict[str, dict]:
         fit = record.get("fit") if isinstance(record.get("fit"), dict) else {}
         at_bounds = fit.get("at_bounds") if isinstance(fit.get("at_bounds"), dict) else {}
         flags = channel_flags(record, source)
+        gating = excluding_flags(flags, exclude_near_field)
         constants = _record_constants(source)
         out[name] = {
             "seismic_moment_nm": _finite(source.get("seismic_moment_nm")),
@@ -243,7 +303,8 @@ def pzt_channel_records(event: dict) -> dict[str, dict]:
             "converged": None if fit.get("converged") is None else _is_true(fit.get("converged")),
             "far_field_ok": None if source.get("far_field_ok") is None else _is_true(source.get("far_field_ok")),
             "flags": flags,
-            "flagged": bool(flags),
+            "gating_flags": gating,
+            "flagged": bool(gating),
             "phase": constants.get("phase"),
             "constants": constants,
         }
@@ -339,36 +400,36 @@ def combine_channels(records: list[dict]) -> dict:
 
 
 def gather_records(run: dict, channel: str = ALL_CHANNELS, trend: bool = False,
-                   include_flagged: bool = False) -> list[dict]:
+                   include_flagged: bool = False, exclude_near_field: bool = False) -> list[dict]:
     """One row per event with all ``FIELDS`` as floats (NaN when unavailable).
 
     ``channel`` selects one PZT channel; ``ALL_CHANNELS`` combines the
     channels of each event with :func:`combine_channels`.  Quality gating:
-    a single-channel row is ``flagged`` when the record carries any flag
-    (:func:`channel_flags`); for ``ALL_CHANNELS`` only unflagged channels are
-    combined unless ``include_flagged`` is True or no unflagged channel has a
-    record, in which case the flagged ones are combined and the row is
-    flagged.  Flagged rows are kept (for the table and the plot) and left
-    out of the fit by :func:`fit_pairs` unless ``include_flagged``.
+    a single-channel row is ``flagged`` when the record carries an excluding
+    flag (:func:`excluding_flags`: the fit-quality flags, plus the near-field
+    flag when ``exclude_near_field``); for ``ALL_CHANNELS`` only unflagged
+    channels are combined unless ``include_flagged`` is True or no unflagged
+    channel has a record, in which case the flagged ones are combined and
+    the row is flagged.  Flagged rows are kept (for the table and the plot)
+    and left out of the fit by :func:`fit_pairs` unless ``include_flagged``.
 
-    Each row carries ``event``, the fields, ``flags`` (list of flag texts),
-    ``flagged`` (bool), ``n_channels`` (channels combined), ``phases``,
-    ``constants`` (distinct ``CONSTANT_KEYS`` dicts) and
-    ``constants_consistent``.  Events without any PZT record still appear
-    (NaN PZT fields) so mechanical quantities can be listed; they never
-    enter a fit because M0 is NaN.
+    Each row carries ``event``, the fields, ``flags`` (all flag texts of the
+    records used), ``gating_flags`` (the excluding ones), ``flagged`` (bool),
+    ``n_channels`` (channels combined), ``phases``, ``constants`` (distinct
+    ``CONSTANT_KEYS`` dicts) and ``constants_consistent``.  Events without
+    any PZT record still appear (NaN PZT fields) so mechanical quantities
+    can be listed; they never enter a fit because M0 is NaN.
     """
     rows = []
-    events = run.get("events") if isinstance(run, dict) else None
     nan = float("nan")
-    for j, event in enumerate(events or []):
+    for j, event in enumerate(event_list(run)):
         if not isinstance(event, dict):
             continue
-        row = {"event": j, "flags": [], "flagged": False, "n_channels": 0,
+        row = {"event": j, "flags": [], "gating_flags": [], "flagged": False, "n_channels": 0,
                "phases": [], "constants": [], "constants_consistent": True}
         for field in PZT_FIELDS:
             row[field] = nan
-        per_channel = pzt_channel_records(event)
+        per_channel = pzt_channel_records(event, exclude_near_field)
         if channel == ALL_CHANNELS:
             records = list(per_channel.values())
             if not include_flagged:
@@ -382,16 +443,20 @@ def gather_records(run: dict, channel: str = ALL_CHANNELS, trend: bool = False,
             row["constants_consistent"] = combined["constants_consistent"]
             row["n_channels"] = len(records)
             flags: list[str] = []
+            gating: list[str] = []
             for rec in records:
                 flags.extend(f for f in rec["flags"] if f not in flags)
+                gating.extend(f for f in rec["gating_flags"] if f not in gating)
             row["flags"] = flags
-            row["flagged"] = bool(flags)
+            row["gating_flags"] = gating
+            row["flagged"] = bool(gating)
         else:
             rec = per_channel.get(str(channel))
             if rec is not None:
                 for field in PZT_FIELDS:
                     row[field] = rec[field]
                 row["flags"] = list(rec["flags"])
+                row["gating_flags"] = list(rec["gating_flags"])
                 row["flagged"] = rec["flagged"]
                 row["n_channels"] = 1
                 row["phases"] = [str(rec["phase"])] if rec.get("phase") is not None else []
@@ -404,14 +469,12 @@ def gather_records(run: dict, channel: str = ALL_CHANNELS, trend: bool = False,
 def available_channels(run: dict) -> list[str]:
     """Channel names present in any saved PZT record of the run (sorted)."""
     names: set[str] = set()
-    for event in (run.get("events") if isinstance(run, dict) else None) or []:
+    for event in event_list(run):
         names.update(pzt_channel_records(event).keys())
 
     def key(name: str):
-        try:
-            return (0, int(name), name)
-        except ValueError:
-            return (1, 0, name)
+        number = parse_channel_key(name)          # 'ch3' (PZT view) or legacy '3'
+        return (0, number, name) if number is not None else (1, 0, name)
 
     return sorted(names, key=key)
 
@@ -438,11 +501,17 @@ def fit_pairs(rows: list[dict], y_field: str,
 
 
 def excluded_pairs(rows: list[dict], y_field: str) -> list[dict]:
-    """The flagged rows with a usable (finite, positive) pair: ``[{event, flags}, ...]``."""
+    """The flagged rows with a usable (finite, positive) pair: ``[{event, flags}, ...]``
+    (``flags`` are the excluding ones, see :func:`excluding_flags`)."""
     _, _, idx, flagged = split_pairs(rows, y_field)
     by_event = {r["event"]: r for r in rows}
-    return [{"event": int(j), "flags": list(by_event[int(j)]["flags"])}
+    return [{"event": int(j), "flags": list(by_event[int(j)].get("gating_flags", by_event[int(j)]["flags"]))}
             for j, f in zip(idx, flagged) if f]
+
+
+def near_field_rows(rows: list[dict]) -> list[dict]:
+    """Rows carrying the near-field flag that still have a finite M0."""
+    return [r for r in rows if FLAG_NEAR_FIELD in r["flags"] and np.isfinite(r["seismic_moment_nm"])]
 
 
 def _fmt(value: float) -> str:
@@ -467,7 +536,7 @@ class SourceScalingView(RunView):
     ``bootstrap`` (16-84 range of the exponent), ``fit_indices`` (event
     indices used), ``excluded`` (``[{event, flags}]`` left out by the quality
     gating), ``channel_combo``, ``y_combo``, ``trend_var``,
-    ``include_flagged_var``, ``table``, ``ax``, ``scatter_artist`` (used
+    ``include_flagged_var``, ``exclude_near_field_var``, ``table``, ``ax``, ``scatter_artist`` (used
     pairs), ``flagged_scatter_artist`` (open symbols), ``reference_line_artist``
     (Line2D or None), ``fit_line_artist``, ``saved_result`` (the dict restored
     on open, or None) and ``saved_agrees`` (True/False/None).
@@ -519,9 +588,13 @@ class SourceScalingView(RunView):
                         ).grid(row=2, column=0, columnspan=2, pady=2, sticky="w")
         self.include_flagged_var = tk.BooleanVar(master=self, value=False)
         ttk.Checkbutton(left, text="Include flagged fits (band-limited / fc at bound / "
-                                   "not converged / near-field)",
+                                   "not converged)",
                         variable=self.include_flagged_var, command=self.refresh,
                         ).grid(row=3, column=0, columnspan=2, pady=2, sticky="w")
+        self.exclude_near_field_var = tk.BooleanVar(master=self, value=False)
+        ttk.Checkbutton(left, text="Exclude near-field records (kR < 3 at the band's low edge)",
+                        variable=self.exclude_near_field_var, command=self.refresh,
+                        ).grid(row=8, column=0, columnspan=2, pady=2, sticky="w")
 
         buttons = ttk.Frame(left)
         buttons.grid(row=4, column=0, columnspan=2, pady=(6, 2), sticky="ew")
@@ -540,7 +613,9 @@ class SourceScalingView(RunView):
 
         ttk.Label(left, text="Typical constants: rho 2650 kg/m3 (rock), Vp ~ 5000-6000 m/s "
                              "(granite), Vs ~ Vp/1.7 - set them in the PZT spectrum view. "
-                             "Open symbols: quality-flagged records (excluded unless included above).",
+                             "Open symbols: quality-flagged records (excluded unless included above). "
+                             "kR is evaluated at the plateau (band low edge), where every laboratory "
+                             "record is near-field: a warning, excluded only on request.",
                   wraplength=300, justify="left", foreground="gray",
                   ).grid(row=7, column=0, columnspan=2, pady=(0, 6), sticky="w")
 
@@ -586,8 +661,9 @@ class SourceScalingView(RunView):
         y_variable = saved.get("y_variable")
         if y_variable in Y_VARIABLES:
             self.y_combo.set(y_variable)
-        self.trend_var.set(bool(saved.get("trend_corrected", False)))
-        self.include_flagged_var.set(bool(saved.get("include_flagged", False)))
+        self.trend_var.set(_is_true(saved.get("trend_corrected", False)))
+        self.include_flagged_var.set(_is_true(saved.get("include_flagged", False)))
+        self.exclude_near_field_var.set(_is_true(saved.get("exclude_near_field", False)))
 
     @property
     def channel(self) -> str:
@@ -605,6 +681,10 @@ class SourceScalingView(RunView):
     def include_flagged(self) -> bool:
         return bool(self.include_flagged_var.get())
 
+    @property
+    def exclude_near_field(self) -> bool:
+        return bool(self.exclude_near_field_var.get())
+
     def set_channel(self, channel: str) -> None:
         self.channel_combo.set(str(channel))
         self.refresh()
@@ -619,11 +699,15 @@ class SourceScalingView(RunView):
         self.include_flagged_var.set(bool(include))
         self.refresh()
 
+    def set_exclude_near_field(self, exclude: bool) -> None:
+        self.exclude_near_field_var.set(bool(exclude))
+        self.refresh()
+
     # ----------------------------------------------------------------- data
     def refresh(self) -> None:
         """Re-gather the rows for the current selections and redraw (fit cleared)."""
         self.rows = gather_records(self.run, self.channel, bool(self.trend_var.get()),
-                                   self.include_flagged)
+                                   self.include_flagged, self.exclude_near_field)
         self.fit = None
         self.bootstrap = (float("nan"), float("nan"))
         self.fit_indices = []
@@ -666,6 +750,12 @@ class SourceScalingView(RunView):
         elif self.excluded:
             text += (f"; {len(self.excluded)} event(s) excluded by quality flags "
                      f"({', '.join(sorted({f for e in self.excluded for f in e['flags']}))})")
+        near = near_field_rows(self.rows)
+        if near and not self.exclude_near_field and not self.include_flagged:
+            n_in_fit = sum(1 for r in near if not r["flagged"])
+            if n_in_fit:
+                text += (f"; {n_in_fit} near-field event(s) (kR < 3 at the band's low edge) in the fit "
+                         f"- tick 'Exclude near-field' to drop them")
         phases, constants, consistent = self.constants_summary()
         if not consistent:
             text += (f"; WARNING: phase/constants differ across the used records "
@@ -713,8 +803,8 @@ class SourceScalingView(RunView):
         self.saved_agrees = None
         exponent = _finite(saved.get("exponent"))
         stderr = _finite(saved.get("exponent_stderr"))
-        boot = saved.get("bootstrap_16_84") or [float("nan"), float("nan")]
-        lo, hi = (_finite(boot[0]), _finite(boot[1])) if len(boot) == 2 else (float("nan"), float("nan"))
+        # stored lists come back as arrays from HDF5: never truth-test them
+        lo, hi = _float_list(saved.get("bootstrap_16_84"), 2)
         header = (f"Saved fit ({saved.get('y_variable', '?')}, channel {saved.get('channel', '?')}): "
                   f"b = {_fmt(exponent)} +- {_fmt(stderr)}, bootstrap 16-84: [{_fmt(lo)}, {_fmt(hi)}], "
                   f"n = {saved.get('n', '?')}")
@@ -722,14 +812,15 @@ class SourceScalingView(RunView):
         current = self.fit_text.get()
         same_selection = (str(saved.get("channel")) == self.channel
                           and saved.get("y_variable") == self.y_variable
-                          and bool(saved.get("trend_corrected", False)) == bool(self.trend_var.get())
-                          and bool(saved.get("include_flagged", False)) == self.include_flagged)
+                          and _is_true(saved.get("trend_corrected", False)) == bool(self.trend_var.get())
+                          and _is_true(saved.get("include_flagged", False)) == self.include_flagged
+                          and _is_true(saved.get("exclude_near_field", False)) == self.exclude_near_field)
         if not same_selection:
             self.saved_agrees = False
             verdict = ("the saved selection is no longer available - current fit uses "
                        f"channel {self.channel}; re-save to update")
         elif fit is not None and fit.valid:
-            same_events = list(saved.get("event_indices") or []) == list(self.fit_indices)
+            same_events = _int_list(saved.get("event_indices")) == list(self.fit_indices)
             agrees = bool(same_events and np.isfinite(exponent)
                           and abs(fit.exponent - exponent) <= 1e-6 * max(1.0, abs(exponent)))
             self.saved_agrees = agrees
@@ -806,6 +897,7 @@ class SourceScalingView(RunView):
             "y_field": self.y_field,
             "trend_corrected": bool(self.trend_var.get()),
             "include_flagged": self.include_flagged,
+            "exclude_near_field": self.exclude_near_field,
             "exponent": float(self.fit.exponent),
             "exponent_stderr": float(self.fit.exponent_stderr),
             "exponent_rma": float(self.fit.exponent_rma),

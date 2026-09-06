@@ -9,7 +9,7 @@ from labquake_explorer.analysis.interevent import (
 )
 from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import RUN
-from labquake_explorer.ui.views.base import RunView
+from labquake_explorer.ui.views.base import RunView, event_list
 
 
 def aligned_arrays(run: dict) -> list:
@@ -34,8 +34,12 @@ class InterEventView(RunView):
     Each event is sampled ``delay`` seconds after its ``event_time`` by a
     mean over ``width`` seconds; the per-cycle value is the difference to the
     previous event.  Coseismic slip comes from each event's saved
-    ``event_analysis['displacement']`` when present, so
-    creep = slip per cycle - coseismic slip.
+    ``event_analysis['displacement']`` when that record was analysed on the
+    SAME run signal as the fault-slip combobox (``x_field``, schema v2):
+    creep = slip per cycle - coseismic slip.  Records analysed on another X
+    (e.g. ``LP_displacement`` for machine stiffness, or ``time``) and legacy
+    v1 records (no ``x_field``, unsigned displacement) leave the coseismic
+    slip NaN and are counted in the status line.
     Saved under ``runs/[r]['interevent']``.
     """
 
@@ -115,18 +119,38 @@ class InterEventView(RunView):
             raise ValueError("delay must be finite and width >= 0")
         return delay, width
 
-    def coseismic_slips(self, n: int) -> np.ndarray:
-        """Per-event coseismic slip from saved event_analysis (signed v2, abs v1)."""
+    def coseismic_slips(self, n: int, slip_field: str) -> tuple[np.ndarray, dict]:
+        """Per-event coseismic slip from saved ``event_analysis`` records.
+
+        Only a record analysed on ``slip_field`` (``x_field == slip_field``,
+        schema v2) is used: ``displacement`` is X(rupture end) - X(rupture
+        start) of WHATEVER X the analyser was run on, so a record analysed on
+        ``LP_displacement`` or ``time`` is not a fault slip.  Legacy v1
+        records (no ``x_field``, unsigned displacement) are skipped too.
+        Returns ``(slips, skipped)`` with ``skipped`` mapping a reason text
+        to the number of events it applies to.
+        """
         out = np.full(n, np.nan)
-        events = self.run.get("events") or []
-        for j, event in enumerate(events[:n]):
+        skipped: dict[str, int] = {}
+        for j, event in enumerate(event_list(self.run)[:n]):
             analysis = event.get("event_analysis") if isinstance(event, dict) else None
-            if isinstance(analysis, dict) and "displacement" in analysis:
-                try:
-                    out[j] = float(analysis["displacement"])
-                except (TypeError, ValueError):
-                    pass
-        return out
+            if not isinstance(analysis, dict) or "displacement" not in analysis:
+                continue
+            x_field = analysis.get("x_field")
+            if x_field is None:
+                reason = "legacy v1 record without x_field (unsigned displacement)"
+            elif str(x_field) != slip_field:
+                reason = f"analysed on {x_field}"
+            else:
+                reason = None
+            if reason is not None:
+                skipped[reason] = skipped.get(reason, 0) + 1
+                continue
+            try:
+                out[j] = float(analysis["displacement"])
+            except (TypeError, ValueError):
+                pass
+        return out, skipped
 
     def compute(self):
         event_times = event_times_from_run(self.run)
@@ -148,7 +172,7 @@ class InterEventView(RunView):
             self.status_var.set(str(e))
             return
         n = event_times.size
-        coseismic = self.coseismic_slips(n)
+        coseismic, skipped = self.coseismic_slips(n, slip_field)
         creep = creep_per_cycle(metrics["slip_per_cycle"], coseismic)
         self.result = {
             "version": RESULT_VERSION,
@@ -163,13 +187,19 @@ class InterEventView(RunView):
             "lp_per_cycle": metrics["lp_per_cycle"],
             "slip_per_cycle": metrics["slip_per_cycle"],
             "coseismic_slip": coseismic.tolist(),
+            "coseismic_field": slip_field,
+            "coseismic_skipped": dict(skipped),
             "creep": creep.tolist(),
             "note": "per-cycle values are differences between samples taken delay s after consecutive events; "
-                    "creep = slip_per_cycle - coseismic_slip (from event_analysis)",
+                    "creep = slip_per_cycle - coseismic_slip (from event_analysis records analysed on "
+                    "x_field == slip_field; other records are skipped)",
         }
         n_valid = int(np.sum(np.isfinite(metrics["lp_per_cycle"])))
-        self.status_var.set(f"{n} events, {n_valid} cycles; coseismic slip from event_analysis for "
-                            f"{int(np.sum(np.isfinite(coseismic)))} events")
+        text = (f"{n} events, {n_valid} cycles; coseismic slip from event_analysis ({slip_field}) for "
+                f"{int(np.sum(np.isfinite(coseismic)))} events")
+        for reason, count in skipped.items():
+            text += f"; coseismic slip skipped for {count} event(s): {reason}"
+        self.status_var.set(text)
         self.refresh_table()
         self.plot()
 

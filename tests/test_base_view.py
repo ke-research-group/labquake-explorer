@@ -1,8 +1,35 @@
 import tkinter as tk
 
+import numpy as np
 import pytest
 
-from labquake_explorer.ui.views.base import BaseView, EventView, RunView
+from labquake_explorer.ui.views.base import BaseView, EventView, RunView, event_list, nearest_sample
+
+
+def test_event_list_never_truth_tests_the_container():
+    assert event_list({"events": [{"a": 1}, {"b": 2}]}) == [{"a": 1}, {"b": 2}]
+    assert event_list({"events": ({"a": 1},)}) == [{"a": 1}]
+    assert event_list({"events": []}) == []
+    assert event_list({"events": np.zeros(0)}) == []          # empty list after an HDF5 round trip
+    assert event_list({"events": np.zeros(3)}) == []          # not an events container
+    assert event_list({"events": None}) == []
+    assert event_list({}) == []
+    assert event_list(None) == []
+
+
+def test_nearest_sample_skips_nan_and_handles_all_nan():
+    x = np.arange(10.0)
+    y = x ** 2
+    assert nearest_sample(x, y, 4.2, 17.0, (0, 10), (0, 100)) == 4
+    y[3:6] = np.nan                                             # a gap in the signal
+    assert nearest_sample(x, y, 4.0, 16.0, (0, 10), (0, 100)) in (2, 6)
+    assert nearest_sample(x, y, 4.0, 16.0, (0, 10), (0, 100)) != 3   # plain argmin would give the first NaN
+    x[7] = np.nan
+    assert nearest_sample(x, y, 7.0, 49.0, (0, 10), (0, 100)) in (6, 8)
+    assert nearest_sample(x, np.full(10, np.nan), 1.0, 1.0, (0, 10), (0, 100)) is None
+    assert nearest_sample([], [], 1.0, 1.0, (0, 10), (0, 100)) is None
+    # degenerate axis ranges do not divide by zero
+    assert nearest_sample(np.arange(3.0), np.zeros(3), 1.2, 0.0, (0, 0), (0, 0)) == 1
 
 
 class Broken(EventView):

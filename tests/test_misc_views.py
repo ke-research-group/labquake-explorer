@@ -287,6 +287,50 @@ def test_min_max_action_picks_argmax_argmin(app):
     view.on_close()
 
 
+def test_min_max_action_ignores_nan_samples(app, no_dialogs):
+    path = "runs/[0]/events/[1]/shear_stress"
+    y = app.data_manager.get_data(path)
+    y[:5] = np.nan                                   # np.argmin/argmax would return 0
+    run_menu_action(app, path, "Min/Max")
+    view = [w for w in app.child_windows if isinstance(w, PointsSelectorView)][-1]
+    assert view.picked_idx == [int(np.nanargmax(y)), int(np.nanargmin(y))]
+    assert 0 not in view.picked_idx
+    view.on_close()
+    # all-NaN: a warning, no window, no exception
+    y[:] = np.nan
+    before = len(app.child_windows)
+    run_menu_action(app, path, "Min/Max")
+    assert len(app.child_windows) == before
+    assert any("no finite samples" in str(call) for call in no_dialogs)
+
+
+def test_nearest_index_skips_nan_samples(app):
+    """Dragging a marker onto a NaN gap must snap to a finite neighbour, never
+    the NaN sample (an Ellipse centred at (x, nan) is invisible and can never
+    be picked up again)."""
+    x = np.arange(100.0)
+    y = x.copy()
+    y[40:50] = np.nan
+    view = PointsSelectorView(app, x, y, [10, 20], add_remove_enabled=True)
+    try:
+        idx = view.nearest_index(45.0, 45.0)
+        assert idx in (39, 50)
+        assert np.isfinite(view.y_values[idx])
+        assert view.add_point(view.nearest_index(44.0, 44.0)) == 2
+        assert np.isfinite(view.y_values[view.picked_idx[-1]])
+    finally:
+        view.on_close()
+    event = app.data_manager.get_data("runs/[0]/events/[1]")
+    event["shear_stress"][100:200] = np.nan
+    view = IndexPickerView(app, item_y="runs/[0]/events/[1]/shear_stress")
+    try:
+        idx = view.nearest_index(view.data_x[150], float(np.nanmean(view.data_y)))
+        assert not 100 <= idx < 200
+        assert np.isfinite(view.data_y[idx])
+    finally:
+        view.on_close()
+
+
 # ------------------------------------------------------------------- SimplePlotView
 def test_simple_plot_view(app):
     view = SimplePlotView(app)

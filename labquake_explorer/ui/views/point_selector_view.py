@@ -22,7 +22,7 @@ from matplotlib.backend_bases import MouseButton
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
-from labquake_explorer.ui.views.base import BaseView
+from labquake_explorer.ui.views.base import BaseView, nearest_sample
 
 
 class PointsSelectorView(BaseView):
@@ -116,11 +116,15 @@ class PointsSelectorView(BaseView):
         self.canvas.draw()
 
     def nearest_index(self, cx: float, cy: float) -> int:
-        xl = self.ax.get_xlim()
-        yl = self.ax.get_ylim()
-        xw = xl[-1] - xl[0]
-        yw = yl[-1] - yl[0]
-        return int(np.argmin(((self.x_values - cx) / xw) ** 2 + ((self.y_values - cy) / yw) ** 2))
+        """Finite sample nearest to (cx, cy) in axes-normalized distance.
+
+        NaN samples are never candidates; with no finite sample at all the
+        drag/add is refused (ValueError, caught by the mouse handlers).
+        """
+        idx = nearest_sample(self.x_values, self.y_values, cx, cy, self.ax.get_xlim(), self.ax.get_ylim())
+        if idx is None:
+            raise ValueError("no finite samples to snap to")
+        return idx
 
     # ------------------------------------------------------------- dragging
     def on_pick(self, event):

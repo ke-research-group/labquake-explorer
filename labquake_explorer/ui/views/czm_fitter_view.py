@@ -1,14 +1,15 @@
 """Fit a cohesive-zone (slip-weakening) rupture model to near-fault strain.
 
 Two shared-x axes show the shear (Exy, selected gauge) and normal (Eyy,
-gauge 14) strain around one event together with the cohesive-zone
+gauge 14; the lower panel is left empty with a note when the strain block
+has fewer channels) strain around one event together with the cohesive-zone
 prediction.  Three draggable vertical-line pairs mark the zeroing point for
 Eyy (x_min), the rupture tip (x_tip) and the zeroing point / fit end for Exy
 (x_max).  ``Fit`` adjusts Gc and Xc by L-BFGS-B over the tip..max window.
 Results are saved under ``event['czm_parms']`` as a dict.
 """
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 import numpy as np
 from scipy import optimize, signal
@@ -131,16 +132,62 @@ class CZMFitterView(EventView):
         self.save_button.pack(side=tk.LEFT, padx=5)
 
     # -------------------------------------------------------------- loading
+    @staticmethod
+    def strain_raw(event):
+        """The event's full-rate ``strain/original/raw`` block (2-D, >= 1 channel), else None."""
+        strain = event.get("strain") if isinstance(event, dict) else None
+        original = strain.get("original") if isinstance(strain, dict) else None
+        if not isinstance(original, dict) or "raw" not in original or "time" not in original:
+            return None
+        raw = original["raw"]
+        try:
+            if np.ndim(raw) != 2 or len(raw) == 0:
+                return None
+        except TypeError:
+            return None
+        return raw
+
+    def set_event(self, event_idx: int) -> None:
+        """Switch events, but refuse (with a warning) an event without strain data.
+
+        The check happens before ``EventView.set_event`` touches ``event_idx``,
+        ``event``, the title or the combobox, so a refused switch leaves the
+        view (traces, marker lines, parameters) exactly as it was.
+        """
+        event_idx = int(event_idx)
+        try:
+            candidate = self.data_manager.get_data(f"{self.run_path}/events/[{event_idx}]")
+        except (KeyError, IndexError, TypeError):
+            candidate = None
+        if self.strain_raw(candidate) is None:
+            self.refresh_event_selector()  # combobox may already show the refused index
+            messagebox.showwarning(
+                "No strain data",
+                f"Event {event_idx} has no strain data to fit a cohesive zone model to; "
+                f"staying on event {self.event_idx}.",
+                parent=self,
+            )
+            return
+        super().set_event(event_idx)
+
     def on_event_loaded(self):
         self._clear_vlines()
 
-        self.num_gauges = len(self.event["strain"]["original"]["raw"])
+        raw = self.strain_raw(self.event)
+        if raw is None:
+            # first load only (set_event refuses such events): EventView.__init__
+            # unregisters and destroys the half-built window before re-raising
+            raise ValueError(f"{self.event_path} has no strain data (strain/original/raw) "
+                             "to fit a cohesive zone model to")
+        self.num_gauges = len(raw)
         self.gauge_combobox.config(values=[str(i) for i in range(self.num_gauges)])
         default_gauge = min(self.DEFAULT_GAUGE, self.num_gauges - 1)
 
         params = self.event.get(self.result_key)
-        if isinstance(params, list) and len(params) == 8:
+        if isinstance(params, (list, tuple, np.ndarray)) and np.ndim(params) == 1 and len(params) == 8:
             # legacy layout: [Cf, y, Xc, Gc, x_min, x_tip, x_lim_min, x_lim_max]
+            # (a list in memory / .npz, an ndarray after an HDF5 round trip)
+            params = [float(v) for v in params]
             self._set_parameters(*params[:4])
             x0, x1 = params[4], params[5]
             self.line_positions = [x0, x1, 2 * x1 - x0]
@@ -232,6 +279,10 @@ class CZMFitterView(EventView):
             strain = signal.savgol_filter(strain, self._filter_window_length(), 2)
         return strain
 
+    def eyy_gauge(self):
+        """Index of the Eyy gauge, or None when the strain block has no channel ``EYY_GAUGE``."""
+        return self.EYY_GAUGE if 0 <= self.EYY_GAUGE < self.num_gauges else None
+
     def _time(self):
         return self.event["strain"]["original"]["time"] - self.event["event_time"]
 
@@ -255,18 +306,24 @@ class CZMFitterView(EventView):
 
         t = self._time()
         exy = self._strain(self.strain_gauge.get())
-        eyy = self._strain(self.EYY_GAUGE)
+        eyy_gauge = self.eyy_gauge()
 
         idx_zero_xy = int(np.argmin(np.abs(t - line_positions[2])))
         idx_zero_yy = int(np.argmin(np.abs(t - line_positions[0])))
         self.axs[0].plot(t, exy - exy[idx_zero_xy], 'b-', label='Exy')
-        self.axs[1].plot(t, eyy - eyy[idx_zero_yy], 'r-', label='Eyy')
 
         delta_e_xy, delta_e_yy = self._model_strains(t, line_positions[1], self.Xc.get(), self.Gc.get())
         delta_e_xy = delta_e_xy - delta_e_xy[idx_zero_xy]
         delta_e_yy = delta_e_yy - delta_e_yy[idx_zero_yy]
         self.axs[0].plot(t, delta_e_xy, 'g--', label='CZM')
-        self.axs[1].plot(t, delta_e_yy, 'g--', label='CZM')
+        if eyy_gauge is not None:
+            eyy = self._strain(eyy_gauge)
+            self.axs[1].plot(t, eyy - eyy[idx_zero_yy], 'r-', label='Eyy')
+            self.axs[1].plot(t, delta_e_yy, 'g--', label='CZM')
+        else:
+            self.axs[1].text(0.5, 0.5, f"no Eyy gauge: channel {self.EYY_GAUGE} missing "
+                                       f"({self.num_gauges} strain channels)",
+                             ha='center', va='center', transform=self.axs[1].transAxes, color='gray')
 
         self.axs[1].set_xlabel('Time (s)')
         self.axs[0].set_ylabel('Exy')
@@ -282,7 +339,8 @@ class CZMFitterView(EventView):
 
         for ax in self.axs:
             ax.grid(True)
-            ax.legend()
+            if ax.get_legend_handles_labels()[0]:
+                ax.legend()
         self.axs[0].set_xlim(xlim_temp)
         self.canvas.draw()
 
@@ -393,4 +451,6 @@ class CZMFitterView(EventView):
         """Save the current parameters to the event data."""
         if len(self.vlines) < 3:
             return
-        self.save_results(self.collect_results())
+        results = self.collect_results()
+        self.save_results(results)
+        print(f"Saved parameters for event {self.event_idx}: {results}")

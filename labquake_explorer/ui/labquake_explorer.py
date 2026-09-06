@@ -2,7 +2,6 @@
 import sys
 import tkinter as tk
 import numpy as np
-import os
 from tkinter import ttk, filedialog, simpledialog, messagebox
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -192,6 +191,10 @@ class LabquakeExplorer:
         return f"{key}: {type(value).__name__}"
     
     def get_full_path(self, item=None):
+        """``(path, key)`` of a tree item.  Tree paths are data paths, not file
+        paths: they are always ``/``-joined (``os.path.join`` would give
+        backslashes on Windows, which the data layer and the context resolver
+        do not use)."""
         def clean_up_text(s):
             return s.split(':')[0].strip()
         if item is None:
@@ -203,7 +206,7 @@ class LabquakeExplorer:
             node.insert(0, clean_up_text(self.data_tree.item(parent_iid)['text']))
             parent_iid = self.data_tree.parent(parent_iid)
         i = clean_up_text(self.data_tree.item(item, "text"))
-        return os.path.join(*node, i), i
+        return "/".join([*node, i]), i
 
     def find_item(self, target_path: str, item: str = "") -> Optional[str]:
         """Find the tree item id whose full path equals ``target_path``."""
@@ -271,8 +274,13 @@ class LabquakeExplorer:
         path = ctx.path
         y = self.data_manager.get_data(path)
         x = np.arange(len(y))
-        idx_min = np.argmin(y)
-        idx_max = np.argmax(y)
+        values = np.asarray(y, dtype=float)
+        if not np.isfinite(values).any():
+            messagebox.showwarning("Min/Max", f"{path} has no finite samples")
+            return
+        # NaN samples are never the extreme (np.argmin/argmax would return the first NaN)
+        idx_min = int(np.nanargmin(values))
+        idx_max = int(np.nanargmax(values))
         picked_idx = [idx_max, idx_min]
         view = PointsSelectorView(self, x, y, picked_idx, add_remove_enabled=False,
                                  xlabel='index', ylabel=ctx.key, title=path)
@@ -394,9 +402,14 @@ class LabquakeExplorer:
         return menu
 
     def on_right_click(self, event):
-        # Clear previous menu
+        # Clear previous menu (unpost AND destroy: a fresh Menu is built per
+        # right-click, and orphaned menus would otherwise accumulate under root)
         if self.active_context_menu:
             self.active_context_menu.unpost()
+            try:
+                self.active_context_menu.destroy()
+            except tk.TclError:
+                pass
         self.active_context_menu = None
 
         try:

@@ -476,15 +476,25 @@ class PZTSpectrumView(EventView):
     # ----------------------------------------------------------- records
     def saved_channels(self) -> dict:
         """``{channel: record}`` parsed from ``event['pzt_spectrum']['channels']``
-        (keys ``'ch<k>'``; legacy all-digit keys are accepted too)."""
+        (keys ``'ch<k>'``; legacy all-digit keys are accepted too).
+
+        A legacy map keyed ``'0'..'n-1'`` comes back from an HDF5 file as a
+        LIST (the loader turns contiguous digit keys into one); its entries
+        are channels 0..n-1.  Only dict records count.
+        """
         saved = self.load_results()
         channels = saved.get("channels") if saved else None
         out = {}
         if isinstance(channels, dict):
-            for key, rec in channels.items():
-                k = parse_channel_key(key)
-                if k is not None:
-                    out[k] = rec
+            items = list(channels.items())
+        elif isinstance(channels, (list, tuple)):
+            items = list(enumerate(channels))
+        else:
+            items = []
+        for key, rec in items:
+            k = parse_channel_key(key)
+            if k is not None and isinstance(rec, dict):
+                out[k] = rec
         return out
 
     def _clear_channel_state(self) -> None:
@@ -507,6 +517,9 @@ class PZTSpectrumView(EventView):
             return
         try:
             self.record = copy.deepcopy(rec)
+            # a record is keyed by its channel; a hand-edited / partial record
+            # without the field is filed under the channel it was found at
+            self.record.setdefault("channel", int(channel))
             self.apply_record(self.record)
             self.show_record(self.record)
             self.show_source(self.record.get("source"))
@@ -829,10 +842,21 @@ class PZTSpectrumView(EventView):
         if not isinstance(self.record, dict):
             self.status_var.set("nothing to save - click Compute first")
             return False
+        channel = self.record.get("channel")
+        if channel is None:
+            channel = self.current_channel()
+        try:
+            channel = int(channel)
+        except (TypeError, ValueError):
+            channel = None
+        if channel is None:
+            self.status_var.set("nothing saved - the record has no channel and none is selected")
+            return False
+        self.record["channel"] = channel
         channels = {channel_key(k): rec for k, rec in sorted(self.saved_channels().items())}
-        channels[channel_key(self.record["channel"])] = copy.deepcopy(self.record)
+        channels[channel_key(channel)] = copy.deepcopy(self.record)
         self.save_results({"version": RESULT_VERSION, "channels": channels})
-        self.status_var.set(f"channel {self.record['channel']} saved ({len(channels)} channel(s) stored)")
+        self.status_var.set(f"channel {channel} saved ({len(channels)} channel(s) stored)")
         return True
 
     # ------------------------------------------------------------- display

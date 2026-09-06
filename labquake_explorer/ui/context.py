@@ -45,7 +45,8 @@ class TreeContext:
 
     @property
     def parent_path(self) -> str:
-        return self.path.rsplit("/", 1)[0] if "/" in self.path else ""
+        """The path one level up, always ``/``-joined (backslash paths are accepted)."""
+        return "/".join(split_path(self.path)[:-1])
 
 
 def split_path(path: str) -> list[str]:

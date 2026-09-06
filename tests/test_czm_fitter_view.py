@@ -3,6 +3,7 @@ import pytest
 from matplotlib.backend_bases import MouseEvent
 
 from labquake_explorer.ui.views import CZMFitterView
+from tests.synthetic import add_strain
 
 EXPECTED_KEYS = {"Cf", "y", "Xc", "Gc", "x_min", "x_tip", "x_max", "x_lim_min", "x_lim_max", "strain_gauge"}
 
@@ -125,7 +126,7 @@ def test_reopen_restores_parameters_and_lines(app_with_strain, view):
         other.on_close()
 
 
-def test_legacy_list_is_read(app_with_strain):
+def test_legacy_list_is_read(app_with_strain, app_from_file, tmp_path):
     event = app_with_strain.data_manager.get_data("runs/[0]/events/[3]")
     event["czm_parms"] = [500.0, 5e-3, 2.0, 3.0, -0.004, 0.0, -0.02, 0.02]
     v = CZMFitterView(app_with_strain, 0, 3)
@@ -139,10 +140,104 @@ def test_legacy_list_is_read(app_with_strain):
         assert v.strain_gauge.get() == 6
         # loading does not rewrite the stored value; saving does
         assert isinstance(event["czm_parms"], list)
+    finally:
+        v.on_close()
+
+    # the legacy list comes back from an HDF5 file as a float ndarray: still read
+    path = tmp_path / "legacy_czm.h5"
+    app_with_strain.data_manager.save_file(path)
+    app2 = app_from_file(path)
+    stored = app2.data_manager.get_data("runs/[0]/events/[3]/czm_parms")
+    assert isinstance(stored, np.ndarray) and stored.shape == (8,)
+    v2 = CZMFitterView(app2, 0, 3)
+    try:
+        assert v2.Cf.get() == 500.0
+        assert v2.y.get() == pytest.approx(5e-3)
+        assert positions(v2) == pytest.approx([-0.004, 0.0, 0.004])
+        assert v2.axs[0].get_xlim() == pytest.approx((-0.02, 0.02))
+        assert isinstance(app2.data_manager.get_data("runs/[0]/events/[3]/czm_parms"), np.ndarray)
+        v2.save_parameters()
+        saved = app2.data_manager.get_data("runs/[0]/events/[3]/czm_parms")
+        assert isinstance(saved, dict) and set(saved) == EXPECTED_KEYS
+        assert saved["Cf"] == 500.0 and saved["x_max"] == pytest.approx(0.004)
+    finally:
+        v2.on_close()
+
+    # in memory the list is still a list; saving rewrites it as a dict
+    assert isinstance(event["czm_parms"], list)
+    v = CZMFitterView(app_with_strain, 0, 3)
+    try:
         v.save_parameters()
         assert isinstance(event["czm_parms"], dict)
         assert set(event["czm_parms"]) == EXPECTED_KEYS
         assert event["czm_parms"]["x_max"] == pytest.approx(0.004)
+    finally:
+        v.on_close()
+
+
+def test_save_prints_confirmation(app_with_strain, view, capsys):
+    view.Cf.set(1000.0)
+    view.save_parameters()
+    out = capsys.readouterr().out
+    assert "Saved parameters for event 1" in out and "'Cf': 1000.0" in out
+
+
+def test_switch_to_event_without_strain_is_refused(app_with_strain, view, no_dialogs):
+    """Selecting an event that has no strain block warns and leaves the view
+    untouched (index, title, traces, marker lines), like the arrival picker."""
+    events = app_with_strain.data_manager.get_data("runs/[0]/events")
+    del events[2]["strain"]
+    view.move_line(1, 0.002)
+    before = positions(view)
+    view.event_combobox.set("2")
+    view.on_event_selected()
+    assert view.event_idx == 1
+    assert view.title() == "Cohesive Zone Model Fitting - Event 1"
+    assert view.event_combobox.get() == "1"
+    assert view.event is events[1]
+    assert positions(view) == pytest.approx(before)
+    assert view.figure._suptitle.get_text().endswith("event1")
+    assert any("No strain data" in str(call) for call in no_dialogs)
+    # the view still works afterwards
+    view.update_plot()
+    assert view.build_fit_objective() is not None
+    view.save_parameters()
+    assert events[1]["czm_parms"]["x_tip"] == pytest.approx(0.002)
+    # switching to a good event still works
+    view.set_event(3)
+    assert view.event_idx == 3 and len(view.vlines) == 3
+
+
+def test_open_on_event_without_strain_fails_cleanly(app_with_strain):
+    events = app_with_strain.data_manager.get_data("runs/[0]/events")
+    del events[2]["strain"]
+    with pytest.raises(ValueError, match="no strain data"):
+        CZMFitterView(app_with_strain, 0, 2)
+    assert app_with_strain.child_windows == []
+
+
+def test_fewer_than_15_channels_opens_without_eyy_panel(app_with_strain):
+    event = app_with_strain.data_manager.get_data("runs/[0]/events/[2]")
+    add_strain(event, n_channels=8)
+    v = CZMFitterView(app_with_strain, 0, 2)
+    try:
+        assert v.num_gauges == 8 and v.eyy_gauge() is None
+        assert v.strain_gauge.get() == 6
+        assert len(v.vlines) == 3 and len(v.vlines_twin) == 3
+        labels = [l.get_label() for l in v.axs[0].get_lines()]
+        assert "Exy" in labels and "CZM" in labels
+        assert [l.get_label() for l in v.axs[1].get_lines() if l.get_label() in ("Eyy", "CZM")] == []
+        assert any("no Eyy gauge" in t.get_text() for t in v.axs[1].texts)
+        # the Exy fit and save still work without the Eyy panel
+        v.Cf.set(1000.0)
+        result = v.fit_parameters()
+        assert result is not None and result.success
+        v.save_parameters()
+        assert set(event["czm_parms"]) == EXPECTED_KEYS
+        # a full array on another event restores the Eyy panel
+        v.set_event(1)
+        assert v.eyy_gauge() == 14
+        assert "Eyy" in [l.get_label() for l in v.axs[1].get_lines()]
     finally:
         v.on_close()
 

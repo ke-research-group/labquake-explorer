@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from matplotlib.backend_bases import MouseEvent
 
 from labquake_explorer.analysis.event_metrics import RESULT_VERSION
 from labquake_explorer.ui.views import EventAnalyzerView
@@ -86,6 +87,70 @@ def test_save_writes_versioned_event_analysis(app, view):
                                + [saved["rupture_start_index"], saved["rupture_end_index"]]
                                + saved["post_indices"])
     assert view.fit_combo.get() == "Theil-Sen"
+
+
+def test_reopen_restores_saved_x_and_y_fields(app):
+    """A record analysed on X = LP_displacement is shown (and re-saved) against
+    LP_displacement, not the constructor default."""
+    truth = app.truth[0]
+    v = EventAnalyzerView(app, 0, 1, item_x="LP_displacement")
+    for point, t_rel in ((0, -4.0), (1, -1.0), (4, -0.001), (5, 0.001), (6, 0.5), (7, 2.5)):
+        v.move_point(point, idx_at(v, t_rel))
+    v.save_event()
+    saved = v.event["event_analysis"]
+    assert saved["x_field"] == "LP_displacement" and saved["y_field"] == "shear_stress"
+    assert abs(saved["displacement"]) < 1.0                       # LP advance across 2 ms, not the slip
+    assert saved["loading_stiffness"] == pytest.approx(truth.stiffness_lp, rel=1e-6)
+    v.on_close()
+
+    v2 = EventAnalyzerView(app, 0, 1)                             # default constructor: 'displacement'
+    try:
+        assert v2.item_x == "LP_displacement" and v2.data_x_combo.get() == "LP_displacement"
+        assert v2.item_y == "shear_stress"
+        assert float(v2.displacement_text.get()) == pytest.approx(saved["displacement"], rel=1e-5)
+        assert float(v2.loading_slope_text.get()) == pytest.approx(saved["loading_stiffness"], rel=1e-6)
+        assert v2.result["x_field"] == "LP_displacement"
+        v2.save_event()
+        assert v2.event["event_analysis"]["x_field"] == "LP_displacement"
+        # switching to an event without a record keeps the current selection
+        v2.set_event(2)
+        assert v2.data_x_combo.get() == "LP_displacement"
+    finally:
+        v2.on_close()
+    # a remembered field that no longer exists falls back without failing
+    saved["x_field"] = "gone"
+    v3 = EventAnalyzerView(app, 0, 1)
+    try:
+        assert v3.data_x_combo.get() in v3.data_x_combo["values"]
+    finally:
+        v3.on_close()
+
+
+def test_dragging_onto_nan_gap_snaps_to_finite_sample(app, view):
+    """A marker dragged over a NaN gap must land on a finite sample: argmin over
+    distances with NaN returns the NaN index, which strands the marker."""
+    y = view.event["shear_stress"]
+    y[100:200] = np.nan
+    view.plot_data()
+    view.plot_picked_points()
+    marker = view.markers[0]
+    view.current_artist = marker
+    view.currently_dragging = True
+    view.offset = [0.0, 0.0]
+    ax = view.ax
+    target_x = float(view.data_x[150])
+    target_y = float(np.nanmean(y))
+    px, py = ax.transData.transform((target_x, target_y))
+    view.on_motion(MouseEvent("motion_notify_event", view.canvas, px, py))
+    idx = view.picked_idx[0]
+    assert not 100 <= idx < 200
+    assert np.isfinite(view.data_y[idx]) and np.isfinite(marker.center[1])
+    # an all-NaN trace leaves the pick alone instead of stranding it
+    y[:] = np.nan
+    view.plot_data()
+    before = list(view.picked_idx)
+    view.on_motion(MouseEvent("motion_notify_event", view.canvas, px, py))
+    assert view.picked_idx == before
 
 
 def test_legacy_v1_results_load_with_default_post_range(app):

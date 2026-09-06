@@ -1,3 +1,6 @@
+import tkinter as tk
+from types import SimpleNamespace
+
 import numpy as np
 
 from labquake_explorer.ui import context as C
@@ -12,7 +15,42 @@ def labels(app, path):
     if menu is None:
         return ctx, []
     n = menu.index("end")
-    return ctx, [menu.entrycget(i, "label") for i in range(n + 1)]
+    try:
+        return ctx, [menu.entrycget(i, "label") for i in range(n + 1)]
+    finally:
+        menu.destroy()
+
+
+def test_tree_paths_are_slash_joined(app):
+    """Tree paths are data paths (never os.path.join'ed: backslashes on Windows
+    would break the context resolver, pick/extract events and delete)."""
+    for path in ("runs/[0]/events/[1]/shear_stress", "runs/[0]/event_indices", "name"):
+        item = app.find_item(path)
+        full, key = app.get_full_path(item)
+        assert full == path and "\\" not in full
+        assert key == path.rsplit("/", 1)[-1]
+    assert app.context_at(app.find_item("runs/[0]/event_indices")).parent_path == "runs/[0]"
+
+
+def test_right_click_destroys_previous_menu(app, monkeypatch):
+    """A fresh Menu is built per right-click; the previous one must be
+    destroyed, not merely unposted, or menus accumulate under root."""
+    posted = []
+    monkeypatch.setattr(tk.Menu, "post", lambda self, x, y: posted.append((x, y)))  # a real post blocks
+    item = app.find_item("runs/[0]/events/[1]")
+    app.data_tree.selection_set(item)
+    event = SimpleNamespace(x_root=0, y_root=0)
+    before = sum(isinstance(w, tk.Menu) for w in app.root.winfo_children())
+    app.on_right_click(event)
+    first = app.active_context_menu
+    assert first is not None and first.winfo_exists() and posted == [(0, 0)]
+    for _ in range(5):
+        app.on_right_click(event)
+    assert not first.winfo_exists()
+    assert app.active_context_menu is not None and app.active_context_menu is not first
+    after = sum(isinstance(w, tk.Menu) for w in app.root.winfo_children())
+    assert after == before + 1
+    app.on_left_click(None)
 
 
 def test_find_item_and_context(app):
