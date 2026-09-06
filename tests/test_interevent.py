@@ -13,7 +13,12 @@ def test_sample_after_mean_window_and_nearest():
     # width 0 -> the sample at t+delay (within half a sample)
     assert sample_after(t, s, 1.0, delay=0.06, width=0.0) == pytest.approx(2.2)
     assert sample_after(t, s, 1.0, delay=0.04, width=0.0) == pytest.approx(2.0)
-    # width covers a fixed number of samples: round(width/dt)+1
+    # width covers a fixed number of samples: round(width/dt)+1 (documented
+    # formula); a unit-step ramp recovers the count directly
+    ramp = np.arange(t.size, dtype=float)
+    for width, expect in [(0.0, 1), (0.1, 2), (0.2, 3), (0.5, 6)]:
+        # mean of 0..expect-1 == (expect-1)/2 only for exactly `expect` samples
+        assert sample_after(t, ramp, 0.0, delay=0.0, width=width) == pytest.approx((expect - 1) / 2)
     assert sample_after(t, s, 1.0, delay=0.0, width=0.2) == pytest.approx(2 * np.mean([1.0, 1.1, 1.2]))
     # mean over [1.0, 1.5] = 2 * mean(t in window)
     v = sample_after(t, s, 1.0, delay=0.0, width=0.5)

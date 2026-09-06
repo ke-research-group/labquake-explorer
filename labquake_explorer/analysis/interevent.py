@@ -23,7 +23,8 @@ def sample_after(time, signal, t: float, delay: float = 0.0, width: float = 0.0)
     """Mean of ``signal`` over ``[t+delay, t+delay+width]``; NaN if outside the run.
 
     ``time`` must be non-decreasing.  The window is converted to a fixed
-    number of samples ``max(1, round(width / dt))`` starting at the first
+    number of samples, ``round(width / dt) + 1`` for ``width > 0`` (both
+    endpoints inclusive) and ``1`` for ``width == 0``, starting at the first
     sample at or after ``t + delay`` (within half a sample), so consecutive
     events are averaged over identical sample counts.  With ``width == 0`` the
     single sample at or after ``t + delay`` is returned.
