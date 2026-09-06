@@ -243,3 +243,13 @@ def test_hdf5_legacy_file_without_container_markers(tmp_path):
     assert [e["event_time"] for e in other.get_data("runs/[0]/events")] == [1.0, 2.0]
     # without the marker a 0..n-1 group is a list; the string dataset stays a list
     assert other.get_data("runs/[0]/channels/[0]/warnings") == ["one"]
+
+
+def test_delete_data_accepts_backslash_paths_and_root(dm):
+    dm.set_data("runs/[0]/tmp", 1, add_key=True)
+    dm.delete_data("runs\\[0]\\tmp")
+    assert "tmp" not in dm.get_data("runs/[0]")
+    with pytest.raises(ValueError):
+        dm.delete_data("runs/[0]/name/x")
+    dm.delete_data("")
+    assert dm.data is None

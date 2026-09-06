@@ -273,58 +273,40 @@ class DataManager:
         current[parts[-1]] = value
 
     def delete_data(self, path: str) -> None:
-        """Delete data at specified path
-        
-        Args:
-            path: Path to the data to delete (e.g. 'runs/[0]/events')
-            
-        Raises:
-            ValueError: If no data is loaded or path is invalid
-            KeyError: If path does not exist
+        """Delete data at specified path (e.g. 'runs/[0]/events'); '' clears everything.
+
+        Raises ValueError for an invalid path, KeyError/IndexError when it
+        does not exist.
         """
         if not self.data:
             raise ValueError("No data loaded")
-            
-        # Handle root deletion
-        if path == "":
+        parts = self._split(path)
+        if not parts:
             self.data = None
             return
-            
-        parts = path.split('/')
         current = self.data
-        
-        # Navigate to parent of item to delete
         for part in parts[:-1]:
-            if part[0] == '[' and part[-1] == ']':
-                # Handle array index
-                idx = int(part[1:-1])
+            if isinstance(part, int):
                 if not isinstance(current, (list, tuple)):
-                    raise ValueError(f"Cannot index non-sequence with {part}")
-                if idx >= len(current):
-                    raise IndexError(f"Index {idx} out of range for sequence of length {len(current)}")
-                current = current[idx]
+                    raise ValueError(f"Cannot index non-sequence with [{part}]")
+                if part >= len(current):
+                    raise IndexError(f"Index {part} out of range for sequence of length {len(current)}")
             else:
-                # Handle dictionary key
                 if not isinstance(current, dict):
                     raise ValueError(f"Cannot get key '{part}' from non-dictionary")
                 if part not in current:
                     raise KeyError(f"Key '{part}' not found")
-                current = current[part]
-        
-        # Delete the item
-        last_part = parts[-1]
-        if last_part[0] == '[' and last_part[-1] == ']':
-            # Handle array index deletion
-            idx = int(last_part[1:-1])
-            if not isinstance(current, (list, tuple)):
-                raise ValueError(f"Cannot delete index from non-sequence")
-            if idx >= len(current):
-                raise IndexError(f"Index {idx} out of range")
-            current.pop(idx)
+            current = current[part]
+        last = parts[-1]
+        if isinstance(last, int):
+            if not isinstance(current, list):
+                raise ValueError("Cannot delete index from non-list")
+            if last >= len(current):
+                raise IndexError(f"Index {last} out of range")
+            current.pop(last)
         else:
-            # Handle dictionary key deletion
             if not isinstance(current, dict):
-                raise ValueError(f"Cannot delete key from non-dictionary")
-            if last_part not in current:
-                raise KeyError(f"Key '{last_part}' not found")
-            current.pop(last_part)
+                raise ValueError("Cannot delete key from non-dictionary")
+            if last not in current:
+                raise KeyError(f"Key '{last}' not found")
+            current.pop(last)

@@ -114,7 +114,9 @@ Arrivals has saved one. A legacy list of eight values is still read.
 
 `delay_s`, `width_s`, `lp_field`, `slip_field`, `event_times`, `recurrence`,
 `lp_after`, `slip_after`, `lp_per_cycle`, `slip_per_cycle`, `coseismic_slip`
-(from each event's `event_analysis.displacement`), `creep`. Each event is
+(from each event's `event_analysis.displacement`, used only when that
+analysis was computed on the same X field, recorded as `coseismic_field`;
+events skipped for that reason are listed in `coseismic_skipped`), `creep`. Each event is
 sampled by a mean over `width_s` starting `delay_s` after its `event_time`;
 per-cycle values are differences between consecutive events; the first event
 and any window outside the run are NaN.
@@ -139,6 +141,10 @@ displacement spectral density in m s and is masked outside the table; fit
 at 2 by default over log-binned, SNR-gated bins.
 
 ### `source_scaling` (SourceScalingView, run level, version 2)
+
+Also `exclude_near_field` (whether records flagged near-field, kR < 3 at the
+plateau frequency, were excluded from the fit; by default they are only
+warned about).
 
 The channel and Y variable used, quality-gating choice, OLS exponent with
 standard error and bootstrap 16-84 range, reduced-major-axis exponent,

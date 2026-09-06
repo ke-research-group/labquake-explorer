@@ -113,6 +113,7 @@ class LabquakeExplorer:
                 title="Save data file",
                 initialfile=initial_file.name if initial_file else None,
                 initialdir=str(initial_dir) if initial_dir else None,
+                defaultextension=".npz",
                 filetypes=(
                     ("NPZ file", ".npz"),
                     ("HDF5 file", ".h5 .hdf5"),
