@@ -32,45 +32,45 @@ class DataManager:
 
     def _load_hdf5(self, path: Path) -> None:
         with h5py.File(path, 'r') as h5data:
-            def load_dataset(item):
-                try:
-                    data = np.array(item)
-                    if data.dtype.kind == 'S' or data.dtype.kind == 'O':
-                        if isinstance(data.flat[0], bytes):
-                            if data.size == 1:
-                                return data.flat[0].decode('utf-8')
-                            return [x.decode('utf-8') for x in data.flat]
-                    if data.size == 1:  # Convert length-1 arrays to numbers
-                        return data.item()
-                    return data
-                except Exception as exc:
-                    print(f"Dataset loading error: {str(exc)}")
-                    return None
-                
-            def load_group(group):
-                result = {}
-                
-                keys = list(group.keys())
-                if all(k.isdigit() for k in keys):  # Check if all keys are integers
-                    try:
-                        num_keys = max(int(k) for k in keys) + 1
-                        return np.array([load_group(group[str(i)]) for i in range(num_keys)])
-                    except ValueError:
-                        pass  # Fall back to dictionary if an error occurs
-                    
-                for key in keys:
-                    try:
-                        item = group[key]
-                        if isinstance(item, h5py.Group):
-                            result[key] = load_group(item)
-                        else:
-                            result[key] = load_dataset(item)
-                    except Exception as exc:
-                        print(f"Error loading {key}: {str(exc)}")
-                
-                return result
-            
-            self.data = load_group(h5data)
+            self.data = self._load_h5_group(h5data)
+
+    @classmethod
+    def _load_h5_item(cls, item):
+        if isinstance(item, h5py.Group):
+            return cls._load_h5_group(item)
+        return cls._load_h5_dataset(item)
+
+    @staticmethod
+    def _load_h5_dataset(item):
+        try:
+            data = np.array(item)
+            if data.dtype.kind in ('S', 'O'):
+                if data.size and isinstance(data.flat[0], bytes):
+                    if data.size == 1:
+                        return data.flat[0].decode('utf-8')
+                    return [x.decode('utf-8') for x in data.flat]
+            if data.ndim == 0:  # scalar dataset
+                return data.item()
+            return data
+        except Exception as exc:
+            print(f"Dataset loading error: {str(exc)}")
+            return None
+
+    @classmethod
+    def _load_h5_group(cls, group):
+        """Groups whose keys are 0..n-1 come back as lists, everything else as dicts."""
+        keys = list(group.keys())
+        if keys and all(k.isdigit() for k in keys):
+            indices = sorted(int(k) for k in keys)
+            if indices == list(range(len(indices))):
+                return [cls._load_h5_item(group[str(i)]) for i in indices]
+        result = {}
+        for key in keys:
+            try:
+                result[key] = cls._load_h5_item(group[key])
+            except Exception as exc:
+                print(f"Error loading {key}: {str(exc)}")
+        return result
 
     def save_file(self, path: Path) -> None:
         if not self.data:
@@ -80,51 +80,62 @@ class DataManager:
             np.savez(path, experiment=self.data)
         elif path.suffix.lower() in ['.h5', '.hdf5']:
             with h5py.File(path, 'w') as f:
-                def save_item(group, key, value):
-                    if isinstance(value, dict):
-                        subgroup = group.create_group(key)
-                        for k, v in value.items():
-                            save_item(subgroup, k, v)
-                    elif isinstance(value, np.ndarray):
-                        # Ensure 2D arrays are stored as matrices
-                        if value.ndim == 2:  # This ensures any 2D array (e.g., (16, n)) is stored correctly
-                            group.create_dataset(key, data=value, compression="gzip")
-                        else:
-                            arr = np.array(value)
-                            if arr.dtype == object:
-                                if all(isinstance(x, (int, np.integer)) for x in arr.flat):
-                                    arr = arr.astype(np.int64)
-                                elif all(isinstance(x, (float, np.floating)) for x in arr.flat):
-                                    arr = arr.astype(np.float64)
-                                elif all(isinstance(x, bool) for x in arr.flat):
-                                    arr = arr.astype(np.int8)
-                                else:
-                                    arr = np.array([str(x).encode() for x in arr.flat]).reshape(arr.shape)
-                            elif arr.dtype.kind == 'U':  # Convert Unicode strings to byte strings
-                                arr = np.array([x.encode() for x in arr.flat]).reshape(arr.shape)
-                
-                            group.create_dataset(key, data=arr, compression="gzip")
-                    elif isinstance(value, (list, tuple)):
-                        # Convert list/tuple to NumPy array and save if it's 2D
-                        arr = np.array(value)
-                        if arr.ndim == 2:  # Save lists that are actually 2D arrays
-                            group.create_dataset(key, data=arr, compression="gzip")
-                        else:
-                            subgroup = group.create_group(key)
-                            for i, item in enumerate(value):
-                                save_item(subgroup, str(i), item)
-                    elif isinstance(value, str):
-                        group.create_dataset(key, data=value.encode())
-                    elif isinstance(value, (int, float, bool, np.number)):
-                        group.create_dataset(key, data=value)
-                    else:
-                        try:
-                            group.create_dataset(key, data=np.array(value), compression="gzip")
-                        except (ValueError, TypeError) as e:
-                            print(f"Warning: Could not save {key}: {e}")
-    
                 for k, v in self.data.items():
-                    save_item(f, k, v)
+                    self._save_h5_item(f, k, v)
+
+    @classmethod
+    def _save_h5_item(cls, group, key, value) -> None:
+        """Write one value: dicts and lists of dicts become groups, arrays and
+        lists of numbers/strings become datasets, None is skipped."""
+        key = str(key)
+        if value is None:
+            return
+        if isinstance(value, dict):
+            subgroup = group.create_group(key)
+            for k, v in value.items():
+                cls._save_h5_item(subgroup, k, v)
+            return
+        if isinstance(value, (list, tuple)):
+            if len(value) == 0:
+                group.create_dataset(key, data=np.zeros(0))
+                return
+            if all(isinstance(x, dict) for x in value) or any(isinstance(x, (dict, list, tuple, type(None))) for x in value):
+                subgroup = group.create_group(key)
+                for i, item in enumerate(value):
+                    cls._save_h5_item(subgroup, str(i), item)
+                return
+            value = np.array(value)
+        if isinstance(value, np.ndarray):
+            arr = value
+            if arr.dtype == object:
+                if all(isinstance(x, (bool, np.bool_)) for x in arr.flat):
+                    arr = arr.astype(np.int8)
+                elif all(isinstance(x, (int, np.integer)) for x in arr.flat):
+                    arr = arr.astype(np.int64)
+                elif all(isinstance(x, (int, float, np.integer, np.floating)) for x in arr.flat):
+                    arr = arr.astype(np.float64)
+                else:
+                    arr = np.array([str(x).encode() for x in arr.flat]).reshape(arr.shape)
+            elif arr.dtype.kind == 'U':
+                arr = np.array([x.encode() for x in arr.flat]).reshape(arr.shape)
+            elif arr.dtype.kind == 'b':
+                arr = arr.astype(np.int8)
+            if arr.ndim == 0:
+                group.create_dataset(key, data=arr)
+            else:
+                group.create_dataset(key, data=arr, compression="gzip" if arr.size > 1 else None)
+            return
+        if isinstance(value, str):
+            group.create_dataset(key, data=value.encode())
+        elif isinstance(value, (bool, np.bool_)):
+            group.create_dataset(key, data=int(value))
+        elif isinstance(value, (int, float, np.number)):
+            group.create_dataset(key, data=value)
+        else:
+            try:
+                group.create_dataset(key, data=np.array(value))
+            except (ValueError, TypeError) as e:
+                print(f"Warning: Could not save {key}: {e}")
 
     def extract_events(self, indices: List[int], window_size: float) -> List[Dict]:
         """Extract events using provided indices"""
