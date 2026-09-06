@@ -24,13 +24,14 @@ def test_find_item_and_context(app):
 def test_context_menus_from_registry(app):
     assert labels(app, "runs/[0]/shear_stress")[1] == ["Pick Events", "Pick Indices", "Extract Slopes"]
     assert labels(app, "runs/[0]/event_indices")[1] == ["Extract Events"]
-    assert labels(app, "runs/[0]/events/[0]")[1] == ["Analyze Event", "Pick Arrivals", "Fit Cohesive Zone Model"]
-    assert labels(app, "runs/[0]/events/[0]/event_time")[1] == ["Analyze Event", "Pick Arrivals", "Fit Cohesive Zone Model"]
+    event_labels = ["Analyze Event", "Pick Arrivals", "Fit Cohesive Zone Model", "PZT Spectrum"]
+    assert labels(app, "runs/[0]/events/[0]")[1] == event_labels
+    assert labels(app, "runs/[0]/events/[0]/event_time")[1] == event_labels
     assert labels(app, "runs/[0]/events/[0]/shear_stress")[1] == ["Pick Indices", "Extract Slopes", "Min/Max"]
     assert labels(app, "name")[1] == ["Edit String"]
     assert labels(app, "runs/[0]/name")[1] == ["Edit String"]
     assert labels(app, "runs")[1] == []
-    assert "Inter-event Metrics" in labels(app, "runs/[0]")[1]
+    assert labels(app, "runs/[0]")[1] == ["Plot Run Signals", "Inter-event Metrics", "Source Scaling"]
 
 
 def test_run_action_opens_registered_view(app):

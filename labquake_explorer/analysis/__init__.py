@@ -10,6 +10,11 @@ from labquake_explorer.analysis.event_metrics import (
 )
 from labquake_explorer.analysis.interevent import interevent_metrics, sample_after, creep_per_cycle
 from labquake_explorer.analysis.scaling import PowerLawFit, fit_power_law, bootstrap_exponent, reference_line
+from labquake_explorer.analysis.spectrum import (
+    WindowResult, Calibration, SpectrumResult, SpectralFit,
+    extract_window, taper_window, load_calibration_csv, t_star_from_q,
+    compute_spectrum, bin_spectrum, fit_omega_n, brune_spectrum, brune_pulse,
+)
 from labquake_explorer.analysis.source import (
     PHASE_CONSTANTS, SourceParameters, source_parameters, seismic_moment, moment_magnitude,
     stress_drop_eshelby, source_radius, radiation_pattern, radiation_coefficient,
@@ -21,6 +26,9 @@ __all__ = [
     "EventPicks", "TrendDrop", "analyze_event", "trend_drop", "RESULT_VERSION",
     "interevent_metrics", "sample_after", "creep_per_cycle",
     "PowerLawFit", "fit_power_law", "bootstrap_exponent", "reference_line",
+    "WindowResult", "Calibration", "SpectrumResult", "SpectralFit",
+    "extract_window", "taper_window", "load_calibration_csv", "t_star_from_q",
+    "compute_spectrum", "bin_spectrum", "fit_omega_n", "brune_spectrum", "brune_pulse",
     "PHASE_CONSTANTS", "SourceParameters", "source_parameters", "seismic_moment", "moment_magnitude",
     "stress_drop_eshelby", "source_radius", "radiation_pattern", "radiation_coefficient",
     "free_surface_amplification", "geometry",
