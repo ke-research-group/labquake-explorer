@@ -6,9 +6,12 @@ on one axis, optionally normalised to [0, 1] so that quantities with mixed
 units (MPa, um, um/s) share a scale.  Event times are marked with vertical
 dotted lines.  Nothing is written back to the data; there is no result key.
 
-Plotting happens only when the user clicks *Plot*, never on every keystroke,
-and a zoom the user applied in the toolbar survives a re-plot as long as the
-axis it applies to still shows the same quantity.
+Plotting happens only when the user clicks *Plot*, never on every keystroke.
+A zoom the user applied in the toolbar survives a re-plot as long as the axis
+it applies to still shows the same thing: the x zoom while the x quantity is
+unchanged, the y zoom while the same set of signals is shown in the same
+normalise state.  The autoscaled view is always recorded as the toolbar's
+*Home* entry, so Home (or the *Reset view* button) returns to the full view.
 """
 from __future__ import annotations
 
@@ -35,7 +38,7 @@ def _aligned_array(value, n: int) -> Optional[np.ndarray]:
 
     Arrays containing NaN are accepted: matplotlib draws gaps for them.
     """
-    if isinstance(value, dict) or isinstance(value, str):
+    if value is None or isinstance(value, (dict, str, bytes)):
         return None
     try:
         arr = np.asarray(value)
@@ -82,49 +85,93 @@ def normalize01(y) -> np.ndarray:
     return out
 
 
-def event_positions(run: dict, x: np.ndarray) -> np.ndarray:
-    """X-coordinates of the run's events on the axis given by ``x``.
+def _as_time(value) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return np.nan
 
-    Event times come from ``run['events'][*]['event_time']`` when present,
-    otherwise from ``run['time'][run['event_indices']]``.  Each time is mapped
-    to the nearest sample of ``run['time']`` and the value of ``x`` at that
-    sample is returned, so markers stay correct when ``x`` is not time.
+
+def event_times(run: dict) -> np.ndarray:
+    """One time per event of the run; NaN where an event has no usable time.
+
+    Each entry of ``run['events']`` contributes its ``event_time``; an event
+    without one falls back to ``run['time'][run['event_indices'][i]]`` for the
+    same position ``i``.  Without an ``events`` list every ``event_indices``
+    entry is used.  The length of the result is the number of events known to
+    the run, so callers can report how many could not be placed.
     """
-    time = np.asarray(run.get("time", []), dtype=float)
+    time = np.asarray(run.get("time", []), dtype=float).ravel() if isinstance(run, dict) else np.array([])
+    indices = run.get("event_indices") if isinstance(run, dict) else None
+    try:
+        idx = np.asarray(indices, dtype=float).ravel() if indices is not None else np.array([])
+    except (TypeError, ValueError):
+        idx = np.array([])
+
+    def time_at(i: int) -> float:
+        if i >= idx.size or not np.isfinite(idx[i]):
+            return np.nan
+        j = int(idx[i])
+        if 0 <= j < time.size:
+            return float(time[j])
+        return np.nan
+
+    events = run.get("events") if isinstance(run, dict) else None
+    if isinstance(events, (list, tuple)) and len(events):
+        out = np.full(len(events), np.nan)
+        for i, event in enumerate(events):
+            t = _as_time(event["event_time"]) if isinstance(event, dict) and "event_time" in event else np.nan
+            out[i] = t if np.isfinite(t) else time_at(i)
+        return out
+    return np.array([time_at(i) for i in range(idx.size)], dtype=float)
+
+
+def nearest_samples(time: np.ndarray, times: np.ndarray) -> np.ndarray:
+    """Index of the finite sample of ``time`` closest to each of ``times``.
+
+    ``time`` need not be sorted (it is sorted once here); non-finite samples
+    are never chosen.  Entries with no finite sample available are -1.
+    """
+    time = np.asarray(time, dtype=float).ravel()
+    times = np.asarray(times, dtype=float).ravel()
+    out = np.full(times.shape, -1, dtype=int)
+    finite_idx = np.flatnonzero(np.isfinite(time))
+    ok = np.isfinite(times)
+    if finite_idx.size == 0 or not ok.any():
+        return out
+    order = finite_idx[np.argsort(time[finite_idx], kind="stable")]
+    sorted_time = time[order]
+    pos = np.searchsorted(sorted_time, times[ok])
+    right = np.clip(pos, 0, sorted_time.size - 1)
+    left = np.clip(pos - 1, 0, sorted_time.size - 1)
+    choose_left = np.abs(sorted_time[left] - times[ok]) <= np.abs(sorted_time[right] - times[ok])
+    out[ok] = order[np.where(choose_left, left, right)]
+    return out
+
+
+def event_positions(run: dict, x: np.ndarray) -> np.ndarray:
+    """X-coordinates of the run's markable events on the axis given by ``x``.
+
+    Each event time from :func:`event_times` is mapped to the nearest sample
+    of ``run['time']`` (which need not be sorted) and the value of ``x`` at
+    that sample is returned, so markers stay correct when ``x`` is not time.
+    Events without a usable time, and events whose ``x`` sample is not
+    finite, are dropped; compare ``len(result)`` with ``event_times(run).size``
+    to count them.
+    """
+    if not isinstance(run, dict):
+        return np.array([], dtype=float)
+    time = np.asarray(run.get("time", []), dtype=float).ravel()
+    x = np.asarray(x, dtype=float).ravel()
     if time.size == 0 or x.shape != time.shape:
         return np.array([], dtype=float)
-    times: list[float] = []
-    events = run.get("events")
-    if isinstance(events, list) and events:
-        for event in events:
-            if isinstance(event, dict) and "event_time" in event:
-                try:
-                    times.append(float(event["event_time"]))
-                except (TypeError, ValueError):
-                    continue
-    if not times:
-        indices = run.get("event_indices")
-        if indices is not None:
-            try:
-                idx = np.asarray(indices, dtype=int).ravel()
-            except (TypeError, ValueError):
-                idx = np.array([], dtype=int)
-            idx = idx[(idx >= 0) & (idx < time.size)]
-            times = [float(t) for t in time[idx]]
-    if not times:
+    times = event_times(run)
+    if times.size == 0:
         return np.array([], dtype=float)
-    times_arr = np.asarray(times, dtype=float)
-    finite = np.isfinite(times_arr)
-    times_arr = times_arr[finite]
-    if times_arr.size == 0:
-        return np.array([], dtype=float)
-    # nearest sample of the (non-decreasing) time axis
-    pos = np.searchsorted(time, times_arr)
-    pos = np.clip(pos, 1, time.size - 1)
-    left = pos - 1
-    choose_left = np.abs(time[left] - times_arr) <= np.abs(time[pos] - times_arr)
-    nearest = np.where(choose_left, left, pos)
-    return np.asarray(x, dtype=float)[nearest]
+    nearest = nearest_samples(time, times)
+    nearest = nearest[nearest >= 0]
+    xs = x[nearest]
+    return xs[np.isfinite(xs)]
 
 
 # ------------------------------------------------------------------------ view
@@ -148,6 +195,7 @@ class RunSignalsView(RunView):
         self._auto_limits: Optional[tuple[tuple[float, float], tuple[float, float]]] = None
         self._plotted_x: Optional[str] = None
         self._plotted_normalize: Optional[bool] = None
+        self._plotted_keys: Optional[frozenset] = None
         super().__init__(app, run_idx)
 
     # ------------------------------------------------------------------ ui
@@ -184,9 +232,11 @@ class RunSignalsView(RunView):
 
         self.plot_button = ttk.Button(controls, text="Plot", command=self.plot)
         self.plot_button.grid(row=5, column=0, columnspan=2, pady=(8, 2), sticky="ew")
+        self.reset_button = ttk.Button(controls, text="Reset view", command=self.reset_view)
+        self.reset_button.grid(row=6, column=0, columnspan=2, pady=2, sticky="ew")
         self.status_var = tk.StringVar(master=self, value="Preview only - nothing is saved")
         ttk.Label(controls, textvariable=self.status_var, wraplength=180).grid(
-            row=6, column=0, columnspan=2, pady=(4, 0), sticky="w")
+            row=7, column=0, columnspan=2, pady=(4, 0), sticky="w")
 
         self.make_figure(figsize=(9, 6), row=0, column=1, padx=5, pady=5, sticky="nsew")
         self.ax = self.figure.add_subplot(111)
@@ -217,7 +267,8 @@ class RunSignalsView(RunView):
             self.x_combo.set(X_TIME if X_TIME in x_values else X_INDEX)
 
     def selected_signals(self) -> list[str]:
-        return [self.candidates[int(i)] for i in self.signal_listbox.curselection()]
+        return [self.candidates[int(i)] for i in self.signal_listbox.curselection()
+                if int(i) < len(self.candidates)]
 
     def select_signals(self, keys: Sequence[str]) -> None:
         """Select exactly ``keys`` in the listbox (unknown keys are ignored)."""
@@ -228,15 +279,20 @@ class RunSignalsView(RunView):
 
     # ----------------------------------------------------------------- data
     def x_data(self) -> tuple[np.ndarray, str]:
-        """The X array for the current combobox choice and its axis label."""
+        """The X array for the current combobox choice and its axis label.
+
+        Falls back to the sample index when the chosen array is missing or no
+        longer a 1-D numeric array aligned with ``run['time']``.
+        """
         choice = self.x_combo.get() or X_TIME
-        n = len(self.run["time"]) if "time" in self.run else 0
-        if choice == X_INDEX or (choice == X_TIME and X_TIME not in self.run):
-            return np.arange(n, dtype=float), "sample index"
-        arr = self.run.get(choice)
-        if arr is None:
-            return np.arange(n, dtype=float), "sample index"
-        return np.asarray(arr, dtype=float), choice
+        run = self.run if isinstance(self.run, dict) else {}
+        time = run.get("time")
+        n = len(time) if hasattr(time, "__len__") else 0
+        if choice != X_INDEX and choice in run:
+            arr = _aligned_array(run.get(choice), n)
+            if arr is not None:
+                return arr.astype(float), choice
+        return np.arange(n, dtype=float), "sample index"
 
     def _zoomed(self) -> tuple[bool, bool]:
         """Whether the user changed the x / y limits away from the autoscaled ones."""
@@ -247,39 +303,62 @@ class RunSignalsView(RunView):
         return (not np.allclose(cur_x, auto_x, rtol=1e-9, atol=0.0),
                 not np.allclose(cur_y, auto_y, rtol=1e-9, atol=0.0))
 
+    def reset_view(self) -> None:
+        """Forget any zoom and re-plot at the autoscaled limits."""
+        self._auto_limits = None
+        self.plot()
+
     # ----------------------------------------------------------------- plot
     def plot(self) -> None:
-        """Redraw the axis from the current selection (called by the Plot button)."""
+        """Redraw the axis from the current selection (called by the Plot button).
+
+        Never raises on a run that changed since the listbox was filled:
+        signals that are missing or no longer aligned with the x axis are
+        skipped and named in the status line, and the listbox is refreshed.
+        """
         keys = self.selected_signals()
         normalize = bool(self.normalize_var.get())
         mark_events = bool(self.mark_events_var.get())
         x, xlabel = self.x_data()
         x_choice = self.x_combo.get() or X_TIME
+        n = x.shape[0]
+
+        run = self.run if isinstance(self.run, dict) else {}
+        usable: list[tuple[str, np.ndarray]] = []
+        skipped: list[str] = []
+        for key in keys:
+            arr = _aligned_array(run.get(key), n)
+            if arr is None:
+                skipped.append(key)
+            else:
+                usable.append((key, arr.astype(float)))
+        plotted_keys = frozenset(k for k, _ in usable)
 
         keep_x, keep_y = self._zoomed()
         prev_xlim, prev_ylim = self.ax.get_xlim(), self.ax.get_ylim()
         keep_x = keep_x and x_choice == self._plotted_x
-        keep_y = keep_y and normalize == self._plotted_normalize
+        keep_y = keep_y and normalize == self._plotted_normalize and plotted_keys == self._plotted_keys
 
         self.ax.clear()
         self.signal_lines = []
         self.event_lines = []
-        for key in keys:
-            y = np.asarray(self.run[key], dtype=float)
+        for key, y in usable:
             if normalize:
                 y = normalize01(y)
             line, = self.ax.plot(x, y, linewidth=1.0, label=key)
             self.signal_lines.append(line)
 
+        n_events_total = 0
         if mark_events:
-            for xe in event_positions(self.run, x):
+            n_events_total = int(event_times(run).size) if run.get("time") is not None else 0
+            for xe in event_positions(run, x):
                 self.event_lines.append(self.ax.axvline(xe, **EVENT_LINE_STYLE))
 
         self.ax.set_xlabel(xlabel)
         if normalize:
             self.ax.set_ylabel("normalized [0, 1]")
-        elif len(keys) == 1:
-            self.ax.set_ylabel(keys[0])
+        elif len(usable) == 1:
+            self.ax.set_ylabel(usable[0][0])
         else:
             self.ax.set_ylabel("value")
         self.ax.set_title(f"{self.experiment_name()} run{self.run_idx:02d}".strip())
@@ -292,20 +371,32 @@ class RunSignalsView(RunView):
         self.ax.relim()
         self.ax.autoscale_view()
         self._auto_limits = (tuple(self.ax.get_xlim()), tuple(self.ax.get_ylim()))
+        toolbar = getattr(self, "toolbar", None)
+        if toolbar is not None:
+            toolbar.update()          # forget the zoom history of the previous plot
+            toolbar.push_current()    # the autoscaled view is the new Home
         if keep_x:
             self.ax.set_xlim(prev_xlim)
         if keep_y:
             self.ax.set_ylim(prev_ylim)
+        if toolbar is not None and (keep_x or keep_y):
+            toolbar.push_current()    # ... and the preserved zoom the current entry
         self._plotted_x = x_choice
         self._plotted_normalize = normalize
-
-        toolbar = getattr(self, "toolbar", None)
-        if toolbar is not None:
-            toolbar.update()  # forget the zoom history of the previous plot
+        self._plotted_keys = plotted_keys
         self.canvas.draw_idle()
 
-        n_ev = len(self.event_lines)
-        if keys:
-            self.status_var.set(f"{len(keys)} signal(s), {n_ev} event marker(s). Preview only - nothing is saved")
+        n_marked = len(self.event_lines)
+        parts: list[str] = []
+        if usable:
+            parts.append(f"{len(usable)} signal(s), {n_marked} event marker(s).")
         else:
-            self.status_var.set("Select one or more signals and click Plot")
+            parts.append("Select one or more signals and click Plot.")
+        if mark_events and n_events_total > n_marked:
+            parts.append(f"{n_events_total - n_marked} event(s) not markable.")
+        if skipped:
+            parts.append(f"Skipped {', '.join(skipped)}: missing or not aligned with the x axis.")
+        parts.append("Preview only - nothing is saved")
+        self.status_var.set(" ".join(parts))
+        if skipped:
+            self.refresh_candidates()

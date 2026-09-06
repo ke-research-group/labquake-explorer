@@ -5,7 +5,8 @@ from matplotlib.lines import Line2D
 from labquake_explorer.ui.actions import actions_for
 from labquake_explorer.ui.context import RUN
 from labquake_explorer.ui.views.run_signals_view import (
-    RunSignalsView, event_positions, normalize01, signal_candidates,
+    RunSignalsView, event_positions, event_times, nearest_samples, normalize01,
+    signal_candidates,
 )
 
 
@@ -64,6 +65,49 @@ def test_event_positions_prefers_event_times_and_maps_to_x():
     assert event_positions({"time": t}, t).size == 0
 
 
+def test_event_positions_unsorted_time_axis():
+    """A clock reset (time not monotonic) still maps events to the right sample."""
+    t = np.linspace(0.0, 9.0, 10)
+    time = np.concatenate([t[5:], t[:5]])       # 5,6,7,8,9,0,1,2,3,4
+    lp = 10.0 * time
+    run = {"time": time, "events": [{"event_time": 7.0}, {"event_time": 2.1}]}
+    assert event_positions(run, lp) == pytest.approx([70.0, 20.0])
+    assert event_positions(run, time) == pytest.approx([7.0, 2.0])
+    # nearest_samples itself: index into the ORIGINAL (unsorted) array
+    assert nearest_samples(time, [7.0, 2.1]).tolist() == [2, 7]
+
+
+def test_event_positions_mixed_events_fall_back_per_event():
+    t = np.linspace(0.0, 9.0, 10)
+    run = {"time": t, "event_indices": [2, 5, 8],
+           "events": [{"event_time": 2.0}, {"foo": 1}, {"event_time": "bad"}]}
+    times = event_times(run)
+    assert times.size == 3
+    assert times == pytest.approx([2.0, 5.0, 8.0])
+    assert event_positions(run, t) == pytest.approx([2.0, 5.0, 8.0])
+    # an event with neither a time nor an index is reported as NaN and dropped
+    run2 = {"time": t, "event_indices": [2], "events": [{"event_time": 2.0}, {"foo": 1}]}
+    times2 = event_times(run2)
+    assert times2.size == 2 and times2[0] == 2.0 and np.isnan(times2[1])
+    assert event_positions(run2, t) == pytest.approx([2.0])
+
+
+def test_event_positions_skip_nan_samples():
+    t = np.linspace(0.0, 9.0, 10)
+    x = 10.0 * t
+    x[3] = np.nan                                   # x undefined at the event sample
+    run = {"time": t, "events": [{"event_time": 3.0}, {"event_time": 7.0}]}
+    pos = event_positions(run, x)
+    assert pos == pytest.approx([70.0])
+    assert np.all(np.isfinite(pos))
+    # NaN in the time axis is never chosen as the nearest sample
+    time_nan = t.copy()
+    time_nan[5] = np.nan
+    assert nearest_samples(time_nan, [5.0]).tolist() in ([4], [6])
+    assert nearest_samples(np.full(4, np.nan), [1.0]).tolist() == [-1]
+    assert event_positions({"time": time_nan, "events": [{"event_time": 5.0}]}, time_nan).size == 1
+
+
 # ----------------------------------------------------------------------- view
 def test_open_lists_candidates_and_plots_default(app, view):
     assert view.title() == "Run Signals - run00"
@@ -87,6 +131,8 @@ def test_open_lists_candidates_and_plots_default(app, view):
     assert len(view.event_lines) == n_events(app)
     assert view.ax.get_xlabel() == "time"
     assert view.ax.get_ylabel() == "shear_stress"
+    assert "not markable" not in view.status_var.get()
+    assert "Skipped" not in view.status_var.get()
 
 
 def test_registered_action_opens_view(app):
@@ -175,12 +221,31 @@ def test_zoom_is_preserved_across_replots(app, view):
     auto_x, auto_y = view.ax.get_xlim(), view.ax.get_ylim()
     view.ax.set_xlim(10.0, 20.0)
     view.ax.set_ylim(4.0, 6.0)
-    # re-plot with another signal added: both zooms survive
-    view.select_signals(["shear_stress", "normal_stress"])
+    # re-plot with the same signals: both zooms survive
     view.plot_button.invoke()
     assert view.ax.get_xlim() == pytest.approx((10.0, 20.0))
     assert view.ax.get_ylim() == pytest.approx((4.0, 6.0))
+    # adding a signal changes what y shows: y re-autoscales so the new line is
+    # visible, x zoom kept
+    view.select_signals(["shear_stress", "normal_stress"])
+    view.plot_button.invoke()
+    assert view.ax.get_xlim() == pytest.approx((10.0, 20.0))
+    assert view.ax.get_ylim() != pytest.approx((4.0, 6.0))
+    lo, hi = view.ax.get_ylim()
+    for line in view.signal_lines:
+        y = np.asarray(line.get_ydata(), dtype=float)
+        assert lo <= np.nanmin(y) and np.nanmax(y) <= hi
+    # y zoom with the two signals survives a re-plot of the same two signals
+    view.ax.set_ylim(3.0, 12.0)
+    view.plot_button.invoke()
+    assert view.ax.get_ylim() == pytest.approx((3.0, 12.0))
+    # removing a signal also resets y
+    view.select_signals(["shear_stress"])
+    view.plot_button.invoke()
+    assert view.ax.get_ylim() != pytest.approx((3.0, 12.0))
+    assert view.ax.get_xlim() == pytest.approx((10.0, 20.0))
     # toggling normalize changes the y quantity: y resets, x zoom kept
+    view.ax.set_ylim(4.0, 6.0)
     view.normalize_var.set(True)
     view.plot_button.invoke()
     assert view.ax.get_xlim() == pytest.approx((10.0, 20.0))
@@ -196,6 +261,106 @@ def test_zoom_is_preserved_across_replots(app, view):
     view.plot_button.invoke()
     assert view.ax.get_xlim() == pytest.approx(auto_x)
     assert view.ax.get_ylim() == pytest.approx(auto_y)
+
+
+def test_toolbar_home_returns_to_full_view_after_zoomed_replot(app, view):
+    view.select_signals(["shear_stress"])
+    view.plot_button.invoke()
+    auto_x, auto_y = view.ax.get_xlim(), view.ax.get_ylim()
+    view.ax.set_xlim(10.0, 20.0)
+    view.plot_button.invoke()
+    assert view.ax.get_xlim() == pytest.approx((10.0, 20.0))
+    # the nav stack is not empty after a re-plot, so the next toolbar
+    # interaction does not record the preserved zoom as Home
+    assert view.toolbar._nav_stack() is not None
+    view.toolbar.home()
+    assert view.ax.get_xlim() == pytest.approx(auto_x)
+    assert view.ax.get_ylim() == pytest.approx(auto_y)
+    # a subsequent Plot stays at the full view (the zoom is forgotten)
+    view.plot_button.invoke()
+    assert view.ax.get_xlim() == pytest.approx(auto_x)
+    # simulate a toolbar zoom on top of a preserved zoom, then Home
+    view.ax.set_xlim(10.0, 20.0)
+    view.plot_button.invoke()
+    view.toolbar.push_current()
+    view.ax.set_xlim(12.0, 14.0)
+    view.toolbar.push_current()
+    view.toolbar.home()
+    assert view.ax.get_xlim() == pytest.approx(auto_x)
+    assert view.ax.get_ylim() == pytest.approx(auto_y)
+    # Home on a fresh (un-zoomed) plot is a no-op at the autoscaled limits
+    view.plot_button.invoke()
+    view.toolbar.home()
+    assert view.ax.get_xlim() == pytest.approx(auto_x)
+
+
+def test_reset_view_button_forgets_zoom(app, view):
+    view.select_signals(["shear_stress"])
+    view.plot_button.invoke()
+    auto_x, auto_y = view.ax.get_xlim(), view.ax.get_ylim()
+    view.ax.set_xlim(10.0, 20.0)
+    view.ax.set_ylim(4.0, 6.0)
+    view.plot_button.invoke()
+    assert view.ax.get_xlim() == pytest.approx((10.0, 20.0))
+    view.reset_button.invoke()
+    assert view.ax.get_xlim() == pytest.approx(auto_x)
+    assert view.ax.get_ylim() == pytest.approx(auto_y)
+    assert [l.get_label() for l in view.signal_lines] == ["shear_stress"]
+
+
+def test_stale_selection_is_skipped_without_raising(app, view):
+    run = app.data_manager.get_data("runs/[0]")
+    original_shear = run["shear_stress"]
+    original_friction = run["friction"]
+    view.select_signals(["shear_stress", "friction", "displacement"])
+    view.plot_button.invoke()
+    assert len(view.signal_lines) == 3
+    try:
+        run["shear_stress"] = np.asarray(original_shear)[:-1]   # no longer aligned
+        run.pop("friction")                                     # gone
+        view.plot_button.invoke()                               # must not raise
+        assert [l.get_label() for l in view.signal_lines] == ["displacement"]
+        assert len(view.event_lines) == n_events(app)
+        status = view.status_var.get()
+        assert "Skipped" in status and "shear_stress" in status and "friction" in status
+        assert "1 signal(s)" in status
+        # the listbox was refreshed: stale entries are gone, the good one stays selected
+        assert "friction" not in view.candidates and "shear_stress" not in view.candidates
+        assert view.selected_signals() == ["displacement"]
+        # a stale X-axis choice falls back to the sample index
+        view.x_combo.set("LP_displacement")
+        run["LP_displacement"] = "not an array"
+        view.plot_button.invoke()
+        assert view.ax.get_xlabel() == "sample index"
+        assert [l.get_label() for l in view.signal_lines] == ["displacement"]
+    finally:
+        run["shear_stress"] = original_shear
+        run["friction"] = original_friction
+
+
+def test_status_reports_unmarkable_events(app, view):
+    run = app.data_manager.get_data("runs/[0]")
+    run["events"].append({"note": "no time, no index"})
+    try:
+        view.select_signals(["shear_stress"])
+        view.plot_button.invoke()
+        assert len(view.event_lines) == n_events(app) - 1
+        assert "1 event(s) not markable" in view.status_var.get()
+        # an event whose x sample is NaN cannot be marked either
+        run["events"].pop()
+        x = np.array(run["LP_displacement"], dtype=float)
+        x[np.asarray(run["event_indices"])[0]] = np.nan
+        run["lp_gappy"] = x
+        view.refresh_candidates()
+        view.x_combo.set("lp_gappy")
+        view.plot_button.invoke()
+        assert len(view.event_lines) == n_events(app) - 1
+        assert "1 event(s) not markable" in view.status_var.get()
+        assert all(np.isfinite(l.get_xdata()[0]) for l in view.event_lines)
+    finally:
+        run.pop("lp_gappy", None)
+        if run["events"] and "note" in run["events"][-1]:
+            run["events"].pop()
 
 
 def test_arrays_with_nan_are_listed_and_plotted(app, view):
@@ -229,3 +394,66 @@ def test_close_unregisters(app):
     assert v in app.child_windows
     v.on_close()
     assert v not in app.child_windows
+
+
+# ------------------------------------------------------------ degenerate runs
+def _add_run(app, run: dict) -> int:
+    runs = app.data_manager.get_data("runs")
+    runs.append(run)
+    app.refresh_tree()
+    return len(runs) - 1
+
+
+def test_run_without_time_opens_empty(app):
+    idx = _add_run(app, {"name": "run_no_time", "shear_stress": np.ones(5)})
+    v = RunSignalsView(app, idx)
+    try:
+        assert v.candidates == []
+        assert list(v.x_combo["values"]) == ["index"]
+        assert v.x_combo.get() == "index"
+        assert v.signal_lines == [] and v.event_lines == []
+        assert "Select" in v.status_var.get()
+        v.plot_button.invoke()  # must not raise
+    finally:
+        v.on_close()
+
+
+def test_event_indices_fallback_marks_events(app):
+    base = app.data_manager.get_data("runs/[0]")
+    run = {k: v for k, v in base.items() if k != "events"}
+    run["name"] = "run_indices_only"
+    idx = _add_run(app, run)
+    v = RunSignalsView(app, idx)
+    try:
+        assert len(v.event_lines) == len(run["event_indices"])
+        marker_x = sorted(l.get_xdata()[0] for l in v.event_lines)
+        expected = np.asarray(run["time"])[np.asarray(run["event_indices"])]
+        assert marker_x == pytest.approx(sorted(expected))
+        assert "not markable" not in v.status_var.get()
+    finally:
+        v.on_close()
+
+
+def test_unsorted_time_axis_marks_events_at_the_right_sample(app):
+    base = app.data_manager.get_data("runs/[0]")
+    n = len(base["time"])
+    k = n // 3
+    perm = np.r_[np.arange(k, n), np.arange(k)]          # a clock reset mid-run
+    run = {key: (np.asarray(val)[perm] if key in signal_candidates(base) else val)
+           for key, val in base.items() if key not in ("events", "event_indices")}
+    run["name"] = "run_clock_reset"
+    run["events"] = [{"event_time": float(e["event_time"])} for e in base["events"]]
+    idx = _add_run(app, run)
+    v = RunSignalsView(app, idx)
+    try:
+        v.select_signals(["shear_stress"])
+        v.x_combo.set("LP_displacement")
+        v.plot_button.invoke()
+        time = np.asarray(run["time"])
+        expected = [run["LP_displacement"][int(np.argmin(np.abs(time - e["event_time"])))]
+                    for e in run["events"]]
+        marker_x = sorted(l.get_xdata()[0] for l in v.event_lines)
+        assert marker_x == pytest.approx(sorted(expected))
+        assert "not markable" not in v.status_var.get()
+    finally:
+        v.on_close()
