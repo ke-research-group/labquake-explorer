@@ -1,10 +1,17 @@
 """Data management and processing for Labquake Explorer"""
+import os
+import tempfile
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 import numpy as np
 import h5py
 from labquake_explorer.data.event_processor import EventProcessor
 
+# HDF5 group attribute recording whether a group was written from a dict or a
+# list, so digit-keyed dicts and lists round-trip as what they were.  Files
+# written without it fall back to the "keys 0..n-1 means list" heuristic.
+CONTAINER_ATTR = "container"
+SUPPORTED_SUFFIXES = (".npz", ".h5", ".hdf5")
 
 class DataManager:
     def __init__(self):
@@ -42,11 +49,16 @@ class DataManager:
 
     @staticmethod
     def _load_h5_dataset(item):
+        """Datasets come back as numpy arrays; scalars as Python scalars.
+        String datasets come back as ``str`` when 0-d and as a ``list`` of
+        ``str`` otherwise (so a one-element string list stays a list)."""
         try:
             data = np.array(item)
             if data.dtype.kind in ('S', 'O'):
-                if data.size and isinstance(data.flat[0], bytes):
-                    if data.size == 1:
+                if data.size == 0:
+                    return []
+                if isinstance(data.flat[0], bytes):
+                    if data.ndim == 0:
                         return data.flat[0].decode('utf-8')
                     return [x.decode('utf-8') for x in data.flat]
             if data.ndim == 0:  # scalar dataset
@@ -58,9 +70,14 @@ class DataManager:
 
     @classmethod
     def _load_h5_group(cls, group):
-        """Groups whose keys are 0..n-1 come back as lists, everything else as dicts."""
+        """Groups written from a list come back as lists, groups written from
+        a dict as dicts (``CONTAINER_ATTR``).  Without the marker (files from
+        older versions) groups whose keys are exactly 0..n-1 become lists."""
         keys = list(group.keys())
-        if keys and all(k.isdigit() for k in keys):
+        container = group.attrs.get(CONTAINER_ATTR)
+        if isinstance(container, bytes):
+            container = container.decode()
+        if container == "list" or (container is None and keys and all(k.isdigit() for k in keys)):
             indices = sorted(int(k) for k in keys)
             if indices == list(range(len(indices))):
                 return [cls._load_h5_item(group[str(i)]) for i in indices]
@@ -73,25 +90,54 @@ class DataManager:
         return result
 
     def save_file(self, path: Path) -> None:
+        """Write the experiment to ``path`` (``.npz``, ``.h5`` or ``.hdf5``).
+
+        The file is written to a temporary sibling and moved into place only
+        after the whole tree has been written, so a failure part-way through
+        never leaves a truncated file behind (the usual flow overwrites the
+        file that was just loaded).  Any other suffix raises ``ValueError``
+        instead of silently writing nothing.
+        """
         if not self.data:
             raise ValueError("No data to save")
-    
-        if path.suffix.lower() == '.npz':
-            np.savez(path, experiment=self.data)
-        elif path.suffix.lower() in ['.h5', '.hdf5']:
-            with h5py.File(path, 'w') as f:
-                for k, v in self.data.items():
-                    self._save_h5_item(f, k, v)
+        path = Path(path)
+        suffix = path.suffix.lower()
+        if suffix not in SUPPORTED_SUFFIXES:
+            raise ValueError(f"Unsupported file type: {path.suffix!r} "
+                             f"(use one of {', '.join(SUPPORTED_SUFFIXES)})")
+
+        fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.stem}.", suffix=suffix)
+        os.close(fd)
+        tmp = Path(tmp_name)
+        try:
+            if suffix == '.npz':
+                with open(tmp, 'wb') as f:  # a file object keeps numpy from appending '.npz'
+                    np.savez(f, experiment=self.data)
+            else:
+                with h5py.File(tmp, 'w') as f:
+                    f.attrs[CONTAINER_ATTR] = "dict"
+                    for k, v in self.data.items():
+                        self._save_h5_item(f, k, v)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
 
     @classmethod
     def _save_h5_item(cls, group, key, value) -> None:
         """Write one value: dicts and lists of dicts become groups, arrays and
-        lists of numbers/strings become datasets, None is skipped."""
+        lists of numbers/strings become datasets, None is skipped.  Lists that
+        numpy cannot stack (ragged lists of arrays, mixed content) become a
+        group with one entry per index."""
         key = str(key)
         if value is None:
             return
         if isinstance(value, dict):
             subgroup = group.create_group(key)
+            subgroup.attrs[CONTAINER_ATTR] = "dict"
             for k, v in value.items():
                 cls._save_h5_item(subgroup, k, v)
             return
@@ -99,12 +145,21 @@ class DataManager:
             if len(value) == 0:
                 group.create_dataset(key, data=np.zeros(0))
                 return
-            if all(isinstance(x, dict) for x in value) or any(isinstance(x, (dict, list, tuple, type(None))) for x in value):
+            stacked = None
+            if not any(isinstance(x, (dict, list, tuple, type(None))) for x in value):
+                try:
+                    stacked = np.array(value)
+                except (ValueError, TypeError):  # ragged arrays cannot be stacked
+                    stacked = None
+                if stacked is not None and stacked.dtype == object:
+                    stacked = None  # inhomogeneous content
+            if stacked is None:
                 subgroup = group.create_group(key)
+                subgroup.attrs[CONTAINER_ATTR] = "list"
                 for i, item in enumerate(value):
                     cls._save_h5_item(subgroup, str(i), item)
                 return
-            value = np.array(value)
+            value = stacked
         if isinstance(value, np.ndarray):
             arr = value
             if arr.dtype == object:
@@ -114,6 +169,9 @@ class DataManager:
                     arr = arr.astype(np.int64)
                 elif all(isinstance(x, (int, float, np.integer, np.floating)) for x in arr.flat):
                     arr = arr.astype(np.float64)
+                elif arr.ndim == 1 and any(isinstance(x, (np.ndarray, list, tuple, dict)) for x in arr.flat):
+                    cls._save_h5_item(group, key, list(arr))  # ragged object array -> per-index group
+                    return
                 else:
                     arr = np.array([str(x).encode() for x in arr.flat]).reshape(arr.shape)
             elif arr.dtype.kind == 'U':

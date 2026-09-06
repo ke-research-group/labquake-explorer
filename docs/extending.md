@@ -41,7 +41,10 @@ class MyView(EventView):
 `EventView` provides `run_idx`, `event_idx`, `event`, `event_path`, `set_event()`,
 the event combobox, `load_results()` / `save_results()`, `make_figure()`,
 `toolbar_active()` (ignore drags while pan/zoom is on) and `on_close()`.
-`RunView` provides the same for `runs/[r]`.
+`RunView` provides `run_idx`, `run`, `run_path`, `load_results()` /
+`save_results()` under `runs/[r]/<result_key>`, `make_figure()`,
+`toolbar_active()`, `on_close()` and the hook `on_run_loaded()` (called once
+the run is loaded; there is no event selector and no `on_event_loaded()`).
 
 A menu command that is not a window registers a function instead:
 
@@ -52,10 +55,17 @@ def do_something(app, ctx): ...       # ctx.path, ctx.run_idx, ctx.event_idx, ct
 
 ## Data rule
 
-Raw extracted data lives at the top level of an event. Each view writes only
+Raw extracted data lives at the top level of an event. Each analysis view
+(`event_analysis`, `interevent`, `pzt_spectrum`, `source_scaling`) writes only
 under its own key, and every saved dict carries a `version` integer, the
 inputs needed to reproduce the numbers, and outputs with units in the key
 names. Cross-view reads go through the other view's key.
+
+Two older views predate the rule and are kept as they are so existing files
+stay readable: Pick Arrivals writes into the event's raw layout (see its
+schema below; the PZT view's "picked arrival" trigger reads
+`strain/original/rupture_arrival_time` and the CZM fitter reads
+`rupture_speed` directly), and `czm_parms` carries no `version`.
 
 ## Saved result schemas
 
@@ -75,7 +85,7 @@ seconds relative to `event_time`.
 | `stress_drop` | Y(rupture start) - Y(rupture end) |
 | `displacement` | X(rupture end) - X(rupture start) |
 | `stress_drop_trend` | pre-trend(t_event) - post-trend(t_event); trends are Y(t) lines over the loading and post ranges |
-| `displacement_trend` | the same construction on X (creep-corrected coseismic slip) |
+| `displacement_trend` | post-trend_X(t_event) - pre-trend_X(t_event); the same trend lines fitted to X(t), subtracted in the reversed order so slip is positive (creep-corrected coseismic slip) |
 | `pre_trend`, `post_trend`, `pre_trend_x`, `post_trend_x` | fit records of the four trend lines |
 
 Version 1 dicts (six indices, absolute `stress_drop`) are still read; the post
@@ -83,10 +93,22 @@ range falls back to defaults. "Apply to All Events" converts the current
 windows (relative times) to picks on every event of the run and saves each
 result, so one carefully placed set of windows can be propagated.
 
-### `czm_parms` (CZMFitterView)
+### Pick Arrivals (DynamicStrainArrivalPickerView, no result key)
+
+Written into the event's existing layout, without a `version`:
+
+| key | meaning |
+|---|---|
+| `rupture_speed` | fitted rupture speed `Cf` in m/s; present only when the picks define a line (a degenerate fit removes the key) |
+| `strain/enabled_channels`, `strain/fitting_channels` | one bool per strain channel: shown, and used in the `Cf` fit |
+| `strain/original/picked_idx` | picked arrival sample index per channel on `strain/original/time` |
+| `strain/original/rupture_arrival_time` | the picked arrival times (s), read by the PZT view's "picked arrival" trigger |
+
+### `czm_parms` (CZMFitterView, no version)
 
 Dict with `Cf`, `y`, `Xc`, `Gc`, `x_min`, `x_tip`, `x_max`, `x_lim_min`,
-`x_lim_max`, `strain_gauge`. A legacy list of eight values is still read.
+`x_lim_max`, `strain_gauge`; `Cf` defaults to `|rupture_speed|` when Pick
+Arrivals has saved one. A legacy list of eight values is still read.
 
 ### `interevent` (InterEventView, run level, version 1)
 
@@ -123,3 +145,15 @@ standard error and bootstrap 16-84 range, reduced-major-axis exponent,
 coefficient, r2, the fitted `(x, y)` pairs and their event indices, excluded
 events with their flags, and the distinct medium/model constant sets of the
 records used.
+
+## File formats
+
+"Save As" writes `.npz` (a pickled experiment dict) or `.h5`/`.hdf5`; any
+other suffix is refused. Files are written to a temporary sibling and moved
+into place once complete, so a failed save leaves the previous file intact.
+In HDF5, dicts and lists become groups tagged with a `container` attribute
+so digit-keyed dicts and lists round-trip as what they were (older files
+without the tag treat a group keyed `0..n-1` as a list); `None` values are
+dropped; a scalar string comes back as `str` and any string list as a
+`list` (a one-element list stays a list); lists numpy cannot stack (ragged
+arrays, mixed content) become a group with one entry per index.

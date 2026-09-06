@@ -101,7 +101,9 @@ def test_hdf5_round_trip_of_nested_results(tmp_path, dm):
         "channels": {"ch0": {"channel": 0, "pre_ms": 0.5, "n_fixed": True,
                              "spectrum": {"f_binned": [1e3, 2e3], "snr": [5.0, nan], "counts": [3, 4]},
                              "fit": {"band_used": [1e3, 2e3], "at_bounds": {"ln_fc": False}, "converged": True},
-                             "warnings": ["near node", "kR < 3"], "source": None}},
+                             "warnings": ["near node", "kR < 3"], "source": None},
+                     "0": {"channel": 0, "warnings": ["single warning"], "phases": ["P"],
+                           "flags": [], "picks": [np.arange(3.0), np.arange(5.0)]}},
     }, True)
     dm.set_data("runs/[0]/interevent", {"version": 1, "recurrence": [nan, 12.0, 12.0], "lp_field": "LP_displacement"}, True)
     dm.set_data("runs/[0]/events/[2]/czm_parms", [1.0, 2.0, 3.0, 4.0, -0.1, 0.0, -0.2, 0.2], True)
@@ -122,11 +124,22 @@ def test_hdf5_round_trip_of_nested_results(tmp_path, dm):
     assert list(rec["fit"]["band_used"]) == [1e3, 2e3]
     assert list(rec["warnings"]) == ["near node", "kR < 3"]
     assert "source" not in rec  # None cannot be stored in HDF5
+    # digit keys written from a dict stay a dict (legacy channel maps), one-element
+    # string lists stay lists, empty lists stay empty, ragged arrays keep their shapes
+    channels = other.get_data("runs/[0]/events/[1]/pzt_spectrum/channels")
+    assert isinstance(channels, dict) and set(channels) == {"ch0", "0"}
+    legacy = channels["0"]
+    assert legacy["warnings"] == ["single warning"]
+    assert legacy["phases"] == ["P"]
+    assert list(legacy["flags"]) == []
+    assert isinstance(legacy["picks"], list) and [len(a) for a in legacy["picks"]] == [3, 5]
     np.testing.assert_allclose(rec["spectrum"]["snr"], [5.0, nan], equal_nan=True)
     assert list(other.get_data("runs/[0]/events/[2]/czm_parms")) == [1.0, 2.0, 3.0, 4.0, -0.1, 0.0, -0.2, 0.2]
 
     # everything else matches the original
     del original["runs"][0]["events"][1]["pzt_spectrum"]["channels"]["ch0"]["source"]
+    del original["runs"][0]["events"][1]["pzt_spectrum"]["channels"]["0"]["picks"]
+    del other.data["runs"][0]["events"][1]["pzt_spectrum"]["channels"]["0"]["picks"]
     _assert_equivalent(original, other.data)
 
     # lists survive deletion by index after a load
@@ -141,3 +154,92 @@ def test_hdf5_non_contiguous_digit_keys_stay_a_dict(tmp_path, dm):
     other = DataManager()
     other.load_file(path)
     assert other.get_data("runs/[0]/legacy") == {"0": {"a": 1}, "2": {"a": 3}}
+
+
+@pytest.mark.parametrize("name", ["exp01", "exp01.txt", "exp01.npz.bak"])
+def test_save_file_rejects_unknown_suffix(tmp_path, dm, name):
+    path = tmp_path / name
+    with pytest.raises(ValueError, match="Unsupported file type"):
+        dm.save_file(path)
+    assert not path.exists()
+    assert list(tmp_path.iterdir()) == []  # no stray temporary file either
+
+
+def test_save_file_string_path_and_suffix_case(tmp_path, dm):
+    path = tmp_path / "exp.H5"
+    dm.save_file(str(path))
+    other = DataManager()
+    other.load_file(path)
+    assert other.get_data("name") == "p0001"
+    npz = tmp_path / "exp.NPZ"
+    dm.save_file(npz)
+    assert npz.exists() and not (tmp_path / "exp.NPZ.npz").exists()
+
+
+def test_hdf5_save_failure_keeps_existing_file(tmp_path, dm, monkeypatch):
+    path = tmp_path / "exp.h5"
+    dm.save_file(path)
+    before = path.read_bytes()
+
+    def boom(cls, group, key, value):
+        raise RuntimeError("cannot write")
+
+    monkeypatch.setattr(DataManager, "_save_h5_item", classmethod(boom))
+    with pytest.raises(RuntimeError, match="cannot write"):
+        dm.save_file(path)
+    assert path.read_bytes() == before
+    assert [p.name for p in tmp_path.iterdir()] == ["exp.h5"]
+    other = DataManager()
+    other.load_file(path)
+    assert other.get_data("name") == "p0001"
+
+
+def test_hdf5_ragged_list_of_arrays_does_not_abort_save(tmp_path, dm):
+    dm.set_data("runs/[0]/events/[0]/picks", [np.arange(2.0), np.arange(4.0)], True)
+    dm.set_data("runs/[0]/events/[0]/mixed", [1, "a", 2.5], True)
+    dm.set_data("runs/[0]/events/[0]/stacked", [np.arange(3.0), np.arange(3.0) + 1], True)
+    path = tmp_path / "exp.h5"
+    dm.save_file(path)
+    other = DataManager()
+    other.load_file(path)
+    picks = other.get_data("runs/[0]/events/[0]/picks")
+    assert isinstance(picks, list) and [list(a) for a in picks] == [[0.0, 1.0], [0.0, 1.0, 2.0, 3.0]]
+    assert other.get_data("runs/[0]/events/[0]/mixed") == ["1", "a", "2.5"]
+    np.testing.assert_array_equal(other.get_data("runs/[0]/events/[0]/stacked"), [[0, 1, 2], [1, 2, 3]])
+
+
+def test_hdf5_string_datasets_keep_container_type(tmp_path, dm):
+    dm.set_data("runs/[0]/note", "single", True)
+    dm.set_data("runs/[0]/one", ["single"], True)
+    dm.set_data("runs/[0]/two", ["a", "b"], True)
+    dm.set_data("runs/[0]/none", [], True)
+    path = tmp_path / "exp.h5"
+    dm.save_file(path)
+    other = DataManager()
+    other.load_file(path)
+    assert other.get_data("runs/[0]/note") == "single"
+    assert other.get_data("runs/[0]/one") == ["single"]
+    assert other.get_data("runs/[0]/two") == ["a", "b"]
+    assert list(other.get_data("runs/[0]/none")) == []
+
+
+def test_hdf5_legacy_file_without_container_markers(tmp_path):
+    """Files written before the container attribute: 0..n-1 groups become lists."""
+    import h5py
+    path = tmp_path / "legacy.h5"
+    with h5py.File(path, "w") as f:
+        f.create_dataset("name", data=b"p0001")
+        runs = f.create_group("runs")
+        run = runs.create_group("0")
+        run.create_dataset("shear_stress", data=np.arange(3.0))
+        events = run.create_group("events")
+        events.create_group("0").create_dataset("event_time", data=1.0)
+        events.create_group("1").create_dataset("event_time", data=2.0)
+        chans = run.create_group("channels")
+        chans.create_group("0").create_dataset("warnings", data=np.array([b"one"]))
+    other = DataManager()
+    other.load_file(path)
+    assert isinstance(other.get_data("runs"), list)
+    assert [e["event_time"] for e in other.get_data("runs/[0]/events")] == [1.0, 2.0]
+    # without the marker a 0..n-1 group is a list; the string dataset stays a list
+    assert other.get_data("runs/[0]/channels/[0]/warnings") == ["one"]

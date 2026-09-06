@@ -26,7 +26,9 @@ python -m labquake_explorer.main
 
 Right-click a node in the data tree to see the analyses that apply to it
 (runs, events, arrays). Results are saved into the loaded experiment under
-the node they belong to and written to disk with "Save As".
+the node they belong to and written to disk with "Save As" (`.npz`, `.h5` or
+`.hdf5`; other suffixes are refused, and a failed save leaves the previous
+file untouched).
 
 ## Features
 
