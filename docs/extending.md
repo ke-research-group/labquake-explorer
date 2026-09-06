@@ -96,3 +96,30 @@ Dict with `Cf`, `y`, `Xc`, `Gc`, `x_min`, `x_tip`, `x_max`, `x_lim_min`,
 sampled by a mean over `width_s` starting `delay_s` after its `event_time`;
 per-cycle values are differences between consecutive events; the first event
 and any window outside the run are NaN.
+
+### `pzt_spectrum` (PZTSpectrumView, version 1)
+
+`{"version": 1, "channels": {"ch<k>": record}}`, one record per analysed
+channel. A record stores every control (trigger source and time, pre/post
+window in ms, taper, baseline mode, step removal, calibration path/unit/dB,
+t*, fit band, bins per decade, SNR threshold, n fixed, loss), the binned
+spectrum (`spectrum`: binned frequencies, amplitudes, noise, SNR, counts and
+the window/taper/calibration metadata), the fit (`fit`: `omega0` in the
+spectrum's units, `fc`, `n`, weighted rms of ln residuals, bins used, band
+used, `converged`, `at_bounds`, `band_limited`, `valid`, `reason`) and, once
+"Compute source" has run, `source` (phase, medium constants, distance,
+radiation coefficient, free-surface factor, `seismic_moment_nm`, `mw`,
+`source_radius_m`, `rupture_area_m2`, `stress_drop_pa`, `kR`, warnings).
+Conventions: amplitude = |FFT(taper * x)| dt (one-sided, no coherent-gain
+division); noise divided by sqrt(mean(taper^2)); calibration converts to a
+displacement spectral density in m s and is masked outside the table; fit
+`ln A = ln Omega0 - ln(1 + (f/fc)^n)` in `(ln Omega0, ln fc, n)` with n fixed
+at 2 by default over log-binned, SNR-gated bins.
+
+### `source_scaling` (SourceScalingView, run level, version 2)
+
+The channel and Y variable used, quality-gating choice, OLS exponent with
+standard error and bootstrap 16-84 range, reduced-major-axis exponent,
+coefficient, r2, the fitted `(x, y)` pairs and their event indices, excluded
+events with their flags, and the distinct medium/model constant sets of the
+records used.
