@@ -222,3 +222,69 @@ def make_experiment_with_strain(**kwargs) -> tuple[dict, list[StickSlipRun]]:
         for event in run["events"]:
             add_strain(event)
     return data, truth
+
+
+# ----------------------------------------------------------------------------
+# Elsys TranAX tpc5 file (ECR dual mode) for reader tests
+# ----------------------------------------------------------------------------
+def write_tpc5(path, signals, fs_continuous: float = 2000.0, duration: float = 2.0,
+               fs_trigger: float = 200_000.0, trigger_times=(0.5, 1.4), pre: float = 0.002,
+               post: float = 0.008, volt_range: float = 0.512, start_time: str = "2026-01-01T00:00:00.0000000+08:00",
+               marker_bits: int = 0) -> dict:
+    """Write a dual-mode tpc5 file with one continuous block and trigger blocks.
+
+    ``signals`` maps channel name -> callable ``f(t) -> volts`` evaluated on
+    every block's own time axis, so the trigger blocks are consistent with the
+    continuous record.  Block 1 is the continuous record (trigger sample at its
+    last sample, as TranAX writes it); blocks 2.. are the trigger records.
+    Returns the block table used (seconds on the file clock).
+    """
+    import h5py
+
+    analog_mask = (0xFFFF >> marker_bits) if marker_bits else 0xFFFF
+    marker_mask = 0xFFFF & ~analog_mask
+    factor = 2 * volt_range / (analog_mask + 1)
+    constant = -volt_range
+
+    n_cont = int(round(duration * fs_continuous))
+    blocks = [{"block": 1, "fs": fs_continuous, "n": n_cont, "trigger_sample": n_cont - 1,
+               "trigger_time": (n_cont - 1) / fs_continuous}]
+    n_pre, n_post = int(round(pre * fs_trigger)), int(round(post * fs_trigger))
+    for k, tt in enumerate(trigger_times, start=2):
+        blocks.append({"block": k, "fs": fs_trigger, "n": n_pre + n_post, "trigger_sample": n_pre,
+                       "trigger_time": float(tt)})
+
+    with h5py.File(path, "w") as f:
+        f.attrs["filetype"] = "TransAsData"
+        f.attrs["creator"] = "synthetic"
+        meas = f.create_group("/measurements/00000001")
+        meas.attrs["name"] = "M1"
+        channels = meas.create_group("channels")
+        for number, (name, func) in enumerate(signals.items(), start=1):
+            cg = channels.create_group(f"{number:08d}")
+            cg.attrs["name"] = name
+            cg.attrs["ChannelName"] = name
+            cg.attrs["physicalUnit"] = "V"
+            cg.attrs["binToVoltFactor"] = np.float64(factor)
+            cg.attrs["binToVoltConstant"] = np.float64(constant)
+            cg.attrs["analogMask"] = np.int32(analog_mask)
+            cg.attrs["markerMask"] = np.int32(marker_mask)
+            cg.attrs["rangeMin"] = np.float64(constant)
+            cg.attrs["rangeMax"] = np.float64(constant + factor * analog_mask)
+            cg.attrs["voltToPhysicalFactor"] = np.float64(1.0)
+            cg.attrs["voltToPhysicalConstant"] = np.float64(0.0)
+            bgs = cg.create_group("blocks")
+            for b in blocks:
+                bg = bgs.create_group(f"{b['block']:08d}")
+                bg.attrs["sampleRateHertz"] = np.float64(b["fs"])
+                bg.attrs["triggerSample"] = np.int64(b["trigger_sample"])
+                bg.attrs["triggerTimeSeconds"] = np.float64(b["trigger_time"])
+                bg.attrs["startTime"] = start_time
+                bg.attrs["relativeDivisor"] = np.int32(128)
+                t = b["trigger_time"] + (np.arange(b["n"]) - b["trigger_sample"]) / b["fs"]
+                volts = np.asarray(func(t), dtype=float)
+                raw = np.clip(np.round((volts - constant) / factor), 0, analog_mask).astype(np.uint16)
+                if marker_bits:
+                    raw = raw | np.uint16(marker_mask)   # marker bits set on every sample
+                bg.create_dataset("raw", data=raw, chunks=(min(32768, b["n"]),))
+    return {"blocks": blocks, "factor": factor, "constant": constant}
