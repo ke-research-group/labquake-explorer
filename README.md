@@ -46,6 +46,11 @@ file untouched).
 - Source Scaling: power-law fits of source parameters across events
 - Plot Run Signals: overlay run-level signals with event markers
 
+## Preprocessing
+
+`examples/preprocessing/` holds notebooks that convert raw acquisition files
+(Elsys tpc5, NI loggers) into the experiment file the explorer loads.
+
 ## Development
 
 Tests use synthetic stick-slip runs with known answers and run headlessly:

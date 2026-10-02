@@ -163,3 +163,25 @@ without the tag treat a group keyed `0..n-1` as a list); `None` values are
 dropped; a scalar string comes back as `str` and any string list as a
 `list` (a one-element list stays a list); lists numpy cannot stack (ragged
 arrays, mixed content) become a group with one entry per index.
+
+## Raw-data references (`runs/[r]/strain`)
+
+A run may carry a `strain` dict that points at the high-rate acquisition file
+so that event extraction can read waveforms for picked event times. Two
+layouts exist:
+
+* **legacy** (PSU style): `filename` (tpc5, relative to the experiment file),
+  `time_offset` (s, added to the file clock to land on the run's time axis),
+  `time` and `raw` (a downsampled copy used for previews). The single block of
+  the tpc5 covers the whole run at high rate.
+* **`format: "tpc5"`** (Elsys ECR dual mode, written by
+  `examples/preprocessing/t0211_tpc5.ipynb`): `filename`, `time_offset`
+  (0 when the run's time axis is the file clock), `channel_numbers`,
+  `channel_names`, `fields` (the run field each channel was stored under),
+  `continuous` (the block that was read into the run: block number, sample
+  rate, samples, trigger sample/time, start and end) and `blocks`, the table of
+  trigger blocks with `block`, `sample_rate`, `n_samples`, `trigger_sample`,
+  `trigger_time`, `start`, `end` in seconds on the same clock. The helpers in
+  `labquake_explorer/utils/tpc5.py` (`blocks_from_table`, `find_block`,
+  `read_window`) turn an event time into the trigger block and samples that
+  hold its high-rate record.
