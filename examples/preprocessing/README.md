@@ -15,7 +15,7 @@ references").
 | notebook | acquisition | status |
 |---|---|---|
 | `t0211_tpc5.ipynb` | Elsys TranAX tpc5 only, ECR dual mode (2 kHz continuous block + 2 MHz trigger blocks) | done |
-| tpc5 + NI npz | mechanical data from a National Instruments logger (npz), dynamic data from tpc5 | to do |
+| `t0207_tpc5_ni.ipynb` | two recorders: mechanical channels on a National Instruments logger (npz, 500 kHz continuous), PZT on the Elsys (tpc5, dual mode); runs without an NI file use the tpc5-only path | done |
 
 The notebooks expect the repository root on `sys.path` (they add it
 themselves) or `pip install -e .`, plus `pandas`, `ipympl` and `jupyter`.

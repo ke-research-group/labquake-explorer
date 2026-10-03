@@ -192,3 +192,19 @@ layouts exist:
   `labquake_explorer/utils/tpc5.py` (`blocks_from_table`, `find_block`,
   `read_window`) turn an event time into the trigger block and samples that
   hold its high-rate record.
+
+A run recorded on two systems (written by
+`examples/preprocessing/t0207_tpc5_ni.ipynb`) additionally carries `ni`, a
+reference to the National Instruments `.npz` that holds the mechanical
+channels: `format: "ni_npz"`, `filename` (relative to the experiment file),
+`sample_rate`, `n_samples`, `dtype`, `channels` (member names `ai0`...),
+`fields` (the run field each channel was decimated into), `decimation` (the
+block-mean factor used for the run's time history), `trigger_sample_index`
+and `trigger_time` (the sample at which the first Elsys trigger was received),
+`time_offset` (0: the run's time axis is the NI clock) and `member_offsets`
+(byte offsets of the uncompressed members, so `numpy.memmap` can read any
+window without loading the file; see `labquake_explorer/utils/ni_npz.py`). In
+such a run `strain.time_offset` is the Elsys-to-run clock shift
+(`t_run = t_elsys + time_offset`), determined from `trigger_sample_index`
+against the first Elsys trigger time and checked against the slip steps seen
+by the eddy-current sensors.
