@@ -288,3 +288,22 @@ def write_tpc5(path, signals, fs_continuous: float = 2000.0, duration: float = 2
                     raw = raw | np.uint16(marker_mask)   # marker bits set on every sample
                 bg.create_dataset("raw", data=raw, chunks=(min(32768, b["n"]),))
     return {"blocks": blocks, "factor": factor, "constant": constant}
+
+
+# ----------------------------------------------------------------------------
+# National Instruments .npz recording for reader tests
+# ----------------------------------------------------------------------------
+def write_ni_npz(path, signals, fs: float = 10_000.0, duration: float = 2.0,
+                 trigger_sample_index=None, compressed: bool = False, dtype=np.float64) -> dict:
+    """Write an NI-style npz: ``aiN.npy`` per channel plus ``sample_rate``,
+    ``channels`` and ``trigger_sample_index``.  ``signals`` maps a label to a
+    callable ``f(t) -> volts``.  Returns the arrays written (for assertions)."""
+    n = int(round(duration * fs))
+    t = np.arange(n) / fs
+    arrays = {f"ai{i}": np.asarray(func(t), dtype=dtype) for i, func in enumerate(signals.values())}
+    meta = {"sample_rate": np.array(fs), "channels": np.array(list(signals.keys())),
+            "trigger_sample_index": np.array(-1 if trigger_sample_index is None else int(trigger_sample_index))}
+    if trigger_sample_index is None:
+        meta.pop("trigger_sample_index")
+    (np.savez_compressed if compressed else np.savez)(path, **arrays, **meta)
+    return {"t": t, **arrays}
