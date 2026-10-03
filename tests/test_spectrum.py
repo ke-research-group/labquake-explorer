@@ -309,10 +309,10 @@ def test_calibration_csv_errors(tmp_path):
     f = np.array([1e3, 1e4])
     with pytest.raises(FileNotFoundError):
         sp.load_calibration_csv(tmp_path / "missing.csv", "V/m")
-    with pytest.raises(ValueError):
-        sp.load_calibration_csv(write_csv(tmp_path / "a.csv", "hz", "gain", f, f), "V/m")
-    with pytest.raises(ValueError):
-        sp.load_calibration_csv(write_csv(tmp_path / "b.csv", "frequency", "volts", f, f), "V/m")
+    with pytest.raises(ValueError):   # no frequency-like column
+        sp.load_calibration_csv(write_csv(tmp_path / "a.csv", "x", "gain", f, f), "V/m")
+    # a bare 'hz' column is a frequency and the only other column is the gain
+    assert sp.load_calibration_csv(write_csv(tmp_path / "b.csv", "hz", "volts", f, f), "V/m").gain[0] == 1e3
     with pytest.raises(ValueError):
         sp.load_calibration_csv(write_csv(tmp_path / "c.csv", "frequency", "gain", f, f), "counts/m")
     with pytest.raises(ValueError):
@@ -813,3 +813,81 @@ def test_fitted_scale_floor_and_residual_diagnostic():
     w_ok = sp.extract_window(t, x + smooth, T0, PRE, POST, remove_step=True, step_width_fraction=None)
     assert w_ok.step_residual < 1e-3
     assert sp.compute_spectrum(w_ok).meta["step_residual"] == w_ok.step_residual
+
+
+# ---------------------------------------------------------------------------
+# calibration CSV headers as written by the lab's own tools
+# ---------------------------------------------------------------------------
+def _csv(path, header, rows):
+    path.write_text(header + "\n" + "\n".join(",".join(str(v) for v in r) for r in rows) + "\n")
+    return path
+
+
+def test_calibration_csv_with_unit_in_header_and_db_autodetect(tmp_path):
+    f = np.logspace(3, 5, 25)
+    gain_db = 20 * np.log10(2.0 + 0 * f)
+    path = _csv(tmp_path / "bac.csv", "Frequency (Hz),Average (dB)", zip(f, gain_db))
+    cal = sp.load_calibration_csv(path, "V/V", gain_is_db=None)
+    assert cal.frequency_hz.size == 25
+    np.testing.assert_allclose(cal.gain, 2.0)
+    assert sp.csv_gain_is_db(path) is True
+    # an explicit flag wins over the header
+    linear = sp.load_calibration_csv(path, "V/V", gain_is_db=False)
+    np.testing.assert_allclose(linear.gain, gain_db)
+    piecewise = _csv(tmp_path / "pw.csv", "Frequency (Hz),Piecewise Fit 3-seg (dB)", zip(f, gain_db))
+    assert sp.load_calibration_csv(piecewise, "V/m", None).gain[0] == pytest.approx(2.0)
+
+
+def test_calibration_csv_linear_psi_column_with_nan_tail(tmp_path):
+    f = np.logspace(2.3, 6.4, 40)
+    g = np.full(40, 1e-11)
+    rows = [(fi, gi) for fi, gi in zip(f, g)]
+    rows[-3:] = [(f[-3], ""), (f[-2], ""), (f[-1], "")]
+    path = _csv(tmp_path / "egf.csv", "Frequency_Hz,Mean_Inst_App_Psi", rows)
+    cal = sp.load_calibration_csv(path, "V/m", gain_is_db=None)
+    assert cal.frequency_hz.size == 37 and cal.fmax == pytest.approx(f[-4])
+    np.testing.assert_allclose(cal.gain, 1e-11)
+    assert sp.csv_gain_is_db(path) is False
+
+
+def test_calibration_csv_khz_frequency_and_ambiguous_gain(tmp_path):
+    f_khz = np.array([1.0, 10.0, 100.0])
+    path = _csv(tmp_path / "k.csv", "freq_kHz,gain", zip(f_khz, [1.0, 1.0, 1.0]))
+    cal = sp.load_calibration_csv(path, "V/V")
+    np.testing.assert_allclose(cal.frequency_hz, f_khz * 1e3)
+    bad = _csv(tmp_path / "bad.csv", "frequency,a,b", [(1e3, 1, 2), (1e4, 1, 2)])
+    with pytest.raises(ValueError):
+        sp.load_calibration_csv(bad, "V/V")
+
+
+def test_q_csv_attenuation_table(tmp_path):
+    f_khz = np.array([20.0, 40.0, 80.0, 160.0])
+    q_inv = np.array([0.3, 0.15, 0.075, 0.0375])
+    path = _csv(tmp_path / "q.csv", "freq_kHz,Qp_inv_median", zip(f_khz, q_inv))
+    att = sp.load_q_csv(path, travel_time_s=5.5e-5)
+    assert att.fmin == 2e4 and att.fmax == 1.6e5
+    assert att.q_inv_at(40e3) == pytest.approx(0.15)
+    # log-log interpolation of a power law is exact
+    assert att.q_inv_at(np.sqrt(20e3 * 40e3)) == pytest.approx(np.sqrt(0.3 * 0.15))
+    assert att.factor(40e3) == pytest.approx(np.exp(np.pi * 40e3 * 5.5e-5 * 0.15))
+    np.testing.assert_allclose(att.factor(np.array([1e3, 1e6])), 1.0)   # outside the table: unchanged
+    again = sp.Attenuation.from_dict(att.as_dict())
+    np.testing.assert_allclose(again.q_inv, att.q_inv)
+    with pytest.raises(ValueError):
+        sp.Attenuation.from_arrays(f_khz * 1e3, q_inv, -1.0)
+
+
+def test_compute_spectrum_applies_attenuation_table(tmp_path):
+    fs, n = 1e6, 4096
+    t, x = sp.brune_pulse(fs, n, 1e-9, 2e4, n / fs / 2)
+    w = sp.extract_window(t, x, t[n // 2], 0.001, 0.002, baseline="none")
+    plain = sp.compute_spectrum(w, nfft=8192)
+    att = sp.Attenuation.from_arrays([1e4, 1e5], [0.1, 0.01], 5e-5)
+    corrected = sp.compute_spectrum(w, nfft=8192, attenuation=att)
+    expected = att.factor(plain.f)
+    ok = np.isfinite(plain.amp_signal) & (plain.amp_signal > 0)
+    np.testing.assert_allclose(corrected.amp_signal[ok] / plain.amp_signal[ok], expected[ok], rtol=1e-12)
+    np.testing.assert_allclose(corrected.amp_noise[ok] / plain.amp_noise[ok], expected[ok], rtol=1e-12)
+    assert corrected.meta["attenuation"]["travel_time_s"] == 5e-5
+    with pytest.raises(ValueError):
+        sp.compute_spectrum(w, t_star_s=1e-5, attenuation=att)

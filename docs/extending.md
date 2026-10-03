@@ -134,6 +134,13 @@ used, `converged`, `at_bounds`, `band_limited`, `valid`, `reason`) and, once
 "Compute source" has run, `source` (phase, medium constants, distance,
 radiation coefficient, free-surface factor, `seismic_moment_nm`, `mw`,
 `source_radius_m`, `rupture_area_m2`, `stress_drop_pa`, `kR`, warnings).
+Calibration CSVs are recognised by header: the frequency column is any
+`frequency`/`freq`/`f` column, with or without a unit (`Frequency (Hz)`,
+`freq_kHz`; kHz is converted), the gain column is the one mentioning gain,
+amplitude, response, ratio, dB, psi or calib (or the only other column), and a
+`(dB)` header is honoured when the dB flag is left to auto. A `Q^-1(f)` table
+(`freq_kHz,Qp_inv_median`) with a travel time gives the frequency-dependent
+attenuation correction `exp(pi f T Q^-1(f))` inside the table's band.
 Conventions: amplitude = |FFT(taper * x)| dt (one-sided, no coherent-gain
 division); noise divided by sqrt(mean(taper^2)); calibration converts to a
 displacement spectral density in m s and is masked outside the table; fit

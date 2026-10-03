@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 import warnings
 from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
@@ -490,6 +491,55 @@ class Calibration:
                 "frequency_hz": self.frequency_hz.tolist(), "gain": self.gain.tolist()}
 
 
+def _parse_header(name) -> tuple[str, str]:
+    """Normalise a CSV header into ``(base, unit)``: ``'Frequency (Hz)'`` ->
+    ``('frequency', 'hz')``, ``'Mean_Inst_App_Psi'`` -> ``('mean_inst_app_psi', '')``."""
+    text = str(name).strip().lower()
+    unit = ""
+    m = re.search(r"\(([^)]*)\)", text)
+    if m:
+        unit = re.sub(r"[^a-z0-9/]+", "", m.group(1).lower())
+        text = text[:m.start()] + text[m.end():]
+    base = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+    return base, unit
+
+
+_FREQ_BASES = {"frequency", "freq", "f", "hz", "frequency_hz", "freq_hz", "f_hz",
+               "frequency_khz", "freq_khz", "f_khz"}
+_GAIN_TOKENS = ("gain", "amp", "amplitude", "response", "ratio", "mag", "db", "psi",
+                "calib", "inst", "sensitivity", "tf")
+
+
+def _frequency_column(columns) -> tuple[Optional[str], float]:
+    """The frequency column and the factor that turns it into Hz (1e3 for kHz)."""
+    for c in columns:
+        base, unit = _parse_header(c)
+        if base in _FREQ_BASES or base.startswith("freq"):
+            khz = "khz" in unit or base.endswith("khz")
+            return c, (1e3 if khz else 1.0)
+    return None, 1.0
+
+
+def _gain_column(columns, f_col) -> tuple[Optional[str], bool]:
+    """The gain column (preferring names that look like a gain) and whether its
+    header says dB."""
+    others = [c for c in columns if c != f_col]
+    preferred = []
+    for c in others:
+        base, unit = _parse_header(c)
+        tokens = set(base.split("_"))
+        if unit == "db" or tokens & set(_GAIN_TOKENS) or any(t in base for t in ("gain", "amp", "response", "calib", "psi")):
+            preferred.append(c)
+    chosen = preferred[0] if len(preferred) == 1 else (others[0] if len(others) == 1 and not preferred else None)
+    if chosen is None and preferred:
+        chosen = preferred[0]
+    if chosen is None:
+        return None, False
+    base, unit = _parse_header(chosen)
+    is_db = unit == "db" or "db" in base.split("_")
+    return chosen, is_db
+
+
 def _find_column(columns, aliases) -> Optional[str]:
     lowered = {str(c).strip().lower(): c for c in columns}
     for alias in aliases:
@@ -498,27 +548,130 @@ def _find_column(columns, aliases) -> Optional[str]:
     return None
 
 
-def load_calibration_csv(path: Union[str, Path], unit: str, gain_is_db: bool = False) -> Calibration:
-    """Read a calibration CSV with a frequency column (``frequency_hz``,
-    ``frequency``, ``freq`` or ``f``) and a gain column (``gain``,
-    ``amplitude`` or ``response``), matched case-insensitively.  ``unit`` is
-    declared by the caller (see ``CALIBRATION_UNITS``; ``'V/V'`` means
-    uncalibrated) and ``gain_is_db`` says the gain column is 20*log10."""
+def load_calibration_csv(path: Union[str, Path], unit: str,
+                         gain_is_db: Optional[bool] = False) -> Calibration:
+    """Read a calibration CSV.
+
+    The frequency column is recognised by name (``frequency``, ``freq``, ``f``,
+    with or without a unit such as ``Frequency (Hz)`` or ``freq_kHz``; kHz is
+    converted).  The gain column is the one whose header mentions gain,
+    amplitude, response, ratio, dB, psi, calib or inst (or the only other
+    column).  ``unit`` is declared by the caller (see ``CALIBRATION_UNITS``;
+    ``'V/V'`` means uncalibrated).  ``gain_is_db`` says the gain column is
+    20*log10; ``None`` takes it from the header (``(dB)`` or ``_dB``).
+    """
     if unit not in CALIBRATION_UNITS:
         raise ValueError(f"unit must be one of {tuple(CALIBRATION_UNITS)}, got {unit!r}")
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"calibration CSV not found: {path}")
     df = pd.read_csv(path)
-    f_col = _find_column(df.columns, _FREQ_ALIASES)
-    g_col = _find_column(df.columns, _GAIN_ALIASES)
+    f_col, f_scale = _frequency_column(df.columns)
     if f_col is None:
-        raise ValueError(f"calibration CSV needs a frequency column named one of {_FREQ_ALIASES}")
+        raise ValueError("calibration CSV needs a frequency column (e.g. 'Frequency (Hz)', 'freq_kHz', 'f')")
+    g_col, header_db = _gain_column(df.columns, f_col)
     if g_col is None:
-        raise ValueError(f"calibration CSV needs a gain column named one of {_GAIN_ALIASES}")
-    return Calibration.from_arrays(pd.to_numeric(df[f_col], errors="coerce").to_numpy(),
+        raise ValueError("calibration CSV needs one gain column (header mentioning gain, amplitude, "
+                         "response, ratio, dB, psi or calib)")
+    is_db = header_db if gain_is_db is None else bool(gain_is_db)
+    return Calibration.from_arrays(pd.to_numeric(df[f_col], errors="coerce").to_numpy() * f_scale,
                                    pd.to_numeric(df[g_col], errors="coerce").to_numpy(),
-                                   unit, gain_is_db, source=str(path))
+                                   unit, is_db, source=str(path))
+
+
+def csv_gain_is_db(path: Union[str, Path]) -> bool:
+    """Whether the gain column header of a calibration CSV says dB."""
+    df = pd.read_csv(path, nrows=1)
+    f_col, _ = _frequency_column(df.columns)
+    _, is_db = _gain_column(df.columns, f_col)
+    return bool(is_db)
+
+
+# ---------------------------------------------------------------------------
+# frequency-dependent attenuation
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class Attenuation:
+    """A ``Q^-1(f)`` table with a travel time: the spectrum is multiplied by
+    ``exp(pi * f * travel_time * Q^-1(f))`` inside the table's band and left
+    unchanged outside it."""
+    frequency_hz: np.ndarray
+    q_inv: np.ndarray
+    travel_time_s: float
+    source: str = ""
+
+    @property
+    def fmin(self) -> float:
+        return float(self.frequency_hz[0])
+
+    @property
+    def fmax(self) -> float:
+        return float(self.frequency_hz[-1])
+
+    def q_inv_at(self, f) -> np.ndarray:
+        """Log-log interpolated ``Q^-1``; NaN outside the table."""
+        f = np.asarray(f, dtype=float)
+        out = np.full(f.shape, np.nan)
+        inside = np.isfinite(f) & (f >= self.fmin) & (f <= self.fmax) & (f > 0)
+        if np.any(inside):
+            out[inside] = 10.0 ** np.interp(np.log10(f[inside]), np.log10(self.frequency_hz),
+                                            np.log10(self.q_inv))
+        return out
+
+    def factor(self, f) -> np.ndarray:
+        f = np.asarray(f, dtype=float)
+        q_inv = self.q_inv_at(f)
+        out = np.ones(f.shape)
+        inside = np.isfinite(q_inv)
+        out[inside] = np.exp(np.pi * f[inside] * self.travel_time_s * q_inv[inside])
+        return out
+
+    @classmethod
+    def from_arrays(cls, frequency_hz, q_inv, travel_time_s: float, source: str = "") -> "Attenuation":
+        f = np.asarray(frequency_hz, dtype=float).ravel()
+        q = np.asarray(q_inv, dtype=float).ravel()
+        if f.shape != q.shape:
+            raise ValueError("frequency and Q^-1 columns must have the same length")
+        if not (np.isfinite(travel_time_s) and travel_time_s >= 0):
+            raise ValueError("travel_time_s must be finite and >= 0")
+        keep = np.isfinite(f) & np.isfinite(q) & (f > 0) & (q > 0)
+        f, q = f[keep], q[keep]
+        order = np.argsort(f, kind="stable")
+        f, q = f[order], q[order]
+        f, idx = np.unique(f, return_index=True)
+        q = q[idx]
+        if f.size < 2:
+            raise ValueError("attenuation table needs at least two rows with positive frequency and Q^-1")
+        return cls(f, q, float(travel_time_s), source)
+
+    def as_dict(self) -> dict:
+        return {"travel_time_s": self.travel_time_s, "fmin_hz": self.fmin, "fmax_hz": self.fmax,
+                "n_rows": int(self.frequency_hz.size), "source": self.source,
+                "frequency_hz": self.frequency_hz.tolist(), "q_inv": self.q_inv.tolist()}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Attenuation":
+        return cls.from_arrays(d["frequency_hz"], d["q_inv"], d["travel_time_s"], str(d.get("source", "")))
+
+
+def load_q_csv(path: Union[str, Path], travel_time_s: float) -> Attenuation:
+    """Read a ``Q^-1(f)`` CSV (frequency column as in :func:`load_calibration_csv`,
+    kHz converted; the other column is ``Q^-1``) with the travel time it applies to."""
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Q CSV not found: {path}")
+    df = pd.read_csv(path)
+    f_col, f_scale = _frequency_column(df.columns)
+    if f_col is None:
+        raise ValueError("Q CSV needs a frequency column (e.g. 'freq_kHz')")
+    others = [c for c in df.columns if c != f_col]
+    q_cols = [c for c in others if "q" in _parse_header(c)[0].split("_")[0] or "q" in _parse_header(c)[0]]
+    q_col = q_cols[0] if q_cols else (others[0] if len(others) == 1 else None)
+    if q_col is None:
+        raise ValueError("Q CSV needs one Q^-1 column")
+    return Attenuation.from_arrays(pd.to_numeric(df[f_col], errors="coerce").to_numpy() * f_scale,
+                                   pd.to_numeric(df[q_col], errors="coerce").to_numpy(),
+                                   travel_time_s, source=str(path))
 
 
 def t_star_from_q(distance_m: float, q: float, c: float) -> float:
@@ -570,6 +723,7 @@ def compute_spectrum(window: WindowResult, taper: str = "tukey", alpha: float = 
                      nfft: Optional[int] = None, calibration: Optional[Calibration] = None,
                      t_star_s: Optional[float] = None, fmin: Optional[float] = None,
                      fmax: Optional[float] = None, bins_per_decade: int = 30,
+                     attenuation: Optional[Attenuation] = None,
                      noise_subtract: bool = False) -> SpectrumResult:
     """Amplitude spectra of the signal and noise windows plus log-binned averages.
 
@@ -621,10 +775,16 @@ def compute_spectrum(window: WindowResult, taper: str = "tukey", alpha: float = 
         units = calibration.output_units
         calibrated = calibration.unit != "V/V"
 
+    if t_star_s is not None and attenuation is not None:
+        raise ValueError("give either t_star_s (constant) or attenuation (Q^-1 table), not both")
     if t_star_s is not None:
         if not (np.isfinite(t_star_s) and t_star_s >= 0):
             raise ValueError("t_star_s must be finite and >= 0")
         corr = np.exp(np.pi * f * float(t_star_s))
+        amp_sig = amp_sig * corr
+        amp_noise = amp_noise * corr
+    if attenuation is not None:
+        corr = attenuation.factor(f)
         amp_sig = amp_sig * corr
         amp_noise = amp_noise * corr
 
@@ -645,6 +805,7 @@ def compute_spectrum(window: WindowResult, taper: str = "tukey", alpha: float = 
         "noise_available": window.noise_available, "noise_fraction": window.noise_fraction,
         "calibration": calibration.as_dict() if calibration is not None else None,
         "t_star_s": None if t_star_s is None else float(t_star_s),
+        "attenuation": attenuation.as_dict() if attenuation is not None else None,
         "amplitude_convention": "|rfft(w*x)|*dt one-sided, no coherent-gain division; "
                                 "noise / sqrt(mean(w^2)), scaled to the signal length",
     }
@@ -931,6 +1092,7 @@ __all__ = [
     "CONVERGED_REL_OPTIMALITY", "CONVERGED_ABS_OPTIMALITY",
     "WindowResult", "Calibration", "SpectrumResult", "SpectralFit",
     "sampling_rate", "extract_window", "taper_window", "load_calibration_csv",
+    "csv_gain_is_db", "Attenuation", "load_q_csv",
     "t_star_from_q", "compute_spectrum", "bin_spectrum", "fit_omega_n",
     "brune_spectrum", "brune_pulse",
 ]
