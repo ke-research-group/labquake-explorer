@@ -26,6 +26,7 @@ def test_metadata(rec):
     assert r.channels == ["ai0", "ai1", "ai2"] and r.labels == ["normal", "shear", "eddy"]
     assert r.dtype == np.float64
     assert r.trigger_sample_index == 12_345 and r.trigger_time == pytest.approx(1.2345)
+    assert r.labels == ["normal", "shear", "eddy"]
     d = r.as_dict()
     assert d["format"] == "ni_npz" and d["channels"] == ["ai0", "ai1", "ai2"] and d["trigger_time"] == pytest.approx(1.2345)
     assert (d["member_offsets"]["ai0"] is None) == compressed
@@ -45,7 +46,7 @@ def test_channel_access_is_lazy_and_exact(rec):
 
 def test_read_and_window(rec):
     r, truth, _ = rec
-    t, d = r.read(["shear", "ai2"] if False else [1, "ai2"], 1000, 1010)
+    t, d = r.read([1, "ai2"], 1000, 1010)
     assert d.shape == (2, 10) and t[0] == pytest.approx(0.1)
     np.testing.assert_array_equal(d[0], truth["ai1"][1000:1010])
     t, d = r.read_window(0.5, 0.5005)
@@ -67,6 +68,36 @@ def test_decimate_is_block_mean(rec):
     np.testing.assert_array_equal(d1[0], truth["ai0"].astype(np.float32))
     with pytest.raises(ValueError):
         r.decimate(0)
+    with pytest.raises(ValueError):
+        r.decimate(r.n_samples + 1)
+
+
+def test_channel_mappings_are_reused_and_compressed_cache_is_bounded(rec):
+    r, truth, compressed = rec
+    a = r.channel("ai0")
+    assert r.channel(0) is a
+    r.channel("ai1")
+    if compressed:
+        assert "ai0" not in r._cache and "ai1" in r._cache   # one loaded member at a time
+    else:
+        assert set(r._cache) == {"ai0", "ai1"}
+
+
+def test_trigger_sentinel_and_bad_metadata(tmp_path):
+    path = tmp_path / "s.npz"
+    write_ni_npz(path, {"x": lambda t: t}, fs=1000.0, duration=0.1, trigger_sample_index=-1)
+    r = open_ni_npz(path)
+    assert r.trigger_sample_index is None and r.trigger_time is None
+    np.savez(tmp_path / "late.npz", ai0=np.zeros(5), sample_rate=np.array(10.0), trigger_sample_index=np.array(5))
+    with pytest.raises(ValueError):
+        open_ni_npz(tmp_path / "late.npz")
+    np.savez(tmp_path / "labels.npz", ai0=np.zeros(5), ai1=np.zeros(5), sample_rate=np.array(10.0),
+             channels=np.array(["only_one"]))
+    with pytest.raises(ValueError):
+        open_ni_npz(tmp_path / "labels.npz")
+    np.savez(tmp_path / "gap.npz", ai0=np.zeros(5), ai2=np.zeros(5), sample_rate=np.array(10.0))
+    g = open_ni_npz(tmp_path / "gap.npz")
+    assert g.channels == ["ai0", "ai2"] and g.labels == [0, 2]
 
 
 def test_missing_trigger_and_metadata(tmp_path):

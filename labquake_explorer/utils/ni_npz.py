@@ -2,9 +2,10 @@
 
 Layout written by the acquisition script: one ``aiN.npy`` member per analog
 input (equal length, one dtype), plus ``sample_rate.npy`` (Hz),
-``channels.npy`` (labels or indices) and ``trigger_sample_index.npy`` (the
-sample at which the external trigger, i.e. the first Elsys trigger, was
-received).  Members are normally stored uncompressed, so each channel is
+``channels.npy`` (labels or indices, one per channel; defaults to the ``aiN``
+numbers) and ``trigger_sample_index.npy`` (the sample at which the external
+trigger, i.e. the first Elsys trigger, was received; a negative value means no
+trigger).  Members are normally stored uncompressed, so each channel is
 exposed as a read-only ``numpy.memmap`` located through the zip's local file
 header: nothing is loaded until it is sliced.  Compressed members fall back to
 loading the whole array once.
@@ -93,15 +94,25 @@ class NIRecord:
         raise KeyError(f"unknown channel {channel!r}; known: {self.channels}")
 
     def channel(self, channel: Union[int, str]) -> np.ndarray:
-        """The whole channel as a read-only memmap (or a loaded array for compressed members)."""
+        """The whole channel as a read-only memmap (or a loaded array for compressed members).
+
+        Memmaps are created once per channel and reused.  A compressed member
+        has to be decompressed whole, so at most one such array is kept: asking
+        for another compressed channel releases the previous one.
+        """
         name = self.channels[self.index(channel)]
+        if name in self._cache:
+            return self._cache[name]
         offset = self._offsets[name]
         if offset is None:
-            if name not in self._cache:
-                with np.load(self.path, allow_pickle=False) as z:
-                    self._cache[name] = np.asarray(z[name])
-            return self._cache[name]
-        return np.memmap(self.path, dtype=self.dtype, mode="r", offset=offset, shape=self._shapes[name])
+            for other in [k for k, v in self._cache.items() if self._offsets[k] is None]:
+                del self._cache[other]
+            with np.load(self.path, allow_pickle=False) as z:
+                self._cache[name] = np.asarray(z[name])
+        else:
+            self._cache[name] = np.memmap(self.path, dtype=self.dtype, mode="r",
+                                          offset=offset, shape=self._shapes[name])
+        return self._cache[name]
 
     def time(self, start: int = 0, stop: Optional[int] = None) -> np.ndarray:
         stop = self.n_samples if stop is None else min(int(stop), self.n_samples)
@@ -142,6 +153,8 @@ class NIRecord:
         factor = int(factor)
         if factor < 1:
             raise ValueError("factor must be >= 1")
+        if factor > self.n_samples:
+            raise ValueError(f"factor {factor} exceeds the record length {self.n_samples}")
         names = self.channels if channels is None else [self.channels[self.index(c)] for c in channels]
         n = (self.n_samples // factor) * factor
         n_out = n // factor
@@ -188,9 +201,16 @@ def open_ni_npz(path: Union[str, Path]) -> NIRecord:
         if rate is None:
             raise ValueError(f"{path.name}: sample_rate.npy is missing")
         sample_rate = float(np.ravel(rate)[0])
-        labels = _load_small(z, "channels.npy", default=np.arange(len(members)))
+        if not np.isfinite(sample_rate) or sample_rate <= 0:
+            raise ValueError(f"{path.name}: sample_rate must be positive, got {sample_rate}")
+        labels = _load_small(z, "channels.npy")
+        labels = ([int(m[2:]) for m in members] if labels is None else np.ravel(labels).tolist())
+        if len(labels) != len(members):
+            raise ValueError(f"{path.name}: channels.npy has {len(labels)} labels for {len(members)} channels")
         trig = _load_small(z, "trigger_sample_index.npy")
         trigger = None if trig is None else int(np.ravel(trig)[0])
+        if trigger is not None and trigger < 0:      # the acquisition script's "no trigger" sentinel
+            trigger = None
     offsets, shapes, dtypes = {}, {}, {}
     with zipfile.ZipFile(path) as z:
         for name in members:
@@ -207,8 +227,11 @@ def open_ni_npz(path: Union[str, Path]) -> NIRecord:
         raise ValueError(f"{path.name}: channels must be 1-D and equal length, got {shapes}")
     if len(kinds) != 1:
         raise ValueError(f"{path.name}: channels have mixed dtypes {kinds}")
+    n_samples = int(lengths.pop())
+    if trigger is not None and trigger >= n_samples:
+        raise ValueError(f"{path.name}: trigger_sample_index {trigger} is beyond the {n_samples} samples")
     rec = NIRecord(path=path, sample_rate=sample_rate, channels=[f"{m}.npy" for m in members],
-                   labels=list(np.ravel(labels)), n_samples=int(lengths.pop()), dtype=kinds.pop(),
+                   labels=labels, n_samples=n_samples, dtype=kinds.pop(),
                    trigger_sample_index=trigger, _offsets=offsets, _shapes=shapes)
     rec.channels = [c[:-4] for c in rec.channels]
     rec._offsets = {k[:-4]: v for k, v in offsets.items()}
