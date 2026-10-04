@@ -23,6 +23,7 @@ RESULT_VERSION = 1
 DEFAULT_HALF_WINDOW_S = 5.0      # start/end default to -/+ config.DEFAULT_WINDOW_SIZE, else this
 X_INDEX = "index"
 ZOOM_FACTOR = 3.0            # "Zoom to event" shows this many windows around the event
+STEP_S = 0.5                 # one tick of the start/end spinboxes
 
 
 @register_view("Extract Events", kinds=[EVENT_INDICES], order=10)
@@ -52,26 +53,33 @@ class ExtractEventsView(RunView):
         self.y_combo.grid(row=0, column=3, padx=4, pady=3, sticky="w")
         ttk.Label(box, text="Event:").grid(row=0, column=4, padx=4, pady=3, sticky="e")
         self.event_combo = ttk.Combobox(box, state="readonly", width=6)
-        self.event_combo.grid(row=0, column=5, padx=4, pady=3, sticky="w")
+        self.event_combo.grid(row=0, column=5, padx=(4, 0), pady=3, sticky="w")
+        self.prev_button = ttk.Button(box, text="\u25c0", width=2, command=lambda: self.step_event(-1))
+        self.prev_button.grid(row=0, column=6, padx=(2, 0), pady=3)
+        self.next_button = ttk.Button(box, text="\u25b6", width=2, command=lambda: self.step_event(+1))
+        self.next_button.grid(row=0, column=7, padx=(0, 4), pady=3)
 
         half = float(getattr(getattr(self.app, "config", None), "DEFAULT_WINDOW_SIZE", DEFAULT_HALF_WINDOW_S))
         ttk.Label(box, text="Start (s):").grid(row=1, column=0, padx=4, pady=3, sticky="e")
         self.start_var = tk.StringVar(master=self, value=f"{-half:g}")
-        self.start_entry = ttk.Entry(box, textvariable=self.start_var, width=8)
+        self.start_entry = ttk.Spinbox(box, textvariable=self.start_var, width=7, from_=-1e6, to=1e6,
+                                       increment=STEP_S, command=self.plot)
         self.start_entry.grid(row=1, column=1, padx=4, pady=3, sticky="w")
         ttk.Label(box, text="End (s):").grid(row=1, column=2, padx=4, pady=3, sticky="e")
-        self.end_var = tk.StringVar(master=self, value=f"{half:+g}")
-        self.end_entry = ttk.Entry(box, textvariable=self.end_var, width=8)
+        self.end_var = tk.StringVar(master=self, value=f"{half:g}")
+        self.end_entry = ttk.Spinbox(box, textvariable=self.end_var, width=7, from_=-1e6, to=1e6,
+                                     increment=STEP_S, command=self.plot)
         self.end_entry.grid(row=1, column=3, padx=4, pady=3, sticky="w")
         ttk.Button(box, text="Zoom to event", command=self.zoom_to_event).grid(row=1, column=4, padx=4, pady=3)
-        ttk.Button(box, text="Whole run", command=self.show_whole_run).grid(row=1, column=5, padx=4, pady=3)
+        ttk.Button(box, text="Whole run", command=self.show_whole_run).grid(
+            row=1, column=5, columnspan=3, padx=4, pady=3, sticky="w")
         self.extract_button = ttk.Button(box, text="Extract Events", command=self.extract)
-        self.extract_button.grid(row=0, column=6, rowspan=2, padx=10, pady=3, sticky="ns")
+        self.extract_button.grid(row=0, column=8, rowspan=2, padx=10, pady=3, sticky="ns")
         ttk.Label(box, text="Window relative to each picked event (seconds before are negative). "
                             "Shaded: the window of every event; dark: the selected event.").grid(
-            row=2, column=0, columnspan=7, padx=4, pady=(0, 3), sticky="w")
+            row=2, column=0, columnspan=9, padx=4, pady=(0, 3), sticky="w")
         self.status_var = tk.StringVar(master=self, value="")
-        ttk.Label(box, textvariable=self.status_var).grid(row=3, column=0, columnspan=7, padx=4, pady=(0, 3), sticky="w")
+        ttk.Label(box, textvariable=self.status_var).grid(row=3, column=0, columnspan=9, padx=4, pady=(0, 3), sticky="w")
 
         self.x_combo.bind("<<ComboboxSelected>>", lambda e: self.plot())
         self.y_combo.bind("<<ComboboxSelected>>", lambda e: self.plot())
@@ -98,7 +106,7 @@ class ExtractEventsView(RunView):
         self.y_combo.set(y)
         if "start_s" in saved and "end_s" in saved:
             self.start_var.set(f"{float(saved['start_s']):g}")
-            self.end_var.set(f"{float(saved['end_s']):+g}")
+            self.end_var.set(f"{float(saved['end_s']):g}")
         raw = self.run.get("event_indices")
         self.indices = [int(i) for i in (raw if raw is not None else []) if 0 <= int(i) < n] if n else []
         self.event_combo.config(values=[str(i) for i in range(len(self.indices))])
@@ -187,6 +195,15 @@ class ExtractEventsView(RunView):
     def on_event_selected(self):
         self.plot()
         self.zoom_to_event()
+
+    def step_event(self, delta: int):
+        """Select the previous (-1) or next (+1) event, staying within the list."""
+        if not self.indices:
+            return
+        k = self.selected_event()
+        k = 0 if k is None else min(max(k + delta, 0), len(self.indices) - 1)
+        self.event_combo.current(k)
+        self.on_event_selected()
 
     def zoom_to_event(self):
         k = self.selected_event()

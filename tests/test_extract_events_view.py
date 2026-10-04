@@ -16,7 +16,7 @@ def test_defaults(app, view):
     truth = app.truth[0]
     assert view.title() == "Extract Events - run00"
     assert view.x_combo.get() == "time" and view.y_combo.get() == "shear_stress"
-    assert view.start_var.get() == "-5" and view.end_var.get() == "+5"
+    assert view.start_var.get() == "-5" and view.end_var.get() == "5"
     assert list(view.event_combo["values"]) == [str(i) for i in range(len(truth.event_indices))]
     assert view.event_combo.get() == "0" and view.indices == list(truth.event_indices)
     assert "time" not in view.y_combo["values"] and "index" in view.x_combo["values"]
@@ -52,8 +52,33 @@ def test_extract_with_asymmetric_window(app, view):
     assert "4 events extracted" in view.status_var.get()
     # reopening restores the window
     v2 = ExtractEventsView(app, 0)
-    assert v2.start_var.get() == "-2" and v2.end_var.get() == "+3"
+    assert v2.start_var.get() == "-2" and v2.end_var.get() == "3"
     v2.on_close()
+
+
+def test_spinbox_ticks_redraw_the_windows(app, view):
+    t = app.truth[0].time
+    idx = view.indices[0]
+    view.start_entry.event_generate("<<Increment>>")
+    view.end_entry.event_generate("<<Decrement>>")
+    assert view.start_var.get() == "-4.5" and view.end_var.get() == "4.5"
+    assert view.window_s() == (-4.5, 4.5)
+    span = view.ax.patches[0]                      # the shaded window of event 0
+    assert span.get_x() == pytest.approx(t[idx] - 4.5, abs=2e-3)
+    assert span.get_x() + span.get_width() == pytest.approx(t[idx] + 4.5, abs=2e-3)
+
+
+def test_prev_next_buttons_step_the_event(app, view):
+    n = len(view.indices)
+    view.prev_button.invoke()
+    assert view.event_combo.get() == "0"            # clamped at the first event
+    view.next_button.invoke()
+    assert view.event_combo.get() == "1"
+    lo, hi = view.ax.get_xlim()
+    assert lo < app.truth[0].event_times[1] < hi and hi - lo == pytest.approx(30.0, abs=0.05)
+    for _ in range(n + 2):
+        view.next_button.invoke()
+    assert view.event_combo.get() == str(n - 1)     # clamped at the last event
 
 
 def test_extract_asks_before_replacing(app, view, monkeypatch):
