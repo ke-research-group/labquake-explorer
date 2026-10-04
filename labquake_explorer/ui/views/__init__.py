@@ -7,6 +7,7 @@ from labquake_explorer.ui.views.dynamic_strain_arrival_picker_view import Dynami
 from labquake_explorer.ui.views.czm_fitter_view import CZMFitterView
 from labquake_explorer.ui.views.event_analyzer_view import EventAnalyzerView
 from labquake_explorer.ui.views.interevent_view import InterEventView
+from labquake_explorer.ui.views.extract_events_view import ExtractEventsView
 from labquake_explorer.ui.views.run_signals_view import RunSignalsView
 from labquake_explorer.ui.views.pzt_spectrum_view import PZTSpectrumView
 from labquake_explorer.ui.views.source_scaling_view import SourceScalingView
@@ -21,6 +22,7 @@ __all__ = [
     'CZMFitterView',
     'EventAnalyzerView',
     'InterEventView',
+    'ExtractEventsView',
     'RunSignalsView',
     'PZTSpectrumView',
     'SourceScalingView',

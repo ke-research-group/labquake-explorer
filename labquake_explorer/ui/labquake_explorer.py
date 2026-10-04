@@ -11,7 +11,7 @@ from labquake_explorer.data.data_manager import DataManager
 from labquake_explorer.utils.config import LabquakeExplorerConfig
 from labquake_explorer.ui.context import (
     TreeContext, resolve_context,
-    ARRAY, RUN, RUN_ARRAY, EVENT_ARRAY, EVENT_INDICES, STRING,
+    ARRAY, RUN, RUN_ARRAY, EVENT_ARRAY, STRING,
 )
 from labquake_explorer.ui.actions import Action, actions_for, register_action
 # Importing the views package registers every view's context-menu action.
@@ -301,57 +301,6 @@ class LabquakeExplorer:
     def extract_slope(self, ctx: TreeContext) -> None:
         view = SlopeAnalyzerView(self, item_y=ctx.path)
         self.register_child(view)
-
-    @register_action("Extract Events", kinds=[EVENT_INDICES], order=10)
-    def extract_events(self, ctx: TreeContext) -> None:
-        """Handle UI for event extraction and delegate to EventProcessor"""
-        item_id = self.data_tree.selection()[0]
-        parent = self.data_tree.parent(item_id)
-        event_indices_path = ctx.path
-        parent_path = ctx.parent_path
-        events_path = f"{parent_path}/events"
-
-        # Check for existing events
-        if self.has_child_named(parent, "events"):
-            ans = messagebox.askokcancel(
-                title="Confirmation", 
-                message=f'This procedure will replace all data in "{events_path}".', 
-                icon=messagebox.WARNING
-            )
-            if not ans:
-                return
-
-        # Get window size from user
-        window = simpledialog.askfloat(
-            'Set event time window length', 
-            'Please set the duration before and after the event to be extracted.',
-            initialvalue=self.config.DEFAULT_WINDOW_SIZE
-        )
-        if window is None:
-            print('Event extraction aborted.')
-            return
-        print(f'Window set to (-{window}, {window})')
-
-        try:
-            # Get run data and indices
-            run_data = self.data_manager.get_data(parent_path)
-            event_indices = self.data_manager.get_data(event_indices_path)
-
-            # Extract events using EventProcessor
-            events = self.data_manager.event_processor.extract_events(
-                run_data,
-                event_indices,
-                window
-            )
-
-            # Save results
-            self.data_manager.set_data(events_path, events, add_key=True)
-            self.refresh_tree()
-
-            self.root.after(100, lambda: messagebox.showinfo(title="Success", message="Events extracted."))
-
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to extract events: {str(e)}")
 
     @register_action("Edit String", kinds=[STRING], order=10)
     def edit_string(self, ctx: TreeContext) -> None:
