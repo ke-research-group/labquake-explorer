@@ -107,19 +107,18 @@ class LabquakeExplorer:
             messagebox.showerror("Error", f"Failed to load file: {e}")
 
     def save_file(self) -> None:
-        initial_file = self.current_file_path if self.current_file_path else None
-        initial_dir = self.current_file_path.parent if self.current_file_path else None
+        current = self.current_file_path
+        initial_file = None
+        if current:
+            keep = current.suffix.lower() in (".h5", ".hdf5")
+            initial_file = current.name if keep else current.with_suffix(self.config.SAVE_SUFFIX).name
 
         file_path = filedialog.asksaveasfilename(
                 title="Save data file",
-                initialfile=initial_file.name if initial_file else None,
-                initialdir=str(initial_dir) if initial_dir else None,
-                defaultextension=".npz",
-                filetypes=(
-                    ("NPZ file", ".npz"),
-                    ("HDF5 file", ".h5 .hdf5"),
-                    ("All files", "*")
-                )
+                initialfile=initial_file,
+                initialdir=str(current.parent) if current else None,
+                defaultextension=self.config.SAVE_SUFFIX,
+                filetypes=self.config.FILE_TYPES,
             )
         if not file_path:
             return
@@ -127,6 +126,8 @@ class LabquakeExplorer:
         try:
             self.data_manager.save_file(Path(file_path))
             print(f"File saved: {file_path}")
+            self.current_file_path = Path(file_path)
+            self.refresh_tree()
             messagebox.showinfo("Success", "File saved successfully")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save file: {e}")

@@ -9,8 +9,9 @@ class LabquakeExplorerConfig:
     WINDOW_TITLE: str = "Labquake Explorer"
     MAX_ARRAY_DISPLAY: int = 1000
     DEFAULT_WINDOW_SIZE: float = 5.0
-    FILE_TYPES: tuple = (
-        ("NPZ files", "*.npz"),
+    FILE_TYPES: tuple = (                 # first entry is the dialogs' default
         ("HDF5 files", "*.h5 *.hdf5"),
+        ("NPZ files", "*.npz"),
         ("All files", "*.*")
     )
+    SAVE_SUFFIX: str = ".h5"

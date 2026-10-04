@@ -103,3 +103,27 @@ def test_double_click_array_opens_simple_plot_once(app):
     assert len(views) == 1 and app.child_windows.count(views[0]) == 1
     views[0].on_close()
     assert views[0] not in app.child_windows
+
+
+def test_save_as_defaults_to_hdf5(app, tmp_path, monkeypatch):
+    from tkinter import filedialog
+    calls = []
+
+    def fake_save_dialog(**kw):
+        calls.append(kw)
+        return "" if len(calls) == 1 else str(tmp_path / "p0001.h5")
+    monkeypatch.setattr(filedialog, "asksaveasfilename", fake_save_dialog)
+
+    app.current_file_path = tmp_path / "p0001.npz"
+    app.save_file()                                   # cancelled
+    kw = calls[-1]
+    assert kw["defaultextension"] == ".h5"
+    assert kw["filetypes"][0] == ("HDF5 files", "*.h5 *.hdf5")
+    assert kw["initialfile"] == "p0001.h5" and kw["initialdir"] == str(tmp_path)
+
+    app.current_file_path = tmp_path / "p0001.hdf5"
+    app.save_file()                                   # saved as p0001.h5
+    assert calls[-1]["initialfile"] == "p0001.hdf5"
+    assert (tmp_path / "p0001.h5").exists()
+    assert app.current_file_path == tmp_path / "p0001.h5"
+    assert app.data_tree.heading("#0")["text"] == "p0001.h5"
