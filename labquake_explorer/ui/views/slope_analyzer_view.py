@@ -15,6 +15,18 @@ class SlopeAnalyzerView(ArrayPairView):
 
     window_title = "Slope Analyzer"
     readout_label = "Slope"
+    #: sibling arrays tried, in order, as the default X: a slip channel first
+    #: (loading stiffness is d(stress)/d(slip)), then the load-point displacement
+    default_x_preference = ("displacement", "slip", "LP_displacement", "time")
+
+    def default_x(self, names):
+        for wanted in self.default_x_preference:
+            if wanted in names and wanted != self.item_y:
+                return wanted
+        for name in names:
+            if name != self.item_y and ("slip" in name or "displacement" in name):
+                return name
+        return None
 
     def __init__(self, app, item_y=None, item_x=None):
         self.slope_line = None

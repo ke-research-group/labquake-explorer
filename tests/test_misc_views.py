@@ -33,7 +33,8 @@ def test_slope_analyzer_lists_siblings_and_computes_slope(app):
             assert expected in names
         assert "name" not in names
         assert view.data_y_combo.get() == "shear_stress"
-        assert view.data_x_combo.get() == ""
+        # X defaults to the fault slip (stiffness = d(stress)/d(slip))
+        assert view.data_x_combo.get() == "displacement"
         assert view.base_path == "runs/[0]"
         assert len(view.picked_idx) == 2
         assert len(view.markers) == 2
@@ -41,9 +42,7 @@ def test_slope_analyzer_lists_siblings_and_computes_slope(app):
         slope = float(view.slope_textbox.get())
         assert np.isfinite(slope)
         assert slope == view.slope
-        # X defaults to the sample index
-        n = len(app.truth[0].time)
-        assert len(view.data_x) == n and view.data_x[-1] == n - 1
+        np.testing.assert_array_equal(view.data_x, app.truth[0].displacement)
     finally:
         view.on_close()
     assert view not in app.child_windows

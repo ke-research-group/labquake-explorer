@@ -134,6 +134,14 @@ class ArrayPairView(BaseView):
         elif self.item_x is not None:
             print(f"Warning: '{self.item_x}' is not a sibling of '{self.item_y}'")
             self.item_x = None
+        if self.item_x is None:
+            self.item_x = self.default_x(names)
+            if self.item_x is not None:
+                self.data_x_combo.set(self.item_x)
+
+    def default_x(self, names: list[str]) -> Optional[str]:
+        """The X array to start with when none was given (None = sample index)."""
+        return None
 
     def data_y_selected(self, event=None):
         self.item_y = self.data_y_combo.get()
