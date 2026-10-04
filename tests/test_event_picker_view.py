@@ -164,3 +164,78 @@ def test_nearest_index_from_the_curve(app, view):
     y = app.truth[0].shear_stress
     k = 1234
     assert view.picker.nearest_index(t[k], y[k]) == k
+
+
+# ------------------------------------------------------- real Tk mouse events
+def tk_xy(view, xd, yd):
+    px, py = view.ax.transData.transform((xd, yd))
+    return int(round(px)), int(round(view.canvas.figure.bbox.height - py))
+
+
+def tk_drag(widget, x0, y0, x1, y1):
+    widget.event_generate("<Button-1>", x=x0, y=y0)
+    widget.update()
+    for f in (0.3, 0.6, 1.0):
+        widget.event_generate("<Motion>", x=int(x0 + f * (x1 - x0)), y=int(y0 + f * (y1 - y0)), state=0x100)
+        widget.update()
+    widget.event_generate("<ButtonRelease-1>", x=x1, y=y1)
+    widget.update()
+
+
+def shown(view):
+    view.deiconify()
+    view.update()
+    view.canvas.draw()
+    view.update()
+    if not view.canvas.get_tk_widget().winfo_ismapped():
+        pytest.skip("window not mapped: Tk mouse events need a display")
+    return view.canvas.get_tk_widget()
+
+
+def test_drag_right_after_editing_the_window(app, view):
+    t = app.truth[0].time
+    y = app.truth[0].shear_stress
+    widget = shown(view)
+    k = view.picks[0]
+    view.start_entry.focus_force()                    # the first canvas click moves the focus away
+    view.update()
+    x0, y0 = tk_xy(view, t[k], y[k])
+    x1, y1 = tk_xy(view, t[k + 300], y[k + 300])
+    tk_drag(widget, x0, y0, x1, y1)
+    moved = view.picks[0]
+    assert abs(moved - (k + 300)) < 60                # one screen pixel spans ~50 samples here
+    assert view.spans[0].get_x() == pytest.approx(t[moved] - 5, abs=2e-3)       # replotted on release
+
+
+def test_double_click_adds_and_right_double_click_removes(app, view):
+    t = app.truth[0].time
+    y = app.truth[0].shear_stress
+    widget = shown(view)
+    n = len(view.picks)
+    k = 1234
+    x0, y0 = tk_xy(view, t[k], y[k])
+    for _ in range(2):                                # Tk makes <Double-Button-1> from two quick presses
+        widget.event_generate("<Button-1>", x=x0, y=y0)
+        widget.event_generate("<ButtonRelease-1>", x=x0, y=y0)
+    widget.update()
+    assert len(view.picks) == n + 1 and abs(view.picks[0] - k) < 5
+    view.after(600)                                   # outside the double-click interval
+    view.update()
+    x0, y0 = tk_xy(view, t[view.picks[0]], y[view.picks[0]])
+    for _ in range(2):
+        widget.event_generate("<Button-3>", x=x0, y=y0)
+        widget.event_generate("<ButtonRelease-3>", x=x0, y=y0)
+    widget.update()
+    assert len(view.picks) == n
+
+
+def test_markers_follow_the_axes_limits(app, view):
+    marker = view.picker.markers[0]
+    w0 = marker.width
+    lo, hi = view.ax.get_xlim()
+    view.ax.set_xlim(lo, lo + (hi - lo) / 10)         # what the toolbar's zoom, pan and home do
+    assert view.picker.markers[0] is marker and marker.width == pytest.approx(w0 / 10, rel=0.01)
+    view.picker.add_point(view.picks[-1] + 10)        # a replot keeps watching the new axes
+    marker = view.picker.markers[0]
+    view.ax.set_xlim(lo, hi)
+    assert marker.width == pytest.approx(w0, rel=0.01)

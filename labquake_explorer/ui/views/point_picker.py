@@ -7,7 +7,10 @@ pick and a right double-click on a marker removes it.  The view owns the
 axes: after (re)plotting it calls ``set_curve`` and ``draw_markers`` to put
 the markers back, and receives ``on_change(kind, idx)`` once per completed
 edit (``kind`` is ``"add"``, ``"remove"`` or ``"move"``; ``idx`` the sample
-added, removed or moved to).
+added, removed or moved to).  ``on_release_hook`` runs after every button
+release, so a view that must not rebuild the axes while a marker is held can
+postpone that work until the mouse is up.  Markers are sized in data units
+and follow every change of the axes limits (toolbar zoom, pan, home).
 """
 from __future__ import annotations
 
@@ -25,7 +28,8 @@ ChangeCallback = Callable[[str, int], None]
 class PointPicker:
     def __init__(self, ax, canvas, x, y, picks: Sequence[int] = (), add_remove: bool = True,
                  toolbar_active: Callable[[], bool] = lambda: False,
-                 on_change: Optional[ChangeCallback] = None, color: str = "red"):
+                 on_change: Optional[ChangeCallback] = None,
+                 on_release_hook: Optional[Callable[[], None]] = None, color: str = "red"):
         self.ax = ax
         self.canvas = canvas
         self.figure = ax.figure
@@ -35,7 +39,9 @@ class PointPicker:
         self.add_remove = add_remove
         self.toolbar_active = toolbar_active
         self.on_change = on_change
+        self.on_release_hook = on_release_hook
         self.color = color
+        self._lim_cids: list = []
         self.markers: list[patches.Ellipse] = []
         self.offset = [0.0, 0.0]
         self.current_artist = None
@@ -79,7 +85,16 @@ class PointPicker:
         for i, idx in enumerate(self.picks):
             if 0 <= idx < n:
                 self._make_marker(idx, i, width, height)
+        self._watch_limits()
         self.canvas.draw_idle()
+
+    def _watch_limits(self) -> None:
+        """Resize the markers whenever the axes limits change.  ``ax.clear()``
+        replaces the axes' callback registry, so this is redone per draw."""
+        for cid in self._lim_cids:
+            self.ax.callbacks.disconnect(cid)
+        self._lim_cids = [self.ax.callbacks.connect(name, lambda ax: self.update_marker_size())
+                          for name in ("xlim_changed", "ylim_changed")]
 
     def renumber_markers(self) -> None:
         """Keep marker label == position in ``picks``."""
@@ -204,6 +219,8 @@ class PointPicker:
         if self.moved_to is not None:
             idx, self.moved_to = self.moved_to, None
             self._notify("move", idx)
+        if self.on_release_hook is not None:
+            self.on_release_hook()
 
     def on_resize(self, event):
         self.update_marker_size()

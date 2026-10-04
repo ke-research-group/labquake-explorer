@@ -46,6 +46,8 @@ class EventPickerView(RunView):
         self.spans: list = []
         self.result: Optional[dict] = None
         self._shown: dict = {}
+        self._plotted_window: tuple = ("", "")
+        self._replot_pending = False
         super().__init__(app, run_idx)
 
     @classmethod
@@ -107,13 +109,14 @@ class EventPickerView(RunView):
         self.y_combo.bind("<<ComboboxSelected>>", lambda e: self.plot())
         self.event_combo.bind("<<ComboboxSelected>>", lambda e: self.on_event_selected())
         for entry in (self.start_entry, self.end_entry):
-            entry.bind("<Return>", lambda e: self.plot())
-            entry.bind("<FocusOut>", lambda e: self.plot())
+            entry.bind("<Return>", self.on_window_edited)
+            entry.bind("<FocusOut>", self.on_window_edited)
 
         self.make_figure(figsize=(10, 5), row=1, column=0, padx=5, pady=5, sticky="nsew")
         self.ax = self.figure.add_subplot(111)
         self.picker = PointPicker(self.ax, self.canvas, [], [], [], add_remove=True,
-                                  toolbar_active=self.toolbar_active, on_change=self.on_picks_changed)
+                                  toolbar_active=self.toolbar_active, on_change=self.on_picks_changed,
+                                  on_release_hook=self.flush_replot)
 
     def on_run_loaded(self):
         self.time = np.asarray(self.run.get("time", []), dtype=float).ravel()
@@ -219,7 +222,26 @@ class EventPickerView(RunView):
         self.status_var.set("   ".join(parts))
 
     # ------------------------------------------------------------- plotting
+    def on_window_edited(self, event=None):
+        """Replot only when the start/end text changed since the last plot.
+
+        Bound to Return and FocusOut: clicking the canvas moves the focus
+        away from a spinbox, and an unconditional replot there would rebuild
+        the markers under a drag that is just starting."""
+        if (self.start_var.get(), self.end_var.get()) != self._plotted_window:
+            self.plot()
+
+    def flush_replot(self):
+        """Run the replot that was postponed while a marker was held."""
+        if self._replot_pending:
+            self.plot()
+
     def plot(self):
+        if self.picker is not None and self.picker.current_artist is not None:
+            self._replot_pending = True              # a marker is held: redraw after the release
+            return
+        self._replot_pending = False
+        self._plotted_window = (self.start_var.get(), self.end_var.get())
         x_field, y_field = self.x_combo.get(), self.y_combo.get()
         keep_x = self._shown.get("x") == x_field
         keep_y = keep_x and self._shown.get("y") == y_field
