@@ -41,6 +41,14 @@ class PointsSelectorView(BaseView):
         self.currently_dragging = False
         super().__init__(app)
 
+        if add_remove_enabled:
+            help_text = ("Left double-click on the curve: add a point at the nearest sample.   "
+                         "Right double-click on a point: remove it.   Drag a point to move it.   "
+                         "Save stores the picks.")
+        else:
+            help_text = "Drag a point to move it along the curve."
+        self.help_label = ttk.Label(self, text=help_text, wraplength=900, justify="left")
+        self.help_label.pack(side=tk.TOP, anchor="w", padx=8, pady=(6, 2))
         if callback:
             self.save_button = tk.Button(self, text="Save", command=self.save)
             self.save_button.pack(side=tk.TOP, padx=5)
