@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 
+from labquake_explorer.data import channels as C
 from labquake_explorer.data import sources as S
 from labquake_explorer.preprocessing import (
     Calibration, EddySlip, Friction, Linear, experiment, offset_from_trigger, parse_run_name,
@@ -44,10 +45,14 @@ def test_linear_friction_and_presets():
 
 def test_eddy_slip_sign_zero_and_displacement():
     run = synthetic_run()
-    step = EddySlip({"eddy_1": -0.0947}, zero_window_s=0.5)
+    step = EddySlip({"eddy_1": -0.0947}, zero_window_s=0.5, positions={"eddy_1": (120.0, 0.0, 25.0)})
     Calibration(step).apply(run)
-    s1, s2 = run["slip_1"], run["slip_2"]
-    assert run["units"]["slip_1"] == "um" and run["units"]["displacement"] == "um"
+    slip = run["slip"]
+    assert C.is_channel_array(slip) and slip["channels"] == ["slip_1", "slip_2"] and slip["unit"] == "um"
+    assert slip["source"] == ["eddy_1", "eddy_2"] and slip["slope_mm_per_v"] == pytest.approx([-0.0947, -0.0947])
+    assert slip["positions"]["x"] == pytest.approx([120.0, float("nan")], nan_ok=True) and slip["positions"]["unit"] == "mm"
+    s1, s2 = C.row(slip, "slip_1"), C.row(slip, "slip_2")
+    assert run["units"]["slip"] == "um" and run["units"]["displacement"] == "um"
     # zeroed on the first 0.5 s: mean of the first 1000 samples is ~0
     assert abs(s1[:1000].mean()) < 1e-3
     # V falls by 0.01*2 = 0.02 V over the run -> slip rises by 0.0947 mm/V * 0.02 V = 1.894 um
@@ -61,10 +66,18 @@ def test_eddy_slip_sign_zero_and_displacement():
 
     run = synthetic_run()
     Calibration(EddySlip({"eddy_1": -0.1, "eddy_2": -0.05}, displacement="slip_2")).apply(run)
-    np.testing.assert_array_equal(run["displacement"], run["slip_2"])
+    np.testing.assert_array_equal(run["displacement"], C.row(run["slip"], "slip_2"))
     run = synthetic_run()
     Calibration(EddySlip({}, default_slope_mm_per_v=-0.1, displacement=None)).apply(run)
-    assert "displacement" not in run and "slip_1" in run
+    assert "displacement" not in run and C.channel_names(run["slip"]) == ["slip_1", "slip_2"]
+    # sources inside a raw_data channel array, positions inherited from it
+    n = 100
+    raw = C.channel_array(np.vstack([np.full(n, 1.0), -0.5 - 0.01 * np.arange(n)]), ["pressure_1", "eddy_1"],
+                          unit="V", positions=C.positions_table(["pressure_1", "eddy_1"], {"eddy_1": (10.0, 20.0, 30.0)}, unit="cm"))
+    run = {"time": np.arange(n) / 10.0, "raw_data": raw}
+    Calibration(Linear("normal_stress", "pressure_1", 8.0, unit="MPa"), EddySlip({"eddy_1": -0.1})).apply(run)
+    assert run["normal_stress"][0] == pytest.approx(8.0) and run["units"]["raw_data"] == "V"
+    assert run["slip"]["positions"]["x"] == [10.0] and run["slip"]["positions"]["unit"] == "cm"
     with pytest.raises(KeyError):
         Calibration(EddySlip({"eddy_1": -0.1}, displacement="slip_9")).apply(synthetic_run())
     with pytest.raises(ValueError):
@@ -102,9 +115,15 @@ def test_run_from_tpc5(elsys, tmp_path):
     assert run["name"] == "run1" and run["normal_stress_level"] == 8.0 and run["operator"] == "x"
     assert run["file"] == elsys.name and run["start_time"].startswith("2026-01-01")
     assert run["time"].size == 4000 and run["time"][0] == 0.0
-    for f in ("pzt_1", "pressure_1", "pressure_2", "eddy_1", "normal_stress", "shear_stress", "friction", "slip_1", "displacement"):
+    raw = run["raw_data"]
+    assert C.is_channel_array(raw) and raw["channels"] == ["pzt_1", "pressure_1", "pressure_2", "eddy_1"]
+    assert raw["data"].shape == (4, 4000) and raw["unit"] == "V" and raw["recorder"] == ["elsys"] * 4
+    assert "positions" not in raw
+    for f in ("normal_stress", "shear_stress", "friction", "displacement"):
         assert run[f].shape == (4000,), f
-    assert run["units"]["normal_stress"] == "MPa" and run["units"]["slip_1"] == "um" and run["units"]["pzt_1"] == "V"
+    assert run["slip"]["data"].shape == (1, 4000) and run["slip"]["channels"] == ["slip_1"]
+    assert run["units"]["normal_stress"] == "MPa" and run["units"]["slip"] == "um" and run["units"]["raw_data"] == "V"
+    assert "pzt_1" not in run and "eddy_1" not in run
     assert run["normal_stress"].mean() == pytest.approx(8.0, abs=1e-3)
     assert run["sources"] == {"elsys": "tpc5"}
     ref = run["elsys"]
@@ -148,16 +167,19 @@ def test_run_from_tpc5_ni(elsys, ni, tmp_path):
     assert run["sources"] == {"ni": "ni_npz", "elsys": "tpc5"}
     # NI is the time base: 3 s at 2 kHz
     assert run["time"].size == 6000 and run["time"][1] - run["time"][0] == pytest.approx(5e-4)
-    assert run["units"]["pressure_1"] == "V" and run["normal_stress"].mean() == pytest.approx(8.0, abs=1e-3)
+    raw = run["raw_data"]
+    assert raw["channels"] == ["pressure_1", "pressure_2", "eddy_1", "pzt_1"]
+    assert raw["recorder"] == ["ni", "ni", "ni", "elsys"]
+    assert run["normal_stress"].mean() == pytest.approx(8.0, abs=1e-3)
     # the Elsys PZT is interpolated onto the NI axis with the 0.7 s shift: pulse at 1.2 s, NaN beyond the Elsys record
-    pz = run["pzt_1"]
+    pz = C.get_channel(run, "pzt_1")
     assert run["time"][np.nanargmax(pz)] == pytest.approx(1.2, abs=2e-3)
     assert np.isnan(pz[-1]) and not np.isnan(pz[2000])
     assert run["elsys"]["time_offset"] == pytest.approx(0.7) and run["ni"]["time_offset"] == 0.0
     assert run["elsys"]["clock_offset_method"].startswith("NI trigger")
     assert run["elsys"]["blocks"]["trigger_time_run"] == pytest.approx([1.2, 2.1])
     assert run["ni"]["decimation"] == 5 and run["ni"]["input_range_v"] == 10.0
-    assert run["slip_1"].dtype == np.float32 and run["units"]["displacement"] == "um"
+    assert run["slip"]["data"].dtype == np.float32 and run["units"]["displacement"] == "um"
     # a given offset wins over the trigger-derived one
     run2 = run_from_tpc5_ni(elsys, ni, ELSYS_MAP, NI_MAP, tmp_path, clock_offset=0.5)
     assert run2["elsys"]["time_offset"] == 0.5 and run2["elsys"]["clock_offset_method"] == "given"
@@ -169,7 +191,10 @@ def test_run_from_sources_validation(elsys, tmp_path):
         run_from_sources({}, tmp_path)
     with pytest.raises(KeyError):
         run_from_sources({"elsys": src}, tmp_path, time_base="ni")
-    run = run_from_sources({"elsys": src}, tmp_path, name="custom", decimation={"elsys": 4})
+    run = run_from_sources({"elsys": src}, tmp_path, name="custom", decimation={"elsys": 4},
+                           positions={"pzt_1": (1.0, 2.0, 3.0)}, position_frame="x along the fault")
     assert run["name"] == "custom" and run["time"].size == 1000 and "calibration" not in run
+    pos = run["raw_data"]["positions"]
+    assert pos["x"][0] == 1.0 and np.isnan(pos["x"][1]) and pos["frame"] == "x along the fault"
     exp = experiment("t0001", [run], date="2026-01-01")
     assert exp["name"] == "t0001" and exp["date"] == "2026-01-01" and exp["runs"][0] is run

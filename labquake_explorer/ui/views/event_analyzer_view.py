@@ -7,6 +7,7 @@ from labquake_explorer.analysis.event_metrics import (
     EventPicks, analyze_event, picks_from_result, picks_from_windows, windows_from_result,
 )
 from labquake_explorer.analysis.fitting import METHODS
+from labquake_explorer.data.channels import aligned_fields, get_field as resolve_field
 from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import EVENT
 from labquake_explorer.ui.views.base import EventView, nearest_sample
@@ -156,19 +157,7 @@ class EventAnalyzerView(EventView):
             print("Warning: 'time' field not found in event data")
             return
         
-        def find_matching_arrays(data, path=""):
-            matching_fields = []
-            if isinstance(data, dict):
-                for key, value in data.items():
-                    new_path = f"{path}/{key}" if path else key
-                    if isinstance(value, (list, np.ndarray)) and len(value) == time_length:
-                        matching_fields.append(new_path)
-                    elif isinstance(value, dict):
-                        matching_fields.extend(find_matching_arrays(value, new_path))
-            return matching_fields
-        
-        matching_fields = find_matching_arrays(self.event)
-        matching_fields.sort()
+        matching_fields = sorted(aligned_fields(self.event, time_length))
         self.data_x_combo.config(values=matching_fields)
         self.data_y_combo.config(values=matching_fields)
         
@@ -206,15 +195,12 @@ class EventAnalyzerView(EventView):
         self.plot_picked_points()
 
     def get_field(self, path):
-        """Access a nested event field using 'a/b/c' notation."""
-        current = self.event
-        for part in path.split('/'):
-            if isinstance(current, dict) and part in current:
-                current = current[part]
-            else:
-                print(f"Warning: Path '{path}' not found in data")
-                return None
-        return current
+        """An event field by path: a top-level array, a nested one ('strain/time')
+        or a row of a channel array ('slip/slip_3')."""
+        value = resolve_field(self.event, path)
+        if value is None:
+            print(f"Warning: Path '{path}' not found in data")
+        return value
 
     def plot_data(self):
         """Plot the selected data"""
@@ -454,13 +440,10 @@ class EventAnalyzerView(EventView):
 
     @staticmethod
     def get_field_of(event, path):
-        current = event
-        for part in (path or "").split('/'):
-            if isinstance(current, dict) and part in current:
-                current = current[part]
-            else:
-                raise KeyError(path)
-        return current
+        value = resolve_field(event, path or "")
+        if value is None:
+            raise KeyError(path)
+        return value
 
     def save_event(self):
         """Save the analysis results to the data manager"""

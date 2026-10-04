@@ -3,9 +3,11 @@
 A run is built from one or more :class:`~labquake_explorer.data.sources.Source`
 objects: the first one (the *time base*) provides the run's time axis and its
 whole-run record; the others contribute their whole-run records interpolated
-onto that axis for any field the time base does not already provide.  Every
-source is then stored as a reference under its own key so that event
-extraction can go back to the raw files.
+onto that axis for any field the time base does not already provide.  The
+recorded voltages go into the channel array ``run['raw_data']`` (one row per
+channel, with the recorder and, when given, the sensor positions); every
+source is stored as a reference under its own key so that event extraction can
+go back to the raw files; the calibration then adds the physical channels.
 """
 from __future__ import annotations
 
@@ -15,6 +17,7 @@ from typing import Mapping, Optional, Sequence
 
 import numpy as np
 
+from labquake_explorer.data.channels import channel_array, positions_table
 from labquake_explorer.data.sources import NINpzSource, Source, Tpc5Source
 from labquake_explorer.preprocessing.alignment import offset_from_trigger
 from labquake_explorer.preprocessing.calibration import Calibration
@@ -33,7 +36,8 @@ def parse_run_name(stem: str) -> dict:
 
 def run_from_sources(sources: Mapping[str, Source], base_dir, calibration: Optional[Calibration] = None,
                      time_base: Optional[str] = None, decimation: Optional[Mapping[str, int]] = None,
-                     name: Optional[str] = None, **metadata) -> dict:
+                     name: Optional[str] = None, positions: Optional[Mapping] = None,
+                     position_unit: str = "mm", position_frame: str = "", **metadata) -> dict:
     """Build a run dict.
 
     ``sources`` maps the reference key each source is stored under (``'elsys'``
@@ -41,8 +45,9 @@ def run_from_sources(sources: Mapping[str, Source], base_dir, calibration: Optio
     ``time_offset`` must already put it on the run clock.  ``time_base`` names
     the source whose whole-run record becomes the run's time axis (default: the
     first).  ``decimation`` gives a block-mean factor per key for the whole-run
-    records.  ``metadata`` is copied into the run (name, normal_stress_level,
-    ...).
+    records.  ``positions`` maps a field to its (x, y, z) on the sample for the
+    ``raw_data`` positions table.  ``metadata`` is copied into the run (name,
+    normal_stress_level, ...).
     """
     if not sources:
         raise ValueError("at least one source is needed")
@@ -60,10 +65,11 @@ def run_from_sources(sources: Mapping[str, Source], base_dir, calibration: Optio
     if isinstance(base, Tpc5Source):
         run["start_time"] = base.start_time
     run["time"] = np.asarray(t_run, dtype=np.float64)
-    units = {}
+    columns, names, recorders = [], [], []
     for field_name, column in zip(base.fields, data):
-        run[field_name] = np.asarray(column, dtype=np.float32)
-        units[field_name] = "V"
+        columns.append(np.asarray(column, dtype=np.float32))
+        names.append(field_name)
+        recorders.append(time_base)
 
     for key in keys:
         if key == time_base:
@@ -71,12 +77,16 @@ def run_from_sources(sources: Mapping[str, Source], base_dir, calibration: Optio
         src = sources[key]
         t_src, d_src = src.time_history(decimation.get(key, 1))
         for field_name, column in zip(src.fields, d_src):
-            if field_name in run:
+            if field_name in names:
                 continue                                   # the time base wins
-            run[field_name] = np.interp(run["time"], t_src, np.asarray(column, dtype=np.float64),
-                                        left=np.nan, right=np.nan).astype(np.float32)
-            units[field_name] = "V"
-    run["units"] = units
+            columns.append(np.interp(run["time"], t_src, np.asarray(column, dtype=np.float64),
+                                     left=np.nan, right=np.nan).astype(np.float32))
+            names.append(field_name)
+            recorders.append(key)
+    run["raw_data"] = channel_array(
+        np.vstack(columns), names, unit="V", recorder=recorders,
+        positions=positions_table(names, positions, position_unit, position_frame) if positions is not None else None)
+    run["units"] = {"raw_data": "V"}
     run["sources"] = {key: src.format for key, src in sources.items()}
     for key, src in sources.items():
         run[key] = src.to_reference(base_dir)
@@ -87,12 +97,14 @@ def run_from_sources(sources: Mapping[str, Source], base_dir, calibration: Optio
 
 def run_from_tpc5(path, channel_map, base_dir, calibration: Optional[Calibration] = None,
                   decimation: int = 1, event_fields: Optional[Sequence[str]] = None,
-                  event_window_s: Optional[Sequence[float]] = None, key: str = "elsys", **metadata) -> dict:
+                  event_window_s: Optional[Sequence[float]] = None, key: str = "elsys",
+                  positions: Optional[Mapping] = None, **metadata) -> dict:
     """A run whose every channel is on one Elsys tpc5 file."""
     path = Path(path)
     src = Tpc5Source.open(path, channel_map, event_fields=event_fields, event_window_s=event_window_s)
     meta = {**parse_run_name(path.stem), **metadata}
-    return run_from_sources({key: src}, base_dir, calibration, decimation={key: decimation}, **meta)
+    return run_from_sources({key: src}, base_dir, calibration, decimation={key: decimation},
+                            positions=positions, **meta)
 
 
 def run_from_tpc5_ni(tpc5_path, ni_path, elsys_channel_map, ni_channel_map, base_dir,
@@ -101,7 +113,8 @@ def run_from_tpc5_ni(tpc5_path, ni_path, elsys_channel_map, ni_channel_map, base
                      elsys_event_fields: Optional[Sequence[str]] = None,
                      elsys_event_window_s: Optional[Sequence[float]] = None,
                      ni_event_fields: Optional[Sequence[str]] = None,
-                     ni_event_window_s: Optional[Sequence[float]] = None, **metadata) -> dict:
+                     ni_event_window_s: Optional[Sequence[float]] = None,
+                     positions: Optional[Mapping] = None, **metadata) -> dict:
     """A run with the mechanical channels on an NI logger and the dynamic channels
     on an Elsys tpc5.  The NI clock is the run clock; the Elsys clock is shifted
     by ``clock_offset`` (default: from the NI trigger sample and the first Elsys
@@ -118,7 +131,7 @@ def run_from_tpc5_ni(tpc5_path, ni_path, elsys_channel_map, ni_channel_map, base
                                          else "given")
     meta = {**parse_run_name(tpc5_path.stem), **metadata}
     run = run_from_sources({"ni": ni, "elsys": elsys}, base_dir, calibration,
-                           time_base="ni", decimation={"ni": ni_decimation}, **meta)
+                           time_base="ni", decimation={"ni": ni_decimation}, positions=positions, **meta)
     run["file"] = tpc5_path.name
     run["ni_file"] = ni_path.name
     run["start_time"] = elsys.start_time

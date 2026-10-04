@@ -10,20 +10,23 @@ from labquake_explorer.analysis.interevent import (
 from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import RUN
 from labquake_explorer.ui.views.base import RunView, event_list
+from labquake_explorer.data.channels import aligned_fields, get_field
 
 
 def aligned_arrays(run: dict) -> list:
-    """Top-level run arrays with the same length as run['time']."""
+    """Paths of the run's numeric series aligned with run['time']: top-level
+    arrays and rows of channel arrays (``'slip/slip_3'``)."""
     time = run.get("time")
     if time is None:
         return []
     n = len(time)
     out = []
-    for key, value in run.items():
-        if key == "time" or not isinstance(value, np.ndarray):
+    for path in aligned_fields(run, n, recurse=False):
+        if path == "time":
             continue
-        if value.ndim == 1 and value.size == n and value.dtype.kind in "iuf":
-            out.append(key)
+        value = get_field(run, path)
+        if value is not None and np.asarray(value).dtype.kind in "iuf":
+            out.append(path)
     return sorted(out)
 
 
@@ -165,8 +168,10 @@ class InterEventView(RunView):
             return
         try:
             delay, width = self.parameters()
-            metrics = interevent_metrics(self.run["time"], event_times,
-                                         {"lp": self.run[lp_field], "slip": self.run[slip_field]},
+            lp, slip = get_field(self.run, lp_field), get_field(self.run, slip_field)
+            if lp is None or slip is None:
+                raise KeyError(f"signal not found: {lp_field if lp is None else slip_field}")
+            metrics = interevent_metrics(self.run["time"], event_times, {"lp": lp, "slip": slip},
                                          delay=delay, width=width)
         except (ValueError, KeyError) as e:
             self.status_var.set(str(e))

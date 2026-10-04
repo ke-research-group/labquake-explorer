@@ -38,9 +38,11 @@ def test_extract_from_tpc5_run(elsys, tmp_path):
     assert len(events) == 3
     e0 = events[0]
     assert e0["event_time"] == pytest.approx(0.5) and e0["time"][0] == pytest.approx(0.45) and e0["time"].size == 200
-    for f in ("pzt_1", "pressure_1", "normal_stress", "slip_1", "displacement"):
+    for f in ("normal_stress", "displacement"):
         assert e0[f].shape == e0["time"].shape, f
-    assert "events" not in e0 and "calibration" not in e0 and "units" not in e0
+    assert e0["raw_data"]["data"].shape == (4, 200) and e0["raw_data"]["channels"] == ["pzt_1", "pressure_1", "pressure_2", "eddy_1"]
+    assert e0["slip"]["data"].shape == (1, 200) and e0["slip"]["unit"] == "um"
+    assert "events" not in e0 and "calibration" not in e0 and "units" not in e0 and "sources" not in e0
     strain = e0["elsys"]
     assert strain["format"] == "tpc5" and strain["filename"] == elsys.name and strain["block"] == 2
     assert strain["sample_rate"] == 200_000.0 and strain["fields"] == ["pzt_1", "pressure_1", "pressure_2", "eddy_1"]
@@ -62,7 +64,7 @@ def test_source_event_settings_and_no_base_dir(elsys, tmp_path, capsys):
     assert e["time"].size == 4000 - 1 - index_at(run, 0.5) + 1000 or e["time"].size > 0
     # without a saved experiment path the references are skipped with a warning, not an error
     e2 = EventProcessor().extract_events(run, [index_at(run, 0.5)], window=0.05)[0]
-    assert "elsys" not in e2 and "pressure_1" in e2
+    assert "elsys" not in e2 and "raw_data" in e2
     assert "raw-data references skipped" in capsys.readouterr().out
 
 

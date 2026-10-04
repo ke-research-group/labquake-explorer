@@ -6,8 +6,9 @@ time, and each raw-data reference of the run (see
 result is one dict per event::
 
     event_time, time, <every run field aligned with time>,
+    <channel array>: {'data': (n_channels, n_window), 'channels', 'unit', ...},   # e.g. 'raw_data', 'slip'
     <reference key>: {'format', 'filename', 'fields', 'sample_rate', 'block',
-                      'original': {'time', 'raw'}}      # e.g. 'strain', 'ni'
+                      'original': {'time', 'raw'}}      # e.g. 'elsys', 'ni'
 
 The PSU-era ``strain`` layout keeps its historical output (``time``/``raw``
 downsampled copies plus ``original``), so older experiment files behave as
@@ -20,6 +21,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+from labquake_explorer.data.channels import is_channel_array, slice_channel_array
 from labquake_explorer.data.sources import LegacyTpc5Source, Source, open_source, run_sources
 
 
@@ -88,7 +90,10 @@ class EventProcessor:
         for key, value in run_data.items():
             if key in ("time", "events") or key in skip:
                 continue
-            if isinstance(value, np.ndarray) and value.ndim == 1 and value.shape[0] == n:
+            if is_channel_array(value):
+                if value["data"].shape[1] == n:
+                    event[key] = slice_channel_array(value, slice(beg, end))
+            elif isinstance(value, np.ndarray) and value.ndim == 1 and value.shape[0] == n:
                 event[key] = value[beg:end]
         notes = []
         for key, source in sources.items():

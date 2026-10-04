@@ -24,6 +24,7 @@ import numpy as np
 from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import RUN
 from labquake_explorer.ui.views.base import RunView
+from labquake_explorer.data.channels import aligned_fields, get_field
 
 X_TIME = "time"
 X_INDEX = "index"
@@ -50,10 +51,11 @@ def _aligned_array(value, n: int) -> Optional[np.ndarray]:
 
 
 def signal_candidates(run: dict) -> list[str]:
-    """Top-level run keys holding 1-D numeric arrays as long as ``run['time']``.
+    """Paths of every 1-D numeric series as long as ``run['time']``: top-level
+    arrays and rows of channel arrays (``'slip/slip_3'``), in the run's order.
 
-    ``time`` itself is included; the order is the run's insertion order.
-    Returns an empty list when the run has no usable ``time`` array.
+    ``time`` itself is included.  Returns an empty list when the run has no
+    usable ``time`` array.
     """
     if not isinstance(run, dict) or "time" not in run:
         return []
@@ -61,8 +63,7 @@ def signal_candidates(run: dict) -> list[str]:
     if time is None or time.shape[0] == 0:
         return []
     n = time.shape[0]
-    return [key for key, value in run.items()
-            if isinstance(key, str) and _aligned_array(value, n) is not None]
+    return [path for path in aligned_fields(run, n, recurse=False) if _aligned_array(get_field(run, path), n) is not None]
 
 
 def normalize01(y) -> np.ndarray:
@@ -288,8 +289,8 @@ class RunSignalsView(RunView):
         run = self.run if isinstance(self.run, dict) else {}
         time = run.get("time")
         n = len(time) if hasattr(time, "__len__") else 0
-        if choice != X_INDEX and choice in run:
-            arr = _aligned_array(run.get(choice), n)
+        if choice != X_INDEX:
+            arr = _aligned_array(get_field(run, choice), n)
             if arr is not None:
                 return arr.astype(float), choice
         return np.arange(n, dtype=float), "sample index"
@@ -327,7 +328,7 @@ class RunSignalsView(RunView):
         usable: list[tuple[str, np.ndarray]] = []
         skipped: list[str] = []
         for key in keys:
-            arr = _aligned_array(run.get(key), n)
+            arr = _aligned_array(get_field(run, key), n)
             if arr is None:
                 skipped.append(key)
             else:

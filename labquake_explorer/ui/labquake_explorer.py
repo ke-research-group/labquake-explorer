@@ -6,6 +6,7 @@ from tkinter import ttk, filedialog, simpledialog, messagebox
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
+from labquake_explorer.data.channels import is_channel_array
 from labquake_explorer.data.data_manager import DataManager
 from labquake_explorer.utils.config import LabquakeExplorerConfig
 from labquake_explorer.ui.context import (
@@ -178,6 +179,10 @@ class LabquakeExplorer:
             return f"{key}: {value}"
         elif isinstance(value, (int, float, np.floating, np.integer)):
             return f"{key}: {value}"
+        elif is_channel_array(value):
+            n_ch, n = value["data"].shape
+            unit = f" {value['unit']}" if value.get("unit") else ""
+            return f"{key}: {n_ch} channels x {n}{unit}"
         elif isinstance(value, np.ndarray):
             if value.size == 1:
                 return f"{key}: {value.flatten()[0]}"

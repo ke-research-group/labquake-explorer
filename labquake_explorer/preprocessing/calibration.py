@@ -8,9 +8,11 @@ experiment says how its physical channels were derived.
 
 Steps provided here:
 
-* :class:`Linear` -- ``field = factor * source + offset``.
-* :class:`EddySlip` -- eddy-current voltages to slip in micrometres, zeroed at
-  the start of the run, plus the ``displacement`` field the explorer uses.
+* :class:`Linear` -- ``field = factor * source + offset``; the source may be a
+  top-level array or a channel of ``run['raw_data']``.
+* :class:`EddySlip` -- eddy-current voltages to the ``slip`` channel array
+  (micrometres, zeroed at the start of the run, sensor positions attached) plus
+  the ``displacement`` field the explorer uses.
 * :class:`Friction` -- ``shear_stress / normal_stress`` once both are in MPa.
 
 A new kind of conversion is a class with ``apply(run, units)`` and
@@ -22,6 +24,10 @@ from dataclasses import dataclass, field
 from typing import Mapping, Optional, Sequence
 
 import numpy as np
+
+from labquake_explorer.data.channels import (
+    channel_array, channel_names, get_channel, is_channel_array, positions_table,
+)
 
 
 class Step:
@@ -42,9 +48,10 @@ class Linear(Step):
     unit: str = ""
 
     def apply(self, run, units):
-        if self.source not in run:
+        source = get_channel(run, self.source)
+        if source is None:
             return
-        run[self.field] = (self.factor * np.asarray(run[self.source], dtype=np.float64) + self.offset).astype(np.float32)
+        run[self.field] = (self.factor * np.asarray(source, dtype=np.float64) + self.offset).astype(np.float32)
         units[self.field] = self.unit
 
     def describe(self):
@@ -62,15 +69,24 @@ class EddySlip(Step):
     zeroed on the mean of the first ``zero_window_s`` of the run (the sensors are
     zeroed after the run-in in the experiment as well).  Sensors without their
     own slope use ``default_slope_mm_per_v`` (the mean of the known ones when
-    None).  ``displacement`` is the mean of all slip channels (``'mean'``), one of
-    them (e.g. ``'slip_5'``) or not written (None).
+    None).
+
+    The result is the channel array ``run[out_key]`` (rows ``slip_1``, ...,
+    unit um, ``source`` naming the voltage channel of each row, ``positions``
+    from ``positions`` or inherited from ``run['raw_data']``) plus
+    ``displacement``: the mean of all slip channels (``'mean'``), one of them
+    (e.g. ``'slip_5'``) or not written (None).
     """
     slopes_mm_per_v: Mapping[str, float]
     default_slope_mm_per_v: Optional[float] = None
     zero_window_s: float = 0.5
     source_prefix: str = "eddy_"
     out_prefix: str = "slip_"
+    out_key: str = "slip"
     displacement: Optional[str] = "mean"
+    positions: Optional[Mapping[str, Sequence[float]]] = None   # source channel -> (x, y, z)
+    position_unit: str = "mm"
+    position_frame: str = ""
 
     def slope_for(self, source: str) -> float:
         if source in self.slopes_mm_per_v:
@@ -82,8 +98,29 @@ class EddySlip(Step):
         return float(np.mean(list(self.slopes_mm_per_v.values())))
 
     def sources(self, run) -> list:
-        return sorted((k for k in run if k.startswith(self.source_prefix) and k[len(self.source_prefix):].isdigit()),
+        """Voltage channels ``<prefix><k>`` found at the top level or in any channel array."""
+        names = {k for k, v in run.items() if isinstance(v, np.ndarray) and v.ndim == 1}
+        for value in run.values():
+            names.update(channel_names(value))
+        return sorted((k for k in names if k.startswith(self.source_prefix) and k[len(self.source_prefix):].isdigit()),
                       key=lambda k: int(k[len(self.source_prefix):]))
+
+    def _positions(self, run, sources, out_names) -> dict:
+        if self.positions is not None:
+            table = positions_table(sources, self.positions, self.position_unit, self.position_frame)
+        else:
+            raw = run.get("raw_data")
+            table = positions_table(sources, None, self.position_unit, self.position_frame)
+            if is_channel_array(raw) and isinstance(raw.get("positions"), Mapping):
+                names, pos = channel_names(raw), raw["positions"]
+                for i, src in enumerate(sources):
+                    if src in names:
+                        j = names.index(src)
+                        for axis in ("x", "y", "z"):
+                            table[axis][i] = float(np.asarray(pos[axis])[j])
+                table["unit"] = str(pos.get("unit", table["unit"]))
+                table["frame"] = str(pos.get("frame", table["frame"]))
+        return table
 
     def apply(self, run, units):
         sources = self.sources(run)
@@ -92,28 +129,31 @@ class EddySlip(Step):
         t = np.asarray(run["time"], dtype=np.float64)
         dt = float(np.median(np.diff(t[: min(t.size, 2000)]))) if t.size > 1 else 1.0
         n0 = max(1, int(round(self.zero_window_s / dt)))
-        slips = {}
+        rows, out_names = [], []
         for src in sources:
-            v = np.asarray(run[src], dtype=np.float64)
-            out = self.out_prefix + src[len(self.source_prefix):]
-            s = 1000.0 * self.slope_for(src) * (v - np.nanmean(v[:n0]))
-            run[out] = s.astype(np.float32)
-            units[out] = "um"
-            slips[out] = s
+            v = np.asarray(get_channel(run, src), dtype=np.float64)
+            rows.append(1000.0 * self.slope_for(src) * (v - np.nanmean(v[:n0])))
+            out_names.append(self.out_prefix + src[len(self.source_prefix):])
+        data = np.vstack(rows)
+        run[self.out_key] = channel_array(data, out_names, unit="um", positions=self._positions(run, sources, out_names),
+                                          source=list(sources),
+                                          slope_mm_per_v=[self.slope_for(s) for s in sources])
+        units[self.out_key] = "um"
         if self.displacement == "mean":
-            run["displacement"] = np.mean(list(slips.values()), axis=0).astype(np.float32)
+            run["displacement"] = data.mean(axis=0).astype(np.float32)
             units["displacement"] = "um"
         elif self.displacement:
-            if self.displacement not in slips:
-                raise KeyError(f"displacement source {self.displacement!r} is not one of {list(slips)}")
-            run["displacement"] = np.asarray(slips[self.displacement], dtype=np.float32)
+            if self.displacement not in out_names:
+                raise KeyError(f"displacement source {self.displacement!r} is not one of {out_names}")
+            run["displacement"] = np.asarray(data[out_names.index(self.displacement)], dtype=np.float32)
             units["displacement"] = "um"
 
     def describe(self):
         return {"kind": "eddy_slip", "slopes_mm_per_v": {k: float(v) for k, v in self.slopes_mm_per_v.items()},
                 "default_slope_mm_per_v": self.slope_for("__default__") if (self.slopes_mm_per_v or self.default_slope_mm_per_v is not None) else None,
                 "zero_window_s": float(self.zero_window_s), "source_prefix": self.source_prefix,
-                "out_prefix": self.out_prefix, "displacement": self.displacement,
+                "out_prefix": self.out_prefix, "out_key": self.out_key, "displacement": self.displacement,
+                "positions_given": self.positions is not None,
                 "formula": f"{self.out_prefix}k (um) = 1000 * slope_k * (V - mean(V over the first {self.zero_window_s:g} s))"}
 
 
@@ -151,6 +191,8 @@ class Calibration:
         for key, value in run.items():
             if isinstance(value, np.ndarray) and key != "time":
                 units.setdefault(key, "V")
+            elif is_channel_array(value):
+                units.setdefault(key, str(value.get("unit", "")))
         for step in self.steps:
             step.apply(run, units)
         run["calibration"] = self.describe()
