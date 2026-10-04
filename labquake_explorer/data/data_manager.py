@@ -68,6 +68,16 @@ class DataManager:
             print(f"Dataset loading error: {str(exc)}")
             return None
 
+    _SLASH = "%2F"      # '/' is the HDF5 path separator, so dict keys containing it are escaped
+
+    @classmethod
+    def _escape_key(cls, key) -> str:
+        return str(key).replace("/", cls._SLASH)
+
+    @classmethod
+    def _unescape_key(cls, name: str) -> str:
+        return name.replace(cls._SLASH, "/")
+
     @classmethod
     def _load_h5_group(cls, group):
         """Groups written from a list come back as lists, groups written from
@@ -84,7 +94,7 @@ class DataManager:
         result = {}
         for key in keys:
             try:
-                result[key] = cls._load_h5_item(group[key])
+                result[cls._unescape_key(key)] = cls._load_h5_item(group[key])
             except Exception as exc:
                 print(f"Error loading {key}: {str(exc)}")
         return result
@@ -132,7 +142,7 @@ class DataManager:
         lists of numbers/strings become datasets, None is skipped.  Lists that
         numpy cannot stack (ragged lists of arrays, mixed content) become a
         group with one entry per index."""
-        key = str(key)
+        key = cls._escape_key(key)
         if value is None:
             return
         if isinstance(value, dict):

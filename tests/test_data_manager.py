@@ -253,3 +253,12 @@ def test_delete_data_accepts_backslash_paths_and_root(dm):
         dm.delete_data("runs/[0]/name/x")
     dm.delete_data("")
     assert dm.data is None
+
+
+def test_hdf5_keeps_keys_containing_slashes(tmp_path, dm):
+    dm.set_data("runs/[0]/units", {"elsys/raw_data": "V", "slip": "um"}, True)
+    path = tmp_path / "exp.h5"
+    dm.save_file(path)
+    other = DataManager()
+    other.load_file(path)
+    assert other.get_data("runs/[0]/units") == {"elsys/raw_data": "V", "slip": "um"}
