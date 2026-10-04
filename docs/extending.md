@@ -218,7 +218,7 @@ key. Every reference carries `filename` (relative to the experiment file),
 `time_offset` (`t_run = t_file + time_offset`), `fields` (the run field each
 file channel feeds) and optionally `event_fields` (subset copied into events)
 and `event_window_s` (`[pre, post]` seconds, replacing the start/end typed in
-the Extract Events form for that source). A `Tpc5Source` also stores the block table so the
+the Pick Events form for that source). A `Tpc5Source` also stores the block table so the
 explorer knows the trigger times without opening the file; an `NINpzSource`
 stores the record's metadata. `open_source(ref, base_dir, run)` rebuilds the
 reader; `source.read_window(t_from, t_to, fields)` returns samples on the run

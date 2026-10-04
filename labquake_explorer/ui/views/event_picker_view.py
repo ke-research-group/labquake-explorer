@@ -1,10 +1,13 @@
-"""Choose the window around the picked events and extract them.
+"""Pick the events of a run and extract them, in one window.
 
-Opened from ``event_indices``.  Plots Y against X for the whole
-run with every picked event marked, shades the ``[start, end]`` window of
-each event and highlights the selected one, and runs the extraction with the
-window typed in.  The window is saved under ``runs/[r]['event_window']`` so
-that a later extraction starts from the same settings.
+Opened from a run, one of its arrays or ``event_indices``.  Plots Y against X
+for the whole run; picks are placed on the curve (left double-click adds one
+at the nearest sample, right double-click on a pick removes it, drag moves
+it) and the ``[start, end]`` window of every pick is shaded, the selected one
+highlighted.  "Save picks" writes ``event_indices``; "Extract Events" writes
+the picks and then the events.  The window is saved under
+``runs/[r]['event_window']`` so that a later extraction starts from the same
+settings.
 """
 from __future__ import annotations
 
@@ -16,34 +19,52 @@ import numpy as np
 
 from labquake_explorer.data.channels import aligned_fields, get_field
 from labquake_explorer.ui.actions import register_view
-from labquake_explorer.ui.context import EVENT_INDICES
+from labquake_explorer.ui.context import EVENT_INDICES, RUN, RUN_ARRAY, TreeContext
 from labquake_explorer.ui.views.base import RunView, event_list
+from labquake_explorer.ui.views.point_picker import PointPicker
 
 RESULT_VERSION = 1
 DEFAULT_HALF_WINDOW_S = 5.0      # start/end default to -/+ config.DEFAULT_WINDOW_SIZE, else this
 X_INDEX = "index"
-ZOOM_FACTOR = 3.0            # "Zoom to event" shows this many windows around the event
-STEP_S = 0.5                 # one tick of the start/end spinboxes
+ZOOM_FACTOR = 3.0                # "Zoom to event" shows this many windows around the event
+STEP_S = 0.5                     # one tick of the start/end spinboxes
+HELP_TEXT = ("Left double-click on the curve: add a pick at the nearest sample.   "
+             "Right double-click on a pick: remove it.   Drag a pick to move it.   "
+             "Save picks writes event_indices; Extract Events writes the picks and then the events.")
 
 
-@register_view("Extract Events", kinds=[EVENT_INDICES], order=10)
-class ExtractEventsView(RunView):
-    window_title = "Extract Events"
+@register_view("Pick Events", kinds=[RUN, RUN_ARRAY, EVENT_INDICES], order=0)
+class EventPickerView(RunView):
+    window_title = "Pick Events"
     result_key = "event_window"
 
-    def __init__(self, app, run_idx):
+    def __init__(self, app, run_idx, y_field: Optional[str] = None):
+        self.y_field_hint = y_field
         self.candidates: list[str] = []
-        self.indices: list[int] = []
         self.time: np.ndarray = np.array([])
+        self.picker: Optional[PointPicker] = None
+        self.spans: list = []
         self.result: Optional[dict] = None
+        self._shown: dict = {}
         super().__init__(app, run_idx)
+
+    @classmethod
+    def from_context(cls, app, ctx: TreeContext):
+        if ctx.run_idx is None:
+            raise ValueError(f"{cls.__name__} needs a run context, got {ctx.path!r}")
+        return cls(app, ctx.run_idx, y_field=ctx.key if ctx.kind == RUN_ARRAY else None)
+
+    @property
+    def picks(self) -> list:
+        """The live pick list (sample indices, kept sorted)."""
+        return self.picker.picks if self.picker is not None else []
 
     # ------------------------------------------------------------------ ui
     def build_ui(self):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
 
-        box = ttk.LabelFrame(self, text="Event window")
+        box = ttk.LabelFrame(self, text="Events")
         box.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
         ttk.Label(box, text="X Data:").grid(row=0, column=0, padx=4, pady=3, sticky="e")
         self.x_combo = ttk.Combobox(box, state="readonly", width=22)
@@ -54,10 +75,12 @@ class ExtractEventsView(RunView):
         ttk.Label(box, text="Event:").grid(row=0, column=4, padx=4, pady=3, sticky="e")
         self.event_combo = ttk.Combobox(box, state="readonly", width=6)
         self.event_combo.grid(row=0, column=5, padx=(4, 0), pady=3, sticky="w")
-        self.prev_button = ttk.Button(box, text="\u25c0", width=2, command=lambda: self.step_event(-1))
+        self.prev_button = ttk.Button(box, text="◀", width=2, command=lambda: self.step_event(-1))
         self.prev_button.grid(row=0, column=6, padx=(2, 0), pady=3)
-        self.next_button = ttk.Button(box, text="\u25b6", width=2, command=lambda: self.step_event(+1))
+        self.next_button = ttk.Button(box, text="▶", width=2, command=lambda: self.step_event(+1))
         self.next_button.grid(row=0, column=7, padx=(0, 4), pady=3)
+        self.save_button = ttk.Button(box, text="Save picks", command=self.save_picks)
+        self.save_button.grid(row=0, column=8, padx=10, pady=3, sticky="ew")
 
         half = float(getattr(getattr(self.app, "config", None), "DEFAULT_WINDOW_SIZE", DEFAULT_HALF_WINDOW_S))
         ttk.Label(box, text="Start (s):").grid(row=1, column=0, padx=4, pady=3, sticky="e")
@@ -74,9 +97,8 @@ class ExtractEventsView(RunView):
         ttk.Button(box, text="Whole run", command=self.show_whole_run).grid(
             row=1, column=5, columnspan=3, padx=4, pady=3, sticky="w")
         self.extract_button = ttk.Button(box, text="Extract Events", command=self.extract)
-        self.extract_button.grid(row=0, column=8, rowspan=2, padx=10, pady=3, sticky="ns")
-        ttk.Label(box, text="Window relative to each picked event (seconds before are negative). "
-                            "Shaded: the window of every event; dark: the selected event.").grid(
+        self.extract_button.grid(row=1, column=8, padx=10, pady=3, sticky="ew")
+        ttk.Label(box, text=HELP_TEXT, wraplength=900, justify="left").grid(
             row=2, column=0, columnspan=9, padx=4, pady=(0, 3), sticky="w")
         self.status_var = tk.StringVar(master=self, value="")
         ttk.Label(box, textvariable=self.status_var).grid(row=3, column=0, columnspan=9, padx=4, pady=(0, 3), sticky="w")
@@ -90,38 +112,44 @@ class ExtractEventsView(RunView):
 
         self.make_figure(figsize=(10, 5), row=1, column=0, padx=5, pady=5, sticky="nsew")
         self.ax = self.figure.add_subplot(111)
+        self.picker = PointPicker(self.ax, self.canvas, [], [], [], add_remove=True,
+                                  toolbar_active=self.toolbar_active, on_change=self.on_picks_changed)
 
     def on_run_loaded(self):
         self.time = np.asarray(self.run.get("time", []), dtype=float).ravel()
         n = self.time.size
-        self.candidates = [p for p in aligned_fields(self.run, n, recurse=False)] if n else []
-        self.x_combo.config(values=[X_INDEX] + self.candidates)
-        self.y_combo.config(values=[c for c in self.candidates if c != "time"])
-        saved = self.load_results() or {}
-        x = saved.get("x_field") if saved.get("x_field") in self.candidates else ("time" if "time" in self.candidates else X_INDEX)
+        self.candidates = list(aligned_fields(self.run, n, recurse=False)) if n else []
         y_candidates = [c for c in self.candidates if c != "time"]
-        y = saved.get("y_field") if saved.get("y_field") in y_candidates else (
-            "shear_stress" if "shear_stress" in y_candidates else (y_candidates[0] if y_candidates else ""))
+        self.x_combo.config(values=[X_INDEX] + self.candidates)
+        self.y_combo.config(values=y_candidates)
+        saved = self.load_results() or {}
+        x = saved.get("x_field") if saved.get("x_field") in self.candidates else (
+            "time" if "time" in self.candidates else X_INDEX)
+        if self.y_field_hint in y_candidates:
+            y = self.y_field_hint
+        elif saved.get("y_field") in y_candidates:
+            y = saved["y_field"]
+        else:
+            y = "shear_stress" if "shear_stress" in y_candidates else (y_candidates[0] if y_candidates else "")
         self.x_combo.set(x)
         self.y_combo.set(y)
         if "start_s" in saved and "end_s" in saved:
             self.start_var.set(f"{float(saved['start_s']):g}")
             self.end_var.set(f"{float(saved['end_s']):g}")
-        raw = self.run.get("event_indices")
-        self.indices = [int(i) for i in (raw if raw is not None else []) if 0 <= int(i) < n] if n else []
-        self.event_combo.config(values=[str(i) for i in range(len(self.indices))])
-        if self.indices:
-            self.event_combo.current(0)
-            self.extract_button.state(["!disabled"])
-            self.status_var.set(f"{len(self.indices)} picked events; "
-                                f"{len(event_list(self.run))} extracted so far")
-        else:
-            self.event_combo.set("")
-            self.extract_button.state(["disabled"])
-            self.status_var.set("no event_indices in this run: pick events first")
+        self.picker.picks[:] = self.saved_picks()
+        self.refresh_event_list(0)
         self.plot()
+        self.update_status()
 
     # ----------------------------------------------------------- settings
+    def saved_picks(self) -> list:
+        """``event_indices`` of the run as sorted ints within the record."""
+        raw = self.run.get("event_indices")
+        if raw is None or self.time.size == 0:
+            return []
+        values = np.asarray(raw).ravel()
+        return sorted({int(i) for i in values if 0 <= int(i) < self.time.size})
+
     def window_s(self) -> tuple[float, float]:
         """``(start, end)`` in seconds relative to the event; ValueError on bad input."""
         try:
@@ -142,9 +170,16 @@ class ExtractEventsView(RunView):
                 return np.asarray(arr, dtype=float), choice
         return np.arange(self.time.size, dtype=float), "sample index"
 
+    def y_values(self) -> Optional[np.ndarray]:
+        y_field = self.y_combo.get()
+        y = get_field(self.run, y_field) if y_field else None
+        if y is None or np.asarray(y).shape != self.time.shape:
+            return None
+        return np.asarray(y, dtype=float)
+
     def selected_event(self) -> Optional[int]:
         text = self.event_combo.get().strip()
-        return int(text) if text.isdigit() and int(text) < len(self.indices) else None
+        return int(text) if text.isdigit() and int(text) < len(self.picks) else None
 
     def index_range(self, idx: int, start: float, end: float) -> tuple[int, int]:
         """Sample range ``[beg, end]`` of the window around pick ``idx`` (the
@@ -154,18 +189,53 @@ class ExtractEventsView(RunView):
         stop = int(np.argmin(np.abs(t0 + end - self.time)))
         return beg, stop
 
+    def refresh_event_list(self, select: Optional[int]) -> None:
+        """Rebuild the event combobox for the current picks and select one."""
+        n = len(self.picks)
+        self.event_combo.config(values=[str(i) for i in range(n)])
+        if n:
+            if select is None:
+                select = self.selected_event() or 0
+            self.event_combo.current(min(max(select, 0), n - 1))
+            self.extract_button.state(["!disabled"])
+        else:
+            self.event_combo.set("")
+            self.extract_button.state(["disabled"])
+
+    def dirty(self) -> bool:
+        """True when the picks differ from the run's ``event_indices``."""
+        return self.picks != self.saved_picks()
+
+    def update_status(self, note: str = "") -> None:
+        n = len(self.picks)
+        parts = [f"{n} pick{'s' if n != 1 else ''}" + (" (unsaved)" if self.dirty() else "")]
+        k = self.selected_event()
+        if k is not None:
+            parts.append(f"event {k} at t = {self.time[self.picks[k]]:.3f} s")
+        n_events = len(event_list(self.run))
+        parts.append(f"{n_events} event{'s' if n_events != 1 else ''} extracted")
+        if note:
+            parts.append(note)
+        self.status_var.set("   ".join(parts))
+
     # ------------------------------------------------------------- plotting
     def plot(self):
+        x_field, y_field = self.x_combo.get(), self.y_combo.get()
+        keep_x = self._shown.get("x") == x_field
+        keep_y = keep_x and self._shown.get("y") == y_field
+        xlim, ylim = self.ax.get_xlim(), self.ax.get_ylim()
         self.ax.clear()
+        self.spans = []
         self.ax.grid(True, linestyle="--", alpha=0.3)
-        y_field = self.y_combo.get()
-        y = get_field(self.run, y_field) if y_field else None
         x, x_label = self.x_values()
-        if y is None or np.asarray(y).shape != self.time.shape:
+        y = self.y_values()
+        if y is None:
             self.ax.set_title(f"{self.figure_title()}: select a Y array")
+            self.picker.set_curve(x, np.full(x.shape, np.nan))
+            self.picker.draw_markers()
+            self._shown = {"x": x_field, "y": y_field}
             self.canvas.draw_idle()
             return
-        y = np.asarray(y, dtype=float)
         self.ax.plot(x, y, lw=0.7, color="C0", zorder=1)
         try:
             start, end = self.window_s()
@@ -173,35 +243,47 @@ class ExtractEventsView(RunView):
             start = end = None
             self.status_var.set(str(e))
         selected = self.selected_event()
-        for k, idx in enumerate(self.indices):
+        for k, idx in enumerate(self.picks):
             self.ax.axvline(x[idx], color="k", ls=":", lw=0.8, zorder=2)
             if start is not None:
                 beg, stop = self.index_range(idx, start, end)
                 is_sel = k == selected
-                self.ax.axvspan(x[beg], x[stop], color="#33CC66" if is_sel else "0.5",
-                                alpha=0.35 if is_sel else 0.12, zorder=0)
-        if self.indices:
-            self.ax.plot(x[self.indices], y[self.indices], "o", color="#CC3366", ms=4, zorder=3,
-                         label="picked events")
-            self.ax.legend(loc="upper left", fontsize="small")
+                self.spans.append(self.ax.axvspan(x[beg], x[stop], color="#33CC66" if is_sel else "0.5",
+                                                  alpha=0.35 if is_sel else 0.12, zorder=0))
         self.ax.set_xlabel(x_label)
         self.ax.set_ylabel(y_field)
         self.ax.set_title(self.figure_title())
+        if keep_x:
+            self.ax.set_xlim(xlim)
+        if keep_y:
+            self.ax.set_ylim(ylim)
+        self._shown = {"x": x_field, "y": y_field}
+        self.picker.set_curve(x, y)
+        self.picker.draw_markers()
         self.canvas.draw_idle()
 
     def figure_title(self) -> str:
         return f"{self.experiment_name()} run{self.run_idx:02d}"
 
+    def on_picks_changed(self, kind: str, idx: int) -> None:
+        """A pick was added, removed or moved: keep the list sorted, follow it."""
+        self.picker.sort()
+        select = self.picks.index(idx) if kind in ("add", "move") and idx in self.picks else None
+        self.refresh_event_list(select)
+        self.plot()
+        self.update_status()
+
     def on_event_selected(self):
         self.plot()
         self.zoom_to_event()
+        self.update_status()
 
     def step_event(self, delta: int):
         """Select the previous (-1) or next (+1) event, staying within the list."""
-        if not self.indices:
+        if not self.picks:
             return
         k = self.selected_event()
-        k = 0 if k is None else min(max(k + delta, 0), len(self.indices) - 1)
+        k = 0 if k is None else min(max(k + delta, 0), len(self.picks) - 1)
         self.event_combo.current(k)
         self.on_event_selected()
 
@@ -214,44 +296,57 @@ class ExtractEventsView(RunView):
         except ValueError:
             return
         x, _ = self.x_values()
-        beg, stop = self.index_range(self.indices[k], ZOOM_FACTOR * start, ZOOM_FACTOR * end)
+        beg, stop = self.index_range(self.picks[k], ZOOM_FACTOR * start, ZOOM_FACTOR * end)
         lo, hi = sorted((float(x[beg]), float(x[stop])))
         if hi > lo:
             self.ax.set_xlim(lo, hi)
-            y_field = self.y_combo.get()
-            y = get_field(self.run, y_field) if y_field else None
-            if y is not None and np.asarray(y).shape == self.time.shape:
-                seg = np.asarray(y, dtype=float)[min(beg, stop):max(beg, stop) + 1]
+            y = self.y_values()
+            if y is not None:
+                seg = y[min(beg, stop):max(beg, stop) + 1]
                 seg = seg[np.isfinite(seg)]
                 if seg.size and seg.max() > seg.min():
                     pad = 0.05 * (seg.max() - seg.min())
                     self.ax.set_ylim(seg.min() - pad, seg.max() + pad)
+            self.picker.update_marker_size()
             self.canvas.draw_idle()
 
     def show_whole_run(self):
         self.ax.autoscale(enable=True, axis="both")
         self.ax.relim()
         self.ax.autoscale_view()
+        self.picker.update_marker_size()
         self.canvas.draw_idle()
 
-    # ------------------------------------------------------------- extract
+    # ------------------------------------------------------------- saving
+    def save_picks(self, refresh: bool = True) -> list:
+        """Write the picks to ``runs/[r]/event_indices`` (a copy, sorted)."""
+        self.picker.sort()
+        picks = list(self.picks)
+        self.data_manager.set_data(f"{self.run_path}/event_indices", picks, add_key=True)
+        self.run["event_indices"] = picks
+        if refresh:
+            self.app.refresh_tree()
+            self.update_status("picks saved")
+        return picks
+
     def extract(self, confirm: bool = True) -> int:
-        """Extract every picked event with the current window; returns the count."""
+        """Save the picks, extract every one with the current window; returns the count."""
         try:
             start, end = self.window_s()
         except ValueError as e:
             self.status_var.set(str(e))
             return 0
-        if not self.indices:
-            self.status_var.set("no event_indices in this run: pick events first")
+        if not self.picks:
+            self.status_var.set("no picks: double-click on the curve to add events first")
             return 0
         if confirm and event_list(self.run):
             if not messagebox.askokcancel(title="Confirmation",
                                           message=f'This will replace all data in "{self.run_path}/events".',
                                           icon=messagebox.WARNING, parent=self):
                 return 0
+        picks = self.save_picks(refresh=False)
         events = self.data_manager.event_processor.extract_events(
-            self.run, self.indices, window=max(-start, end), pre=-start, post=end)
+            self.run, picks, window=max(-start, end), pre=-start, post=end)
         self.data_manager.set_data(f"{self.run_path}/events", events, add_key=True)
         self.result = {
             "version": RESULT_VERSION,
@@ -262,5 +357,5 @@ class ExtractEventsView(RunView):
             "n_events": len(events),
         }
         self.save_results(dict(self.result))      # also refreshes the tree
-        self.status_var.set(f"{len(events)} events extracted, window {start:+g} s .. {end:+g} s")
+        self.update_status(f"{len(events)} events extracted, window {start:+g} s .. {end:+g} s")
         return len(events)

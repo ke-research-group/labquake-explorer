@@ -257,25 +257,6 @@ class LabquakeExplorer:
     # ------------------------------------------------------------------
     # context-menu actions that are commands rather than views
     # ------------------------------------------------------------------
-    @register_action("Pick Events", kinds=[RUN_ARRAY], order=10)
-    def pick_events(self, ctx: TreeContext) -> None:
-        path = ctx.path
-        y = self.data_manager.get_data(path)
-        x = np.arange(len(y))
-        save_path = f"{ctx.parent_path}/event_indices"
-        parent_id = self.data_tree.parent(self.data_tree.selection()[0])
-        if self.has_child_named(parent_id, "event_indices"):
-            picked_idx = self.data_manager.get_data(save_path)
-        else:
-            picked_idx = []
-        def save_and_refresh(data):
-            self.data_manager.set_data(save_path, data, add_key=True)
-            self.refresh_tree()
-        view = PointsSelectorView(self, x, y, picked_idx, add_remove_enabled=True, 
-                                 callback=save_and_refresh,
-                                 xlabel='index', ylabel=ctx.key, title=path)
-        self.register_child(view)
-
     @register_action("Min/Max", kinds=[EVENT_ARRAY], order=30)
     def min_max(self, ctx: TreeContext) -> None:
         path = ctx.path

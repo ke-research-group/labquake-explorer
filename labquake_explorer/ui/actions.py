@@ -7,8 +7,8 @@ command means registering it here, not editing the main window.
 
 Register a plain function::
 
-    @register_action("Extract Events", kinds=[EVENT_INDICES])
-    def extract_events(app, ctx): ...
+    @register_action("Edit String", kinds=[STRING])
+    def edit_string(app, ctx): ...
 
 Register a view class (it must provide ``from_context(app, ctx)``)::
 

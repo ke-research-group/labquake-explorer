@@ -5,7 +5,7 @@ import pytest
 
 from labquake_explorer.ui.actions import actions_for
 from labquake_explorer.ui.views import (
-    IndexPickerView, PointsSelectorView, SimplePlotView, SlopeAnalyzerView,
+    EventPickerView, IndexPickerView, PointsSelectorView, SimplePlotView, SlopeAnalyzerView,
 )
 
 
@@ -243,32 +243,26 @@ def test_points_selector_does_not_mutate_input(app):
         view.on_close()
 
 
-def test_pick_events_action_preloads_event_indices(app):
+def test_pick_events_action_opens_the_event_picker(app):
     truth = app.truth[0]
     ctx = run_menu_action(app, "runs/[0]/shear_stress", "Pick Events")
     assert ctx.key == "shear_stress"
-    views = [w for w in app.child_windows if isinstance(w, PointsSelectorView)]
+    views = [w for w in app.child_windows if isinstance(w, EventPickerView)]
     assert len(views) == 1
     view = views[0]
-    assert view.picked_idx == list(truth.event_indices)
-    assert view.add_remove_enabled is True
-    assert view.callback is not None
-    assert view.ax.get_ylabel() == "shear_stress"
-    assert view.ax.get_title() == "runs/[0]/shear_stress"
-    assert np.array_equal(view.y_values, truth.shear_stress)
-    # saving writes back through the callback into the data manager
-    view.add_point(5)
-    view.save()
+    assert view.picks == sorted(int(i) for i in truth.event_indices)
+    assert view.y_combo.get() == "shear_stress" and view.ax.get_ylabel() == "shear_stress"
+    # saving writes a copy into the data manager; later edits stay local
+    view.picker.add_point(5)
+    view.save_picks()
     stored = app.data_manager.get_data("runs/[0]/event_indices")
-    assert stored == [5] + list(truth.event_indices)
-    # the stored list is not aliased with the view's: later edits in the
-    # still-open window do not change the data until Save is pressed again
-    assert stored is not view.picked_idx
-    view.remove_point(0)
-    view.add_point(7)
-    assert app.data_manager.get_data("runs/[0]/event_indices") == [5] + list(truth.event_indices)
-    view.save()
-    assert app.data_manager.get_data("runs/[0]/event_indices") == [7] + list(truth.event_indices)
+    assert stored == sorted([5] + [int(i) for i in truth.event_indices])
+    assert stored is not view.picks
+    view.picker.remove_point(0)
+    view.picker.add_point(7)
+    assert app.data_manager.get_data("runs/[0]/event_indices") == stored
+    view.save_picks()
+    assert app.data_manager.get_data("runs/[0]/event_indices") == sorted([7] + [int(i) for i in truth.event_indices])
     view.on_close()
 
 
