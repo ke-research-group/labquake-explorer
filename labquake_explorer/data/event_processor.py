@@ -6,9 +6,10 @@ time, and each raw-data reference of the run (see
 result is one dict per event::
 
     event_time, time, <every run field aligned with time>,
-    <channel array>: {'data': (n_channels, n_window), 'channels', 'unit', ...},   # e.g. 'raw_data', 'slip'
-    <reference key>: {'format', 'filename', 'fields', 'sample_rate', 'block',
-                      'original': {'time', 'raw'}}      # e.g. 'elsys', 'ni'
+    <channel array>: {'data': (n_channels, n_window), 'channels', 'unit', ...},   # e.g. 'slip'
+    <recorder key>: {'raw_data': <its channel array, sliced>,                      # e.g. 'elsys', 'ni'
+                     'format', 'filename', 'fields', 'sample_rate', 'block',
+                     'original': {'time', 'raw'}}        # the full-rate window, when a record covers the event
 
 The PSU-era ``strain`` layout keeps its historical output (``time``/``raw``
 downsampled copies plus ``original``), so older experiment files behave as
@@ -96,6 +97,12 @@ class EventProcessor:
             elif isinstance(value, np.ndarray) and value.ndim == 1 and value.shape[0] == n:
                 event[key] = value[beg:end]
         notes = []
+        # the low-rate channels each recorder contributed (sliced), with or without the raw file
+        for key, ref in run_sources(run_data).items():
+            arrays = {sub: slice_channel_array(item, slice(beg, end)) for sub, item in ref.items()
+                      if is_channel_array(item) and item["data"].shape[1] == n}
+            if arrays:
+                event[key] = {"format": ref.get("format"), "filename": ref.get("filename"), **arrays}
         for key, source in sources.items():
             if isinstance(source, LegacyTpc5Source):
                 block = self._legacy_strain(run_data, source, event_time, pre, post)
@@ -111,7 +118,7 @@ class EventProcessor:
             if block is None:
                 notes.append(f"{key}: no raw record covers {event_time:.4f} s")
             else:
-                event[key] = block
+                event.setdefault(key, {}).update(block)
         if notes:
             event["notes"] = notes
         return event

@@ -75,25 +75,26 @@ looks like this:
 | key | content |
 |---|---|
 | `time` | 1-D, seconds on the run clock |
-| `raw_data` | channel array of every recorded voltage: `data` (channels x samples, float32), `channels` (`pzt_1`, `pressure_1`, `eddy_3`, ...), `unit` (`V`), `recorder` (`elsys` / `ni` per channel), `positions` |
+| `elsys`, `ni`, ... | one block per recorder: its raw-file reference (next section) plus `raw_data`, the channel array of the voltages it recorded: `data` (channels x samples, float32), `channels` (`pzt_1`, `pressure_1`, `eddy_3`, ...), `unit` (`V`), `positions` |
 | `normal_stress`, `shear_stress`, `friction`, `LP_displacement`, `displacement` | 1-D physical channels (MPa, um, ...) |
 | `slip` | channel array of the eddy-current sensors in um: `data`, `channels` (`slip_1`...), `source` (the voltage channel of each row), `slope_mm_per_v`, `positions` |
 | `units` | unit of every top-level array and channel array |
 | `calibration` | the steps that produced the physical channels (see the preprocessing package) |
-| `sources`, `elsys`, `ni`, ... | raw-file references (next section) |
+| `sources` | `{recorder key: format}` |
 | `event_indices`, `events` | picks and extracted events |
 
 A **channel array** (`labquake_explorer/data/channels.py`) is a dict with
 `data` shaped `(n_channels, n)`, `channels` naming the rows, `unit`, and an
 optional `positions` table (`x`, `y`, `z` per channel, NaN when unknown, plus
-`unit` and `frame`). Any further key is metadata. Views address a row by the
-path `'<array>/<channel>'` (`slip/slip_3`); `aligned_fields(container, n)`
+`unit` and `frame`). Any further key is metadata. Views address a row by its
+path (`slip/slip_3`, `elsys/raw_data/pzt_1`); `aligned_fields(container, n)`
 lists every 1-D series of length `n` this way and `get_field(container,
 path)` resolves one, so a field is the same whether it is a top-level array
 or a row. Event extraction slices channel arrays along the sample axis and
-keeps their metadata, so events carry `raw_data` and `slip` too. Older files
-with top-level 1-D channels keep working: a channel array is only an
-additional place a field can live.
+keeps their metadata: an event's `elsys` block holds the sliced low-rate
+`raw_data` and, when a trigger block covers the event, the full-rate
+`original`; `slip` is sliced too. Older files with top-level 1-D channels
+keep working: a channel array is only an additional place a field can live.
 
 ## Saved result schemas
 

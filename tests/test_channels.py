@@ -12,9 +12,10 @@ def run():
                           unit="V", positions=C.positions_table(["pressure_1", "lvdt", "eddy_1"], {"eddy_1": (120.0, 0.0, 25.0)}),
                           recorder=["elsys", "elsys", "elsys"])
     slip = C.channel_array(np.vstack([t, 2 * t]), ["slip_1", "slip_2"], unit="um")
+    pzt = C.channel_array(np.vstack([np.sin(t)]), ["pzt_1"], unit="V")
     return {"time": t, "raw_data": raw, "slip": slip, "normal_stress": np.full(n, 8.0),
             "strain": {"original": {"time": t[:10], "raw": np.zeros((2, 10))}},
-            "elsys": {"format": "tpc5", "fields": ["a"]}, "events": [], "name": "run1",
+            "elsys": {"format": "tpc5", "fields": ["a"], "raw_data": pzt}, "events": [], "name": "run1",
             "nested": {"shear": np.ones(n), "short": np.ones(3)}}
 
 
@@ -36,6 +37,9 @@ def test_rows_and_lookup(run):
     assert C.row(run["slip"], 0)[1] == pytest.approx(0.1)
     assert C.row(run["slip"], "nope") is None and C.row(run["slip"], 5) is None and C.row(3, 0) is None
     assert C.find_channel(run, "eddy_1") == ("raw_data", 2) and C.find_channel(run, "nope") is None
+    assert C.find_channel(run, "pzt_1") == ("elsys/raw_data", 0)
+    np.testing.assert_array_equal(C.get_channel(run, "pzt_1"), run["elsys"]["raw_data"]["data"][0])
+    assert [p for p, _ in C.channel_arrays(run)] == ["raw_data", "slip", "elsys/raw_data"]
     np.testing.assert_array_equal(C.get_channel(run, "normal_stress"), run["normal_stress"])
     np.testing.assert_array_equal(C.get_channel(run, "lvdt"), run["raw_data"]["data"][1])
     assert C.get_channel(run, "missing") is None
@@ -44,7 +48,9 @@ def test_rows_and_lookup(run):
 def test_aligned_fields_and_get_field(run):
     fields = C.aligned_fields(run, 100)
     assert fields == ["time", "raw_data/pressure_1", "raw_data/lvdt", "raw_data/eddy_1", "slip/slip_1", "slip/slip_2",
-                      "normal_stress", "nested/shear"]
+                      "normal_stress", "elsys/raw_data/pzt_1", "nested/shear"]
+    assert "elsys/raw_data/pzt_1" in C.aligned_fields(run, 100, recurse=False) and "nested/shear" not in C.aligned_fields(run, 100, recurse=False)
+    np.testing.assert_array_equal(C.get_field(run, "elsys/raw_data/pzt_1"), run["elsys"]["raw_data"]["data"][0])
     np.testing.assert_array_equal(C.get_field(run, "slip/slip_2"), run["slip"]["data"][1])
     np.testing.assert_array_equal(C.get_field(run, "nested/shear"), run["nested"]["shear"])
     np.testing.assert_array_equal(C.get_field(run, "time"), run["time"])

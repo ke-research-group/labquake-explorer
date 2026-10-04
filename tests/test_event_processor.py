@@ -40,7 +40,7 @@ def test_extract_from_tpc5_run(elsys, tmp_path):
     assert e0["event_time"] == pytest.approx(0.5) and e0["time"][0] == pytest.approx(0.45) and e0["time"].size == 200
     for f in ("normal_stress", "displacement"):
         assert e0[f].shape == e0["time"].shape, f
-    assert e0["raw_data"]["data"].shape == (4, 200) and e0["raw_data"]["channels"] == ["pzt_1", "pressure_1", "pressure_2", "eddy_1"]
+    assert e0["elsys"]["raw_data"]["data"].shape == (4, 200) and e0["elsys"]["raw_data"]["channels"] == ["pzt_1", "pressure_1", "pressure_2", "eddy_1"]
     assert e0["slip"]["data"].shape == (1, 200) and e0["slip"]["unit"] == "um"
     assert "events" not in e0 and "calibration" not in e0 and "units" not in e0 and "sources" not in e0
     strain = e0["elsys"]
@@ -50,8 +50,9 @@ def test_extract_from_tpc5_run(elsys, tmp_path):
     assert orig["raw"].shape == (4, orig["time"].size) and orig["raw"].dtype == np.float32
     assert orig["time"][0] == pytest.approx(0.498, abs=1e-5) and orig["time"][-1] == pytest.approx(0.508, abs=1e-5)
     assert orig["time"][np.argmax(orig["raw"][0])] == pytest.approx(0.5, abs=2e-5)
-    # the event at 1.0 s lies in no trigger block: no strain, a note instead
-    assert "elsys" not in events[1] and events[1]["notes"] == ["elsys: no raw record covers 1.0000 s"]
+    # the event at 1.0 s lies in no trigger block: the recorder block keeps its low-rate slice, no 'original', a note
+    assert "original" not in events[1]["elsys"] and events[1]["elsys"]["raw_data"]["data"].shape == (4, 200)
+    assert events[1]["notes"] == ["elsys: no raw record covers 1.0000 s"]
     assert events[2]["elsys"]["block"] == 3
 
 
@@ -64,7 +65,7 @@ def test_source_event_settings_and_no_base_dir(elsys, tmp_path, capsys):
     assert e["time"].size == 4000 - 1 - index_at(run, 0.5) + 1000 or e["time"].size > 0
     # without a saved experiment path the references are skipped with a warning, not an error
     e2 = EventProcessor().extract_events(run, [index_at(run, 0.5)], window=0.05)[0]
-    assert "elsys" not in e2 and "raw_data" in e2
+    assert "original" not in e2["elsys"] and e2["elsys"]["raw_data"]["channels"][0] == "pzt_1"
     assert "raw-data references skipped" in capsys.readouterr().out
 
 
@@ -88,6 +89,7 @@ def test_extract_from_tpc5_ni_run(elsys, tmp_path):
     # NI window: its own (pre, post), full 10 kHz rate, all NI fields
     ni_block = e["ni"]
     assert ni_block["format"] == "ni_npz" and ni_block["sample_rate"] == 10_000.0
+    assert ni_block["raw_data"]["channels"] == ["pressure_1", "pressure_2", "eddy_1"] and ni_block["raw_data"]["data"].shape[1] == e["time"].size
     assert ni_block["fields"] == ["pressure_1", "pressure_2", "eddy_1"]
     assert ni_block["original"]["time"][0] == pytest.approx(1.19, abs=1e-3) and ni_block["original"]["time"][-1] == pytest.approx(1.30, abs=1e-3)
     eddy = ni_block["original"]["raw"][2]

@@ -8,13 +8,14 @@ A channel array is a dict::
      'positions': {'x': [...], 'y': [...], 'z': [...], 'unit': 'mm', 'frame': '...'},  # optional, NaN = unknown
      ...}                                    # any further per-array metadata (recorder, source, ...)
 
-A run stores its recorded voltages as ``run['raw_data']`` and sensor arrays
-derived from them (slip along the fault, strain gauges, ...) as further
-channel arrays such as ``run['slip']``; scalar physical channels
-(``normal_stress``, ``displacement``, ...) stay 1-D arrays at the top level.
-Views address a row as ``'<array>/<channel>'`` (``'slip/slip_3'``); the
-helpers here list and resolve those paths, so a view never cares whether a
-field is a top-level array or a row.
+A run stores the voltages of each recorder as ``run[<recorder>]['raw_data']``
+(``run['elsys']['raw_data']``, ``run['ni']['raw_data']``, next to that
+recorder's file reference) and sensor arrays derived from them (slip along the
+fault, strain gauges, ...) as top-level channel arrays such as ``run['slip']``;
+scalar physical channels (``normal_stress``, ``displacement``, ...) stay 1-D
+arrays at the top level.  Views address a row by path
+(``'slip/slip_3'``, ``'elsys/raw_data/pzt_1'``); the helpers here list and
+resolve those paths, so a view never cares where a field lives.
 """
 from __future__ import annotations
 
@@ -91,13 +92,26 @@ def row(value, channel) -> Optional[np.ndarray]:
     return value["data"][i]
 
 
-def find_channel(container: Mapping, name: str):
-    """``(key, index)`` of the channel array row named ``name``, or None."""
+def channel_arrays(container: Mapping) -> list:
+    """``[(path, array)]`` for the channel arrays at the top level and one level
+    down inside other dicts (a recorder's ``raw_data``), in container order."""
+    out = []
     for key, value in container.items():
         if is_channel_array(value):
-            names = channel_names(value)
-            if name in names:
-                return key, names.index(name)
+            out.append((str(key), value))
+        elif isinstance(value, Mapping):
+            for sub, item in value.items():
+                if is_channel_array(item):
+                    out.append((f"{key}/{sub}", item))
+    return out
+
+
+def find_channel(container: Mapping, name: str):
+    """``(path, index)`` of the channel array row named ``name``, or None."""
+    for path, value in channel_arrays(container):
+        names = channel_names(value)
+        if name in names:
+            return path, names.index(name)
     return None
 
 
@@ -109,13 +123,21 @@ def get_channel(container: Mapping, name: str) -> Optional[np.ndarray]:
     hit = find_channel(container, name)
     if hit is None:
         return None
-    key, i = hit
-    return container[key]["data"][i]
+    path, i = hit
+    return _array_at(container, path)["data"][i]
+
+
+def _array_at(container: Mapping, path: str) -> Mapping:
+    current = container
+    for part in path.split("/"):
+        current = current[part]
+    return current
 
 
 def aligned_fields(container: Mapping, n: int, prefix: str = "", recurse: bool = True) -> list:
     """Paths of every 1-D series of length ``n``: top-level arrays, rows of
-    channel arrays (``'slip/slip_3'``) and, with ``recurse``, arrays inside
+    channel arrays (``'slip/slip_3'``, including those inside a recorder's
+    reference, ``'elsys/raw_data/pzt_1'``) and, with ``recurse``, arrays inside
     plain nested dicts (``'strain/time'``)."""
     out = []
     for key, value in container.items():
@@ -123,6 +145,10 @@ def aligned_fields(container: Mapping, n: int, prefix: str = "", recurse: bool =
         if is_channel_array(value):
             if value["data"].shape[1] == n:
                 out.extend(f"{path}/{c}" for c in channel_names(value))
+        elif isinstance(value, Mapping) and "format" in value:
+            for sub, item in value.items():           # a recorder's raw_data
+                if is_channel_array(item) and item["data"].shape[1] == n:
+                    out.extend(f"{path}/{sub}/{c}" for c in channel_names(item))
         elif isinstance(value, np.ndarray):
             if value.ndim == 1 and value.shape[0] == n and value.dtype.kind in "iufb":
                 out.append(path)
@@ -160,4 +186,4 @@ def slice_channel_array(value: Mapping, sl: slice) -> dict:
 
 
 __all__ = ["RESERVED", "positions_table", "channel_array", "is_channel_array", "channel_names", "row",
-           "find_channel", "get_channel", "aligned_fields", "get_field", "slice_channel_array"]
+           "channel_arrays", "find_channel", "get_channel", "aligned_fields", "get_field", "slice_channel_array"]

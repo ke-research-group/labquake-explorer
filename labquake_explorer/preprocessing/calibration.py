@@ -26,7 +26,8 @@ from typing import Mapping, Optional, Sequence
 import numpy as np
 
 from labquake_explorer.data.channels import (
-    channel_array, channel_names, get_channel, is_channel_array, positions_table,
+    channel_array, channel_arrays, channel_names, find_channel, get_channel, is_channel_array,
+    positions_table,
 )
 
 
@@ -73,7 +74,7 @@ class EddySlip(Step):
 
     The result is the channel array ``run[out_key]`` (rows ``slip_1``, ...,
     unit um, ``source`` naming the voltage channel of each row, ``positions``
-    from ``positions`` or inherited from ``run['raw_data']``) plus
+    from ``positions`` or inherited from the recorder's ``raw_data``) plus
     ``displacement``: the mean of all slip channels (``'mean'``), one of them
     (e.g. ``'slip_5'``) or not written (None).
     """
@@ -100,24 +101,24 @@ class EddySlip(Step):
     def sources(self, run) -> list:
         """Voltage channels ``<prefix><k>`` found at the top level or in any channel array."""
         names = {k for k, v in run.items() if isinstance(v, np.ndarray) and v.ndim == 1}
-        for value in run.values():
+        for _, value in channel_arrays(run):
             names.update(channel_names(value))
         return sorted((k for k in names if k.startswith(self.source_prefix) and k[len(self.source_prefix):].isdigit()),
                       key=lambda k: int(k[len(self.source_prefix):]))
 
     def _positions(self, run, sources, out_names) -> dict:
         if self.positions is not None:
-            table = positions_table(sources, self.positions, self.position_unit, self.position_frame)
-        else:
-            raw = run.get("raw_data")
-            table = positions_table(sources, None, self.position_unit, self.position_frame)
-            if is_channel_array(raw) and isinstance(raw.get("positions"), Mapping):
-                names, pos = channel_names(raw), raw["positions"]
-                for i, src in enumerate(sources):
-                    if src in names:
-                        j = names.index(src)
-                        for axis in ("x", "y", "z"):
-                            table[axis][i] = float(np.asarray(pos[axis])[j])
+            return positions_table(sources, self.positions, self.position_unit, self.position_frame)
+        table = positions_table(sources, None, self.position_unit, self.position_frame)
+        arrays = dict(channel_arrays(run))
+        for i, src in enumerate(sources):
+            hit = find_channel(run, src)
+            if hit is None:
+                continue
+            pos = arrays[hit[0]].get("positions")
+            if isinstance(pos, Mapping):
+                for axis in ("x", "y", "z"):
+                    table[axis][i] = float(np.asarray(pos[axis])[hit[1]])
                 table["unit"] = str(pos.get("unit", table["unit"]))
                 table["frame"] = str(pos.get("frame", table["frame"]))
         return table
@@ -191,8 +192,8 @@ class Calibration:
         for key, value in run.items():
             if isinstance(value, np.ndarray) and key != "time":
                 units.setdefault(key, "V")
-            elif is_channel_array(value):
-                units.setdefault(key, str(value.get("unit", "")))
+        for path, value in channel_arrays(run):
+            units.setdefault(path, str(value.get("unit", "")))
         for step in self.steps:
             step.apply(run, units)
         run["calibration"] = self.describe()

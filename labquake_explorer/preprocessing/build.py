@@ -3,11 +3,11 @@
 A run is built from one or more :class:`~labquake_explorer.data.sources.Source`
 objects: the first one (the *time base*) provides the run's time axis and its
 whole-run record; the others contribute their whole-run records interpolated
-onto that axis for any field the time base does not already provide.  The
-recorded voltages go into the channel array ``run['raw_data']`` (one row per
-channel, with the recorder and, when given, the sensor positions); every
-source is stored as a reference under its own key so that event extraction can
-go back to the raw files; the calibration then adds the physical channels.
+onto that axis for any field the time base does not already provide.  Every
+source is stored as a reference under its own key (``run['elsys']``,
+``run['ni']``) and its recorded voltages go next to it as the channel array
+``run[<key>]['raw_data']`` (one row per channel, with the sensor positions when
+given); the calibration then adds the physical channels at the top level.
 """
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def run_from_sources(sources: Mapping[str, Source], base_dir, calibration: Optio
     the source whose whole-run record becomes the run's time axis (default: the
     first).  ``decimation`` gives a block-mean factor per key for the whole-run
     records.  ``positions`` maps a field to its (x, y, z) on the sample for the
-    ``raw_data`` positions table.  ``metadata`` is copied into the run (name,
+    ``raw_data`` positions tables.  ``metadata`` is copied into the run (name,
     normal_stress_level, ...).
     """
     if not sources:
@@ -65,31 +65,32 @@ def run_from_sources(sources: Mapping[str, Source], base_dir, calibration: Optio
     if isinstance(base, Tpc5Source):
         run["start_time"] = base.start_time
     run["time"] = np.asarray(t_run, dtype=np.float64)
-    columns, names, recorders = [], [], []
-    for field_name, column in zip(base.fields, data):
-        columns.append(np.asarray(column, dtype=np.float32))
-        names.append(field_name)
-        recorders.append(time_base)
-
+    recorded = {time_base: ([np.asarray(c, dtype=np.float32) for c in data], list(base.fields))}
+    taken = set(base.fields)
     for key in keys:
         if key == time_base:
             continue
         src = sources[key]
         t_src, d_src = src.time_history(decimation.get(key, 1))
+        columns, names = [], []
         for field_name, column in zip(src.fields, d_src):
-            if field_name in names:
+            if field_name in taken:
                 continue                                   # the time base wins
             columns.append(np.interp(run["time"], t_src, np.asarray(column, dtype=np.float64),
                                      left=np.nan, right=np.nan).astype(np.float32))
             names.append(field_name)
-            recorders.append(key)
-    run["raw_data"] = channel_array(
-        np.vstack(columns), names, unit="V", recorder=recorders,
-        positions=positions_table(names, positions, position_unit, position_frame) if positions is not None else None)
-    run["units"] = {"raw_data": "V"}
+            taken.add(field_name)
+        recorded[key] = (columns, names)
+    run["units"] = {}
     run["sources"] = {key: src.format for key, src in sources.items()}
     for key, src in sources.items():
         run[key] = src.to_reference(base_dir)
+        columns, names = recorded[key]
+        if names:
+            run[key]["raw_data"] = channel_array(
+                np.vstack(columns), names, unit="V",
+                positions=positions_table(names, positions, position_unit, position_frame) if positions is not None else None)
+            run["units"][f"{key}/raw_data"] = "V"
     if calibration is not None:
         calibration.apply(run)
     return run

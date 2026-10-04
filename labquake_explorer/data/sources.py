@@ -253,7 +253,7 @@ class Tpc5Source(Source):
 
 
 _TPC5_KEYS = {"format", "filename", "time_offset", "fields", "event_fields", "event_window_s",
-              "channel_numbers", "channel_names", "start_time", "continuous", "blocks"}
+              "channel_numbers", "channel_names", "start_time", "continuous", "blocks", "raw_data"}
 
 
 def _map_field(label: str, channel_map) -> str:
@@ -328,7 +328,7 @@ class NINpzSource(Source):
 
 _NI_KEYS = {"format", "filename", "time_offset", "fields", "event_fields", "event_window_s", "decimation",
             "sample_rate", "n_samples", "duration_s", "dtype", "channels", "labels", "trigger_sample_index",
-            "trigger_time", "member_offsets"}
+            "trigger_time", "member_offsets", "raw_data"}
 
 
 # ---------------------------------------------------------------------------

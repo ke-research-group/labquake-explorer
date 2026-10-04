@@ -70,13 +70,13 @@ def test_eddy_slip_sign_zero_and_displacement():
     run = synthetic_run()
     Calibration(EddySlip({}, default_slope_mm_per_v=-0.1, displacement=None)).apply(run)
     assert "displacement" not in run and C.channel_names(run["slip"]) == ["slip_1", "slip_2"]
-    # sources inside a raw_data channel array, positions inherited from it
+    # sources inside a recorder's raw_data channel array, positions inherited from it
     n = 100
     raw = C.channel_array(np.vstack([np.full(n, 1.0), -0.5 - 0.01 * np.arange(n)]), ["pressure_1", "eddy_1"],
                           unit="V", positions=C.positions_table(["pressure_1", "eddy_1"], {"eddy_1": (10.0, 20.0, 30.0)}, unit="cm"))
-    run = {"time": np.arange(n) / 10.0, "raw_data": raw}
+    run = {"time": np.arange(n) / 10.0, "elsys": {"format": "tpc5", "filename": "x.tpc5", "raw_data": raw}}
     Calibration(Linear("normal_stress", "pressure_1", 8.0, unit="MPa"), EddySlip({"eddy_1": -0.1})).apply(run)
-    assert run["normal_stress"][0] == pytest.approx(8.0) and run["units"]["raw_data"] == "V"
+    assert run["normal_stress"][0] == pytest.approx(8.0) and run["units"]["elsys/raw_data"] == "V"
     assert run["slip"]["positions"]["x"] == [10.0] and run["slip"]["positions"]["unit"] == "cm"
     with pytest.raises(KeyError):
         Calibration(EddySlip({"eddy_1": -0.1}, displacement="slip_9")).apply(synthetic_run())
@@ -115,14 +115,14 @@ def test_run_from_tpc5(elsys, tmp_path):
     assert run["name"] == "run1" and run["normal_stress_level"] == 8.0 and run["operator"] == "x"
     assert run["file"] == elsys.name and run["start_time"].startswith("2026-01-01")
     assert run["time"].size == 4000 and run["time"][0] == 0.0
-    raw = run["raw_data"]
+    raw = run["elsys"]["raw_data"]
     assert C.is_channel_array(raw) and raw["channels"] == ["pzt_1", "pressure_1", "pressure_2", "eddy_1"]
-    assert raw["data"].shape == (4, 4000) and raw["unit"] == "V" and raw["recorder"] == ["elsys"] * 4
+    assert raw["data"].shape == (4, 4000) and raw["unit"] == "V" and "raw_data" not in run
     assert "positions" not in raw
     for f in ("normal_stress", "shear_stress", "friction", "displacement"):
         assert run[f].shape == (4000,), f
     assert run["slip"]["data"].shape == (1, 4000) and run["slip"]["channels"] == ["slip_1"]
-    assert run["units"]["normal_stress"] == "MPa" and run["units"]["slip"] == "um" and run["units"]["raw_data"] == "V"
+    assert run["units"]["normal_stress"] == "MPa" and run["units"]["slip"] == "um" and run["units"]["elsys/raw_data"] == "V"
     assert "pzt_1" not in run and "eddy_1" not in run
     assert run["normal_stress"].mean() == pytest.approx(8.0, abs=1e-3)
     assert run["sources"] == {"elsys": "tpc5"}
@@ -167,9 +167,9 @@ def test_run_from_tpc5_ni(elsys, ni, tmp_path):
     assert run["sources"] == {"ni": "ni_npz", "elsys": "tpc5"}
     # NI is the time base: 3 s at 2 kHz
     assert run["time"].size == 6000 and run["time"][1] - run["time"][0] == pytest.approx(5e-4)
-    raw = run["raw_data"]
-    assert raw["channels"] == ["pressure_1", "pressure_2", "eddy_1", "pzt_1"]
-    assert raw["recorder"] == ["ni", "ni", "ni", "elsys"]
+    assert run["ni"]["raw_data"]["channels"] == ["pressure_1", "pressure_2", "eddy_1"]
+    assert run["elsys"]["raw_data"]["channels"] == ["pzt_1"]            # fields the NI already has are not duplicated
+    assert run["units"]["ni/raw_data"] == "V" and run["units"]["elsys/raw_data"] == "V"
     assert run["normal_stress"].mean() == pytest.approx(8.0, abs=1e-3)
     # the Elsys PZT is interpolated onto the NI axis with the 0.7 s shift: pulse at 1.2 s, NaN beyond the Elsys record
     pz = C.get_channel(run, "pzt_1")
@@ -194,7 +194,8 @@ def test_run_from_sources_validation(elsys, tmp_path):
     run = run_from_sources({"elsys": src}, tmp_path, name="custom", decimation={"elsys": 4},
                            positions={"pzt_1": (1.0, 2.0, 3.0)}, position_frame="x along the fault")
     assert run["name"] == "custom" and run["time"].size == 1000 and "calibration" not in run
-    pos = run["raw_data"]["positions"]
+    pos = run["elsys"]["raw_data"]["positions"]
     assert pos["x"][0] == 1.0 and np.isnan(pos["x"][1]) and pos["frame"] == "x along the fault"
+    assert C.aligned_fields(run, 1000, recurse=False)[:2] == ["time", "elsys/raw_data/pzt_1"]
     exp = experiment("t0001", [run], date="2026-01-01")
     assert exp["name"] == "t0001" and exp["date"] == "2026-01-01" and exp["runs"][0] is run
