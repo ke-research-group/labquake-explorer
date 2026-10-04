@@ -420,6 +420,53 @@ def open_source(ref: Mapping, base_dir, run: Optional[Mapping] = None) -> Source
     return SOURCE_FORMATS[fmt].from_reference(ref, base_dir, run)
 
 
+# ---------------------------------------------------------------------------
+# waveform blocks inside an extracted event
+# ---------------------------------------------------------------------------
+def is_waveform_block(value) -> bool:
+    """True for an event entry holding ``original: {time, raw}`` (a full-rate record)."""
+    if not isinstance(value, Mapping):
+        return False
+    original = value.get("original")
+    return isinstance(original, Mapping) and "time" in original and "raw" in original
+
+
+def waveform_blocks(event: Mapping) -> dict:
+    """``{key: block}`` for every full-rate record of an event, in event order
+    (``'strain'`` for the PSU layout, the reference keys such as ``'elsys'`` or
+    ``'ni'`` for files extracted through the sources)."""
+    return {key: value for key, value in event.items() if is_waveform_block(value)}
+
+
+def pick_waveform_block(event: Mapping, prefer_fields: Sequence[str] = (),
+                        prefer_keys: Sequence[str] = ("strain",)) -> Optional[str]:
+    """The key of the record a view should open first: the first block that has
+    a field starting with one of ``prefer_fields``, else the first key in
+    ``prefer_keys`` that exists, else the first block; None without any."""
+    blocks = waveform_blocks(event)
+    if not blocks:
+        return None
+    for key, block in blocks.items():
+        fields = [str(f) for f in (block.get("fields") or [])]
+        if any(f.startswith(p) for f in fields for p in prefer_fields):
+            return key
+    for key in prefer_keys:
+        if key in blocks:
+            return key
+    return next(iter(blocks))
+
+
+def block_channel_labels(block: Mapping) -> list:
+    """Channel labels of a waveform block: its ``fields`` when stored, else indices."""
+    raw = np.asarray(block["original"]["raw"])
+    n = int(raw.shape[0]) if raw.ndim == 2 else 0
+    fields = block.get("fields")
+    if fields is not None and len(fields) == n:
+        return [str(f) for f in fields]
+    return [str(i) for i in range(n)]
+
+
 __all__ = ["SOURCE_FORMATS", "register_source", "Source", "Window", "Tpc5Source", "NINpzSource",
            "LegacyTpc5Source", "short_label", "block_mean", "is_legacy_strain", "reference_format",
-           "run_sources", "open_source"]
+           "run_sources", "open_source", "is_waveform_block", "waveform_blocks", "pick_waveform_block",
+           "block_channel_labels"]

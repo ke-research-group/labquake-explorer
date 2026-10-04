@@ -658,7 +658,7 @@ def test_event_without_strain(app):
     v = PZTSpectrumView(app, 0, 1)
     try:
         assert list(v.channel_combobox["values"]) == []
-        assert "no strain" in v.status_var.get()
+        assert "no full-rate record" in v.status_var.get()
         assert not v.compute()
     finally:
         v.on_close()

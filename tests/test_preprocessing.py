@@ -106,8 +106,8 @@ def test_run_from_tpc5(elsys, tmp_path):
         assert run[f].shape == (4000,), f
     assert run["units"]["normal_stress"] == "MPa" and run["units"]["slip_1"] == "um" and run["units"]["pzt_1"] == "V"
     assert run["normal_stress"].mean() == pytest.approx(8.0, abs=1e-3)
-    assert run["sources"] == {"strain": "tpc5"}
-    ref = run["strain"]
+    assert run["sources"] == {"elsys": "tpc5"}
+    ref = run["elsys"]
     assert ref["format"] == "tpc5" and ref["filename"] == elsys.name and ref["time_offset"] == 0.0
     assert ref["event_fields"] == ["pzt_1"] and ref["event_window_s"] == [0.001, 0.004]
     assert ref["blocks"]["trigger_time"] == pytest.approx([0.5, 1.4])
@@ -145,7 +145,7 @@ def test_run_from_tpc5_ni(elsys, ni, tmp_path):
     run = run_from_tpc5_ni(elsys, ni, ELSYS_MAP, NI_MAP, tmp_path, calibration(), ni_decimation=5,
                            ni_meta={"input_range_v": 10.0}, elsys_event_fields=["pzt_1"])
     assert run["name"] == "run1" and run["ni_file"] == ni.name and run["file"] == elsys.name
-    assert run["sources"] == {"ni": "ni_npz", "strain": "tpc5"}
+    assert run["sources"] == {"ni": "ni_npz", "elsys": "tpc5"}
     # NI is the time base: 3 s at 2 kHz
     assert run["time"].size == 6000 and run["time"][1] - run["time"][0] == pytest.approx(5e-4)
     assert run["units"]["pressure_1"] == "V" and run["normal_stress"].mean() == pytest.approx(8.0, abs=1e-3)
@@ -153,14 +153,14 @@ def test_run_from_tpc5_ni(elsys, ni, tmp_path):
     pz = run["pzt_1"]
     assert run["time"][np.nanargmax(pz)] == pytest.approx(1.2, abs=2e-3)
     assert np.isnan(pz[-1]) and not np.isnan(pz[2000])
-    assert run["strain"]["time_offset"] == pytest.approx(0.7) and run["ni"]["time_offset"] == 0.0
-    assert run["strain"]["clock_offset_method"].startswith("NI trigger")
-    assert run["strain"]["blocks"]["trigger_time_run"] == pytest.approx([1.2, 2.1])
+    assert run["elsys"]["time_offset"] == pytest.approx(0.7) and run["ni"]["time_offset"] == 0.0
+    assert run["elsys"]["clock_offset_method"].startswith("NI trigger")
+    assert run["elsys"]["blocks"]["trigger_time_run"] == pytest.approx([1.2, 2.1])
     assert run["ni"]["decimation"] == 5 and run["ni"]["input_range_v"] == 10.0
     assert run["slip_1"].dtype == np.float32 and run["units"]["displacement"] == "um"
     # a given offset wins over the trigger-derived one
     run2 = run_from_tpc5_ni(elsys, ni, ELSYS_MAP, NI_MAP, tmp_path, clock_offset=0.5)
-    assert run2["strain"]["time_offset"] == 0.5 and run2["strain"]["clock_offset_method"] == "given"
+    assert run2["elsys"]["time_offset"] == 0.5 and run2["elsys"]["clock_offset_method"] == "given"
 
 
 def test_run_from_sources_validation(elsys, tmp_path):
@@ -168,8 +168,8 @@ def test_run_from_sources_validation(elsys, tmp_path):
     with pytest.raises(ValueError):
         run_from_sources({}, tmp_path)
     with pytest.raises(KeyError):
-        run_from_sources({"strain": src}, tmp_path, time_base="ni")
-    run = run_from_sources({"strain": src}, tmp_path, name="custom", decimation={"strain": 4})
+        run_from_sources({"elsys": src}, tmp_path, time_base="ni")
+    run = run_from_sources({"elsys": src}, tmp_path, name="custom", decimation={"elsys": 4})
     assert run["name"] == "custom" and run["time"].size == 1000 and "calibration" not in run
     exp = experiment("t0001", [run], date="2026-01-01")
     assert exp["name"] == "t0001" and exp["date"] == "2026-01-01" and exp["runs"][0] is run

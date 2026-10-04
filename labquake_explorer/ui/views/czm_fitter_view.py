@@ -18,6 +18,7 @@ from labquake_explorer.data.data_processor import DataProcessor
 from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import EVENT
 from labquake_explorer.ui.views.base import EventView
+from labquake_explorer.data.sources import pick_waveform_block
 from labquake_explorer.utils.cohesive_crack import CohesiveCrack
 
 
@@ -133,9 +134,18 @@ class CZMFitterView(EventView):
 
     # -------------------------------------------------------------- loading
     @staticmethod
+    def strain_block(event):
+        """The event's full-rate record: ``strain`` when present, else the first
+        waveform block (``elsys``, ``ni``, ...); None without any."""
+        if not isinstance(event, dict):
+            return None
+        key = pick_waveform_block(event, prefer_keys=("strain",))
+        return event[key] if key else None
+
+    @staticmethod
     def strain_raw(event):
-        """The event's full-rate ``strain/original/raw`` block (2-D, >= 1 channel), else None."""
-        strain = event.get("strain") if isinstance(event, dict) else None
+        """The event's full-rate ``original/raw`` block (2-D, >= 1 channel), else None."""
+        strain = CZMFitterView.strain_block(event)
         original = strain.get("original") if isinstance(strain, dict) else None
         if not isinstance(original, dict) or "raw" not in original or "time" not in original:
             return None
@@ -274,7 +284,7 @@ class CZMFitterView(EventView):
 
     def _strain(self, gauge_idx):
         """Strain of one gauge, Savitzky-Golay filtered when filtering is on."""
-        strain = DataProcessor.voltage_to_strain(self.event["strain"]["original"]["raw"][gauge_idx])
+        strain = DataProcessor.voltage_to_strain(self.strain_block(self.event)["original"]["raw"][gauge_idx])
         if self.filtering:
             strain = signal.savgol_filter(strain, self._filter_window_length(), 2)
         return strain
@@ -284,7 +294,7 @@ class CZMFitterView(EventView):
         return self.EYY_GAUGE if 0 <= self.EYY_GAUGE < self.num_gauges else None
 
     def _time(self):
-        return self.event["strain"]["original"]["time"] - self.event["event_time"]
+        return self.strain_block(self.event)["original"]["time"] - self.event["event_time"]
 
     def _model_strains(self, t, x_tip, Xc, Gc):
         """Cohesive-zone (Exy, Eyy) strains along the gauge line at times ``t``."""

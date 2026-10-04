@@ -27,6 +27,7 @@ from scipy import signal
 from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import EVENT
 from labquake_explorer.ui.views.base import EventView
+from labquake_explorer.data.sources import pick_waveform_block
 
 # Experiments from this number on use the 16-channel layout with three
 # extra gauges at the ends of the fault; older ones use paired gauges.
@@ -125,11 +126,12 @@ class DynamicStrainArrivalPickerView(EventView):
 
     @staticmethod
     def strain_block(event):
-        """The event's ``strain`` dict when it carries full-rate data, else None."""
-        strain = event.get("strain") if isinstance(event, dict) else None
-        if isinstance(strain, dict) and isinstance(strain.get("original"), dict):
-            return strain
-        return None
+        """The event's full-rate record: ``strain`` when present, else the first
+        waveform block (``elsys``, ``ni``, ...); None without any."""
+        if not isinstance(event, dict):
+            return None
+        key = pick_waveform_block(event, prefer_keys=("strain",))
+        return event[key] if key else None
 
     def set_event(self, event_idx: int) -> None:
         """Switch events, but refuse (with a warning) an event without strain data.
@@ -225,7 +227,7 @@ class DynamicStrainArrivalPickerView(EventView):
 
     def plot(self):
         exp_number = self.exp_number()
-        strain = self.event["strain"]
+        strain = self.strain_block(self.event)
         original = strain["original"]
         linestyle = ".-"
 
@@ -420,7 +422,7 @@ class DynamicStrainArrivalPickerView(EventView):
             except ValueError:
                 pass
             self.fitted_line = None
-        locations = self.event["strain"]["locations"]
+        locations = self.strain_block(self.event)["locations"]
         x = [marker.get_center()[0] for marker in self.fitting_markers]
         y = [locations[int(marker.get_label())] for marker in self.fitting_markers]
         self.rupture_speed = math.nan
@@ -450,7 +452,7 @@ class DynamicStrainArrivalPickerView(EventView):
 
     # ---------------------------------------------------------------- save
     def save(self):
-        strain = self.event["strain"]
+        strain = self.strain_block(self.event)
         original = strain["original"]
         picked = [int(i) for i in self.picked_idx]
         strain["enabled_channels"] = [bool(v) for v in self.enabled_channels]

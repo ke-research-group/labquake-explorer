@@ -2,7 +2,8 @@
 
 The view is a thin Tk shell around :mod:`labquake_explorer.analysis.spectrum`
 and :mod:`labquake_explorer.analysis.source`: it reads
-``event['strain']['original']['time'/'raw']`` and ``event['event_time']``
+a full-rate record of the event (``event[<record>]['original']['time'/'raw']``,
+where ``<record>`` is ``strain``, ``elsys``, ``ni``, ...) and ``event['event_time']``
 (or a picked per-channel arrival), collects and validates the user's
 parameters, and calls
 
@@ -47,6 +48,7 @@ from labquake_explorer.analysis import spectrum as sp
 from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import EVENT
 from labquake_explorer.ui.views.base import EventView
+from labquake_explorer.data.sources import block_channel_labels, pick_waveform_block, waveform_blocks
 
 RESULT_VERSION = 1
 
@@ -197,6 +199,8 @@ class PZTSpectrumView(EventView):
     def __init__(self, app, run_idx, event_idx):
         self.strain_time: Optional[np.ndarray] = None
         self.strain_raw: Optional[np.ndarray] = None
+        self.record_key: Optional[str] = None     # which full-rate record of the event is shown
+        self.channel_labels: list = []
         self.window: Optional[sp.WindowResult] = None
         self.spectrum: Optional[sp.SpectrumResult] = None
         self.fit: Optional[sp.SpectralFit] = None
@@ -246,14 +250,18 @@ class PZTSpectrumView(EventView):
         frame = ttk.LabelFrame(master, text="Event / channel")
         frame.pack(fill="x", pady=(0, 4))
         self.build_event_selector(frame, row=0, column=0)
-        ttk.Label(frame, text="Channel:").grid(row=1, column=0, padx=4, pady=2, sticky="e")
-        self.channel_combobox = ttk.Combobox(frame, width=8, state="readonly")
-        self.channel_combobox.grid(row=1, column=1, padx=4, pady=2, sticky="w")
+        ttk.Label(frame, text="Record:").grid(row=1, column=0, padx=4, pady=2, sticky="e")
+        self.record_combobox = ttk.Combobox(frame, width=14, state="readonly")
+        self.record_combobox.grid(row=1, column=1, padx=4, pady=2, sticky="w")
+        self.record_combobox.bind("<<ComboboxSelected>>", self.on_record_selected)
+        ttk.Label(frame, text="Channel:").grid(row=2, column=0, padx=4, pady=2, sticky="e")
+        self.channel_combobox = ttk.Combobox(frame, width=14, state="readonly")
+        self.channel_combobox.grid(row=2, column=1, padx=4, pady=2, sticky="w")
         self.channel_combobox.bind("<<ComboboxSelected>>", self.on_channel_selected)
-        ttk.Label(frame, text="Trigger:").grid(row=2, column=0, padx=4, pady=2, sticky="e")
+        ttk.Label(frame, text="Trigger:").grid(row=3, column=0, padx=4, pady=2, sticky="e")
         self.trigger_combobox = ttk.Combobox(frame, width=14, state="readonly", values=list(TRIGGERS))
         self.trigger_combobox.set(TRIGGER_EVENT_TIME)
-        self.trigger_combobox.grid(row=2, column=1, padx=4, pady=2, sticky="w")
+        self.trigger_combobox.grid(row=3, column=1, padx=4, pady=2, sticky="w")
 
     def _build_window_frame(self, master) -> None:
         frame = ttk.LabelFrame(master, text="Window")
@@ -395,21 +403,38 @@ class PZTSpectrumView(EventView):
 
     # ------------------------------------------------------------- loading
     def on_event_loaded(self) -> None:
-        self.strain_time, self.strain_raw = self._strain_arrays()
+        keys = list(waveform_blocks(self.event)) if isinstance(self.event, dict) else []
+        if self.record_key not in keys:
+            self.record_key = pick_waveform_block(self.event, prefer_fields=("pzt",)) if keys else None
+        self.record_combobox.config(values=keys)
+        self.record_combobox.set(self.record_key or "")
+        self._load_record()
+
+    def on_record_selected(self, event=None) -> None:
+        key = self.record_combobox.get().strip()
+        if key and key != self.record_key:
+            self.record_key = key
+            self._load_record()
+
+    def _load_record(self) -> None:
+        """Channels of the selected record; restores the current channel's saved record."""
+        self.strain_time, self.strain_raw = self._block_arrays(self.record_key)
         n_channels = 0 if self.strain_raw is None else int(self.strain_raw.shape[0])
-        self.channel_combobox.config(values=[str(i) for i in range(n_channels)])
+        block = self.event.get(self.record_key) if (self.record_key and isinstance(self.event, dict)) else None
+        self.channel_labels = block_channel_labels(block) if (n_channels and isinstance(block, dict)) else []
+        self.channel_combobox.config(values=[self._channel_label(i) for i in range(n_channels)])
         saved = self.saved_channels()
         current = self.current_channel()
         if n_channels == 0:
             self.channel_combobox.set("")
-            self.status_var.set("event has no strain/original time and raw arrays")
+            self.status_var.set("event has no full-rate record (original time and raw arrays)")
             self._clear_channel_state()
             return
         if self._first_load and saved and current not in saved:
             current = min(saved)
         if current is None or not (0 <= current < n_channels):
             current = 0
-        self.channel_combobox.set(str(current))
+        self.channel_combobox.set(self._channel_label(current))
         self._first_load = False
         if self.fmax_var.get().strip() == "":
             try:
@@ -418,9 +443,26 @@ class PZTSpectrumView(EventView):
                 pass
         self.restore_channel()
 
-    def _strain_arrays(self):
-        strain = self.event.get("strain") if isinstance(self.event, dict) else None
-        original = strain.get("original") if isinstance(strain, dict) else None
+    def _channel_label(self, channel) -> str:
+        """Combobox text of a channel: ``'3: pzt_4'`` when the record names its fields, else ``'3'``."""
+        channel = int(channel)
+        if 0 <= channel < len(self.channel_labels) and self.channel_labels[channel] != str(channel):
+            return f"{channel}: {self.channel_labels[channel]}"
+        return str(channel)
+
+    def channel_field(self, channel) -> Optional[str]:
+        """Field name of a channel of the current record, or None when unnamed."""
+        try:
+            channel = int(channel)
+        except (TypeError, ValueError):
+            return None
+        if 0 <= channel < len(self.channel_labels) and self.channel_labels[channel] != str(channel):
+            return self.channel_labels[channel]
+        return None
+
+    def _block_arrays(self, key):
+        block = self.event.get(key) if (key and isinstance(self.event, dict)) else None
+        original = block.get("original") if isinstance(block, dict) else None
         if not isinstance(original, dict) or "time" not in original or "raw" not in original:
             return None, None
         try:
@@ -435,12 +477,12 @@ class PZTSpectrumView(EventView):
         return time, raw
 
     def current_channel(self) -> Optional[int]:
-        text = self.channel_combobox.get().strip()
+        text = self.channel_combobox.get().split(":")[0].strip()
         return int(text) if text.isdigit() else None
 
     def set_channel(self, channel: int) -> None:
         """Select a channel (restoring its saved record if there is one)."""
-        self.channel_combobox.set(str(int(channel)))
+        self.channel_combobox.set(self._channel_label(channel))
         self.on_channel_selected()
 
     def on_channel_selected(self, event=None) -> None:
@@ -493,7 +535,7 @@ class PZTSpectrumView(EventView):
             items = []
         for key, rec in items:
             k = parse_channel_key(key)
-            if k is not None and isinstance(rec, dict):
+            if k is not None and isinstance(rec, dict) and rec.get("record", self.record_key) == self.record_key:
                 out[k] = rec
         return out
 
@@ -576,7 +618,7 @@ class PZTSpectrumView(EventView):
     def read_parameters(self) -> dict:
         """Validated spectrum/fit parameters from the controls (ValueError on bad input)."""
         if self.strain_time is None or self.strain_raw is None:
-            raise ValueError("event has no strain/original time and raw arrays")
+            raise ValueError("event has no full-rate record (original time and raw arrays)")
         channel = self.current_channel()
         if channel is None or not (0 <= channel < self.strain_raw.shape[0]):
             raise ValueError("select a channel")
@@ -584,6 +626,8 @@ class PZTSpectrumView(EventView):
         if trigger not in TRIGGERS:
             raise ValueError("select a trigger")
         p = {
+            "record": self.record_key,
+            "field": self.channel_field(channel),
             "channel": int(channel),
             "trigger": trigger,
             "pre_ms": _parse_float(self.pre_var.get(), "pre window (ms)", lo=0.0),
@@ -650,15 +694,15 @@ class PZTSpectrumView(EventView):
                 raise ValueError("event has no event_time") from None
         else:
             try:
-                arrivals = np.asarray(self.event["strain"]["original"]["rupture_arrival_time"], dtype=float).ravel()
+                arrivals = np.asarray(self.event[self.record_key]["original"]["rupture_arrival_time"], dtype=float).ravel()
                 t = float(arrivals[p["channel"]])
             except (KeyError, TypeError, ValueError, IndexError):
                 raise ValueError(f"no picked arrival for channel {p['channel']} "
-                                 "(strain/original/rupture_arrival_time)") from None
+                                 f"({self.record_key}/original/rupture_arrival_time)") from None
         if not math.isfinite(t):
             raise ValueError("trigger time is not finite")
         if not (self.strain_time[0] <= t <= self.strain_time[-1]):
-            raise ValueError(f"trigger time {t:g} s lies outside the strain trace")
+            raise ValueError(f"trigger time {t:g} s lies outside the record")
         return t
 
     def load_calibration(self, p: dict) -> Optional[sp.Calibration]:
@@ -720,6 +764,8 @@ class PZTSpectrumView(EventView):
         """
         rec = {
             "version": RESULT_VERSION,
+            "record": p.get("record"),
+            "field": p.get("field"),
             "channel": int(p["channel"]),
             "trigger": p["trigger"],
             "trigger_time_s": float(trigger_time),
@@ -853,6 +899,7 @@ class PZTSpectrumView(EventView):
             self.status_var.set("nothing saved - the record has no channel and none is selected")
             return False
         self.record["channel"] = channel
+        self.record.setdefault("record", self.record_key)
         channels = {channel_key(k): rec for k, rec in sorted(self.saved_channels().items())}
         channels[channel_key(channel)] = copy.deepcopy(self.record)
         self.save_results({"version": RESULT_VERSION, "channels": channels})
@@ -1004,7 +1051,10 @@ class PZTSpectrumView(EventView):
                     self.ax_resid.semilogx(fb[used], resid, "o-", color="#d62728", ms=3, lw=0.8)
                 self.ax_resid.axhline(0.0, color="k", lw=0.8)
             self.ax_spec.legend(loc="upper right", fontsize=8)
-            self.ax_spec.set_title(f"{self.figure_title()} channel {rec.get('channel')}", fontsize=10)
+            label = f"{rec.get('record') or ''} channel {rec.get('channel')}".strip()
+            if rec.get("field"):
+                label += f" ({rec['field']})"
+            self.ax_spec.set_title(f"{self.figure_title()} {label}", fontsize=10)
             self.ax_resid.set_xlim(self.ax_spec.get_xlim())
         self.canvas.draw_idle()
 

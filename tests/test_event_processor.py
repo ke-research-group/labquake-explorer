@@ -41,7 +41,7 @@ def test_extract_from_tpc5_run(elsys, tmp_path):
     for f in ("pzt_1", "pressure_1", "normal_stress", "slip_1", "displacement"):
         assert e0[f].shape == e0["time"].shape, f
     assert "events" not in e0 and "calibration" not in e0 and "units" not in e0
-    strain = e0["strain"]
+    strain = e0["elsys"]
     assert strain["format"] == "tpc5" and strain["filename"] == elsys.name and strain["block"] == 2
     assert strain["sample_rate"] == 200_000.0 and strain["fields"] == ["pzt_1", "pressure_1", "pressure_2", "eddy_1"]
     orig = strain["original"]
@@ -49,20 +49,20 @@ def test_extract_from_tpc5_run(elsys, tmp_path):
     assert orig["time"][0] == pytest.approx(0.498, abs=1e-5) and orig["time"][-1] == pytest.approx(0.508, abs=1e-5)
     assert orig["time"][np.argmax(orig["raw"][0])] == pytest.approx(0.5, abs=2e-5)
     # the event at 1.0 s lies in no trigger block: no strain, a note instead
-    assert "strain" not in events[1] and events[1]["notes"] == ["strain: no raw record covers 1.0000 s"]
-    assert events[2]["strain"]["block"] == 3
+    assert "elsys" not in events[1] and events[1]["notes"] == ["elsys: no raw record covers 1.0000 s"]
+    assert events[2]["elsys"]["block"] == 3
 
 
 def test_source_event_settings_and_no_base_dir(elsys, tmp_path, capsys):
     run = run_from_tpc5(elsys, ELSYS_MAP, tmp_path, event_fields=["pzt_1"], event_window_s=(0.001, 0.002))
     ep = EventProcessor(tmp_path / "exp.h5")
     e = ep.extract_events(run, [index_at(run, 0.5)], window=1.0)[0]
-    assert e["strain"]["fields"] == ["pzt_1"] and e["strain"]["original"]["raw"].shape[0] == 1
-    assert e["strain"]["original"]["time"].size == pytest.approx(601, abs=1)
+    assert e["elsys"]["fields"] == ["pzt_1"] and e["elsys"]["original"]["raw"].shape[0] == 1
+    assert e["elsys"]["original"]["time"].size == pytest.approx(601, abs=1)
     assert e["time"].size == 4000 - 1 - index_at(run, 0.5) + 1000 or e["time"].size > 0
     # without a saved experiment path the references are skipped with a warning, not an error
     e2 = EventProcessor().extract_events(run, [index_at(run, 0.5)], window=0.05)[0]
-    assert "strain" not in e2 and "pressure_1" in e2
+    assert "elsys" not in e2 and "pressure_1" in e2
     assert "raw-data references skipped" in capsys.readouterr().out
 
 
@@ -91,7 +91,7 @@ def test_extract_from_tpc5_ni_run(elsys, tmp_path):
     eddy = ni_block["original"]["raw"][2]
     assert eddy[-1] - eddy[0] == pytest.approx(-0.3, abs=0.01)
     # Elsys window: trigger block 2 shifted by the clock offset, PZT only
-    st = e["strain"]
+    st = e["elsys"]
     assert st["block"] == 2 and st["fields"] == ["pzt_1"]
     assert st["original"]["time"][np.argmax(st["original"]["raw"][0])] == pytest.approx(1.2, abs=2e-5)
 

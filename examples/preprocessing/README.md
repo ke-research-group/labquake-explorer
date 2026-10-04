@@ -16,7 +16,7 @@ checks and saves. See `docs/extending.md`, "Raw-data references" and
 Each run of the produced file holds the time history (`time`, volt channels,
 calibrated `normal_stress`, `shear_stress`, `slip_k`, `displacement`,
 `friction`), `units`, a `calibration` record, and references to the raw files
-(`strain`, `ni`) that **Extract Events** reads for the full-rate windows.
+(`elsys`, `ni`) that **Extract Events** reads for the full-rate windows.
 
 The notebooks expect the repository root on `sys.path` (they add it
 themselves) or `pip install -e .`, plus `pandas`, `ipympl` and `jupyter`.

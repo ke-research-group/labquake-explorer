@@ -184,7 +184,8 @@ dict with a `format` key, handled by `labquake_explorer/data/sources.py`:
 | `ni_npz` | `NINpzSource` | National Instruments recording saved as npz (`aiN.npy` members, `sample_rate`, `channels`, `trigger_sample_index`) |
 | `tpc5_legacy` | `LegacyTpc5Source` | the PSU-era `strain` dict (`filename`, `time_offset`, `time`, `raw`; no `format` key) |
 
-Every reference carries `filename` (relative to the experiment file),
+Reference keys name the recorder (`elsys`, `ni`); `strain` is the PSU-era
+key. Every reference carries `filename` (relative to the experiment file),
 `time_offset` (`t_run = t_file + time_offset`), `fields` (the run field each
 file channel feeds) and optionally `event_fields` (subset copied into events)
 and `event_window_s` (`[pre, post]` seconds, replacing the window typed in the
@@ -203,7 +204,10 @@ test next to `tests/test_sources.py`.
 `EventProcessor.extract_events(run, indices, window)` slices every 1-D run
 field aligned with `time` around each pick and adds, per reference key,
 `{format, filename, fields, sample_rate, block, original: {time, raw}}` with
-`raw` shaped `(n_fields, n)`; the views read `event['strain']['original']`.
+`raw` shaped `(n_fields, n)`. Views find these blocks with
+`sources.waveform_blocks(event)`; the PZT Spectrum view offers every block
+and opens the one with `pzt` fields, the strain-gauge views (arrival picker,
+CZM) open `strain` when present, else the first block.
 Events no record covers get a `notes` entry instead. The legacy layout keeps
 its historical output (`time`/`raw` downsampled copies plus `original` with the
 first 1 % removed as baseline).
@@ -215,7 +219,7 @@ first 1 % removed as baseline).
 - `build.run_from_tpc5(path, channel_map, base_dir, calibration, ...)` and
   `build.run_from_tpc5_ni(tpc5_path, ni_path, elsys_map, ni_map, base_dir,
   calibration, ...)` produce run dicts (time history, volt fields, `units`,
-  references, `calibration` record); `run_from_sources` is the general form
+  references under `elsys` / `ni`, `calibration` record); `run_from_sources` is the general form
   (any sources, one of them the time base, the others interpolated onto its
   axis for fields it lacks). `experiment(name, runs, **metadata)` wraps them.
 - `calibration.Calibration(*steps)` applies ordered steps and records them:

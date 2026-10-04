@@ -36,7 +36,7 @@ def run_from_sources(sources: Mapping[str, Source], base_dir, calibration: Optio
                      name: Optional[str] = None, **metadata) -> dict:
     """Build a run dict.
 
-    ``sources`` maps the reference key each source is stored under (``'strain'``
+    ``sources`` maps the reference key each source is stored under (``'elsys'``
     for the Elsys file, ``'ni'`` for the NI file, ...) to the source; its
     ``time_offset`` must already put it on the run clock.  ``time_base`` names
     the source whose whole-run record becomes the run's time axis (default: the
@@ -87,7 +87,7 @@ def run_from_sources(sources: Mapping[str, Source], base_dir, calibration: Optio
 
 def run_from_tpc5(path, channel_map, base_dir, calibration: Optional[Calibration] = None,
                   decimation: int = 1, event_fields: Optional[Sequence[str]] = None,
-                  event_window_s: Optional[Sequence[float]] = None, key: str = "strain", **metadata) -> dict:
+                  event_window_s: Optional[Sequence[float]] = None, key: str = "elsys", **metadata) -> dict:
     """A run whose every channel is on one Elsys tpc5 file."""
     path = Path(path)
     src = Tpc5Source.open(path, channel_map, event_fields=event_fields, event_window_s=event_window_s)
@@ -117,7 +117,7 @@ def run_from_tpc5_ni(tpc5_path, ni_path, elsys_channel_map, ni_channel_map, base
     elsys.meta["clock_offset_method"] = ("NI trigger_sample_index = first Elsys trigger" if clock_offset is None
                                          else "given")
     meta = {**parse_run_name(tpc5_path.stem), **metadata}
-    run = run_from_sources({"ni": ni, "strain": elsys}, base_dir, calibration,
+    run = run_from_sources({"ni": ni, "elsys": elsys}, base_dir, calibration,
                            time_base="ni", decimation={"ni": ni_decimation}, **meta)
     run["file"] = tpc5_path.name
     run["ni_file"] = ni_path.name
