@@ -48,8 +48,11 @@ file untouched).
 
 ## Preprocessing
 
-`examples/preprocessing/` holds notebooks that convert raw acquisition files
-(Elsys tpc5, NI loggers) into the experiment file the explorer loads.
+`labquake_explorer.preprocessing` builds experiment files from raw
+acquisition data (Elsys tpc5, NI loggers): readers, calibration steps with a
+provenance record, two-recorder clock alignment. `examples/preprocessing/`
+holds the notebooks that use it. Event extraction reads the full-rate windows
+straight from the raw files the runs reference.
 
 ## Development
 

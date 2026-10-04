@@ -171,40 +171,61 @@ dropped; a scalar string comes back as `str` and any string list as a
 `list` (a one-element list stays a list); lists numpy cannot stack (ragged
 arrays, mixed content) become a group with one entry per index.
 
-## Raw-data references (`runs/[r]/strain`)
+## Raw-data references and event extraction
 
-A run may carry a `strain` dict that points at the high-rate acquisition file
-so that event extraction can read waveforms for picked event times. Two
-layouts exist:
+A run may point at the acquisition files it was built from so that **Extract
+Events** reads the full-rate records around picked event times instead of
+copying them into the experiment file. A reference is a top-level run entry, a
+dict with a `format` key, handled by `labquake_explorer/data/sources.py`:
 
-* **legacy** (PSU style): `filename` (tpc5, relative to the experiment file),
-  `time_offset` (s, added to the file clock to land on the run's time axis),
-  `time` and `raw` (a downsampled copy used for previews). The single block of
-  the tpc5 covers the whole run at high rate.
-* **`format: "tpc5"`** (Elsys ECR dual mode, written by
-  `examples/preprocessing/t0211_tpc5.ipynb`): `filename`, `time_offset`
-  (0 when the run's time axis is the file clock), `channel_numbers`,
-  `channel_names`, `fields` (the run field each channel was stored under),
-  `continuous` (the block that was read into the run: block number, sample
-  rate, samples, trigger sample/time, start and end) and `blocks`, the table of
-  trigger blocks with `block`, `sample_rate`, `n_samples`, `trigger_sample`,
-  `trigger_time`, `start`, `end` in seconds on the same clock. The helpers in
-  `labquake_explorer/utils/tpc5.py` (`blocks_from_table`, `find_block`,
-  `read_window`) turn an event time into the trigger block and samples that
-  hold its high-rate record.
+| format | class | file |
+|---|---|---|
+| `tpc5` | `Tpc5Source` | Elsys TranAX tpc5, single block or ECR dual mode (block 1 continuous, blocks 2.. around triggers) |
+| `ni_npz` | `NINpzSource` | National Instruments recording saved as npz (`aiN.npy` members, `sample_rate`, `channels`, `trigger_sample_index`) |
+| `tpc5_legacy` | `LegacyTpc5Source` | the PSU-era `strain` dict (`filename`, `time_offset`, `time`, `raw`; no `format` key) |
 
-A run recorded on two systems (written by
-`examples/preprocessing/t0207_tpc5_ni.ipynb`) additionally carries `ni`, a
-reference to the National Instruments `.npz` that holds the mechanical
-channels: `format: "ni_npz"`, `filename` (relative to the experiment file),
-`sample_rate`, `n_samples`, `dtype`, `channels` (member names `ai0`...),
-`fields` (the run field each channel was decimated into), `decimation` (the
-block-mean factor used for the run's time history), `trigger_sample_index`
-and `trigger_time` (the sample at which the first Elsys trigger was received),
-`time_offset` (0: the run's time axis is the NI clock) and `member_offsets`
-(byte offsets of the uncompressed members, so `numpy.memmap` can read any
-window without loading the file; see `labquake_explorer/utils/ni_npz.py`). In
-such a run `strain.time_offset` is the Elsys-to-run clock shift
-(`t_run = t_elsys + time_offset`), determined from `trigger_sample_index`
-against the first Elsys trigger time and checked against the slip steps seen
-by the eddy-current sensors.
+Every reference carries `filename` (relative to the experiment file),
+`time_offset` (`t_run = t_file + time_offset`), `fields` (the run field each
+file channel feeds) and optionally `event_fields` (subset copied into events)
+and `event_window_s` (`[pre, post]` seconds, replacing the window typed in the
+dialog for that source). A `Tpc5Source` also stores the block table so the
+explorer knows the trigger times without opening the file; an `NINpzSource`
+stores the record's metadata. `open_source(ref, base_dir, run)` rebuilds the
+reader; `source.read_window(t_from, t_to, fields)` returns samples on the run
+clock, or None when no record covers the time (a tpc5 with trigger blocks only
+answers inside a trigger block).
+
+**Adding a recorder**: subclass `Source`, implement `time_history`,
+`read_window`, `to_reference`/`from_reference` (and `trigger_times` if it has
+any), decorate the class with `@register_source`, and write a synthetic-file
+test next to `tests/test_sources.py`.
+
+`EventProcessor.extract_events(run, indices, window)` slices every 1-D run
+field aligned with `time` around each pick and adds, per reference key,
+`{format, filename, fields, sample_rate, block, original: {time, raw}}` with
+`raw` shaped `(n_fields, n)`; the views read `event['strain']['original']`.
+Events no record covers get a `notes` entry instead. The legacy layout keeps
+its historical output (`time`/`raw` downsampled copies plus `original` with the
+first 1 % removed as baseline).
+
+## Preprocessing package
+
+`labquake_explorer/preprocessing/` turns raw files into the experiment dict:
+
+- `build.run_from_tpc5(path, channel_map, base_dir, calibration, ...)` and
+  `build.run_from_tpc5_ni(tpc5_path, ni_path, elsys_map, ni_map, base_dir,
+  calibration, ...)` produce run dicts (time history, volt fields, `units`,
+  references, `calibration` record); `run_from_sources` is the general form
+  (any sources, one of them the time base, the others interpolated onto its
+  axis for fields it lacks). `experiment(name, runs, **metadata)` wraps them.
+- `calibration.Calibration(*steps)` applies ordered steps and records them:
+  `Linear` (`field = factor * source + offset`), `EddySlip` (eddy-current volts
+  to `slip_k` in um, zeroed at the run start, plus `displacement`), `Friction`.
+  `pressure_transducers(section)` gives the lab's stress conversions. A new
+  conversion is a class with `apply(run, units)` and `describe()`.
+- `alignment.offset_from_trigger(ni, elsys)` puts the Elsys clock on the NI
+  clock from the NI trigger sample; `slip_step_table` checks that slip follows
+  each PZT trigger.
+
+The notebooks in `examples/preprocessing/` are thin scripts over this package:
+paths, channel maps, the calibration, the builders, plots, save.
