@@ -5,9 +5,9 @@ for the whole run; picks are placed on the curve (left double-click adds one
 at the nearest sample, right double-click on a pick removes it, drag moves
 it) and the ``[start, end]`` window of every pick is shaded, the selected one
 highlighted.  "Save picks" writes ``event_indices``; "Extract Events" writes
-the picks and then the events.  Start and end are read back from the events
-already extracted (whatever extracted them), else from the window saved under
-``runs/[r]['event_window']``, else the defaults.
+the picks and then the events.  Everything the form needs to reopen as it was
+is kept in ``runs/[r]['event_extraction']``: the picks, start and end, the
+series shown and how many events the last extraction wrote.
 """
 from __future__ import annotations
 
@@ -33,19 +33,11 @@ HELP_TEXT = ("Left double-click on the curve: add a pick at the nearest sample. 
              "Save picks writes event_indices; Extract Events writes the picks and then the events.")
 
 
-def _roundest_within(value: float, tol: float) -> float:
-    """``value`` rounded to the fewest decimals that stay within ``tol`` of it."""
-    for decimals in range(0, 7):
-        rounded = round(float(value), decimals)
-        if abs(rounded - value) <= tol + 1e-9:
-            return rounded
-    return float(value)
-
-
 @register_view("Pick Events", kinds=[RUN, RUN_ARRAY, EVENT_INDICES], order=0)
 class EventPickerView(RunView):
     window_title = "Pick Events"
-    result_key = "event_window"
+    result_key = "event_extraction"
+    legacy_result_key = "event_window"          # the record's name before it held the picks
 
     def __init__(self, app, run_idx, y_field: Optional[str] = None):
         self.y_field_hint = y_field
@@ -134,8 +126,8 @@ class EventPickerView(RunView):
         y_candidates = [c for c in self.candidates if c != "time"]
         self.x_combo.config(values=[X_INDEX] + self.candidates)
         self.y_combo.config(values=y_candidates)
-        saved = self.load_results() or {}
-        x = saved.get("x_field") if saved.get("x_field") in self.candidates else (
+        saved = self.load_results() or self.legacy_results()
+        x = saved.get("x_field") if saved.get("x_field") in [X_INDEX] + self.candidates else (
             "time" if "time" in self.candidates else X_INDEX)
         if self.y_field_hint in y_candidates:
             y = self.y_field_hint
@@ -145,48 +137,30 @@ class EventPickerView(RunView):
             y = "shear_stress" if "shear_stress" in y_candidates else (y_candidates[0] if y_candidates else "")
         self.x_combo.set(x)
         self.y_combo.set(y)
-        window = self.window_from_events()
-        if window is None and "start_s" in saved and "end_s" in saved:
-            window = (float(saved["start_s"]), float(saved["end_s"]))
-        if window is not None:
-            self.start_var.set(f"{window[0]:g}")
-            self.end_var.set(f"{window[1]:g}")
+        if "start_s" in saved and "end_s" in saved:
+            self.start_var.set(f"{float(saved['start_s']):g}")
+            self.end_var.set(f"{float(saved['end_s']):g}")
         self.picker.picks[:] = self.saved_picks()
         self.refresh_event_list(0)
         self.plot()
         self.update_status()
 
     # ----------------------------------------------------------- settings
+    def legacy_results(self) -> dict:
+        """The record under its former name, for files saved before the rename."""
+        value = self.run.get(self.legacy_result_key)
+        return dict(value) if isinstance(value, dict) else {}
+
     def saved_picks(self) -> list:
-        """``event_indices`` of the run as sorted ints within the record."""
+        """The run's picks as sorted ints within the record: ``event_indices``
+        at the run's top level, else those kept in the extraction record."""
         raw = self.run.get("event_indices")
+        if raw is None:
+            raw = (self.load_results() or {}).get("event_indices")
         if raw is None or self.time.size == 0:
             return []
         values = np.asarray(raw).ravel()
         return sorted({int(i) for i in values if 0 <= int(i) < self.time.size})
-
-    def window_from_events(self) -> Optional[tuple[float, float]]:
-        """``(start, end)`` of the events already extracted: per event
-        ``time[0] - event_time`` and, the slice being end-exclusive,
-        ``time[-1] + dt - event_time``, each the roundest value within half a
-        sample.  The widest start and end over the events are returned, since
-        an event near a record boundary only has a truncated window."""
-        starts, ends = [], []
-        for event in event_list(self.run):
-            if not isinstance(event, dict) or "time" not in event or "event_time" not in event:
-                continue
-            t = np.asarray(event["time"], dtype=float).ravel()
-            if t.size < 2 or not np.isfinite(t).all():
-                continue
-            t0 = float(event["event_time"])
-            dt = float(np.median(np.diff(t)))
-            if not np.isfinite(dt) or dt <= 0:
-                continue
-            starts.append(_roundest_within(t[0] - t0, dt / 2))
-            ends.append(_roundest_within(t[-1] + dt - t0, dt / 2))
-        if starts and min(starts) < max(ends):
-            return min(starts), max(ends)
-        return None
 
     def window_s(self) -> tuple[float, float]:
         """``(start, end)`` in seconds relative to the event; ValueError on bad input."""
@@ -376,11 +350,17 @@ class EventPickerView(RunView):
 
     # ------------------------------------------------------------- saving
     def save_picks(self, refresh: bool = True) -> list:
-        """Write the picks to ``runs/[r]/event_indices`` (a copy, sorted)."""
+        """Write the picks to ``runs/[r]/event_indices`` (a copy, sorted) and
+        into the extraction record, whose other entries are kept."""
         self.picker.sort()
         picks = list(self.picks)
         self.data_manager.set_data(f"{self.run_path}/event_indices", picks, add_key=True)
         self.run["event_indices"] = picks
+        record = dict(self.load_results() or self.legacy_results())
+        record.setdefault("version", RESULT_VERSION)
+        record["event_indices"] = list(picks)
+        self.data_manager.set_data(self.result_path, record, True)
+        self.run[self.result_key] = record
         if refresh:
             self.app.refresh_tree()
             self.update_status("picks saved")
@@ -407,6 +387,7 @@ class EventPickerView(RunView):
         self.data_manager.set_data(f"{self.run_path}/events", events, add_key=True)
         self.result = {
             "version": RESULT_VERSION,
+            "event_indices": list(picks),
             "start_s": float(start),
             "end_s": float(end),
             "x_field": self.x_combo.get(),

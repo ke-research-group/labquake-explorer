@@ -76,12 +76,12 @@ looks like this:
 |---|---|
 | `time` | 1-D, seconds on the run clock |
 | `elsys`, `ni`, ... | one block per recorder: its raw-file reference (next section) plus `raw_data`, the channel array of the voltages it recorded: `data` (channels x samples, float32), `channels` (`pzt_1`, `pressure_1`, `eddy_3`, ...), `unit` (`V`), `positions` |
-| `normal_stress`, `shear_stress`, `friction`, `LP_displacement`, `displacement` | 1-D physical channels (MPa, um, ...) |
+| `normal_stress`, `shear_stress`, `friction`, `LP_displacement` | 1-D physical channels (MPa, um, ...). PSU-era files also have `displacement` (fault slip); without it the views take the first `slip` channel |
 | `slip` | channel array of the eddy-current sensors in um: `data`, `channels` (`slip_1`...), `source` (the voltage channel of each row), `slope_mm_per_v`, `positions` |
 | `units` | unit of every top-level array and channel array |
 | `calibration` | the steps that produced the physical channels (see the preprocessing package) |
 | `sources` | `{recorder key: format}` |
-| `event_indices`, `events` | picks and extracted events |
+| `event_indices`, `events`, `event_extraction` | picks, extracted events, and the Pick Events form's record (schema below) |
 
 A **channel array** (`labquake_explorer/data/channels.py`) is a dict with
 `data` shaped `(n_channels, n)`, `channels` naming the rows, `unit`, and an
@@ -100,6 +100,15 @@ top-level 1-D channels keep working: a channel array is only an additional
 place a field can live.
 
 ## Saved result schemas
+
+### `event_extraction` (EventPickerView, run level, version 1)
+
+What the Pick Events form last saved, and what it starts from when reopened:
+`event_indices` (the picks, also kept at the run's top level), `start_s` and
+`end_s` (the window around each pick, seconds, start negative), `x_field` and
+`y_field` (the series shown), `n_events` (how many events the last Extract
+wrote). Save picks updates `event_indices` only; Extract writes the whole
+record.
 
 ### `event_analysis` (EventAnalyzerView, version 2)
 

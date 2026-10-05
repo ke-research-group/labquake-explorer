@@ -122,9 +122,10 @@ def test_extract_saves_picks_and_uses_the_window(app, view):
     assert e["time"][0] == pytest.approx(truth.event_times[1] - 2.0, abs=2e-3)
     assert e["time"][-1] == pytest.approx(truth.event_times[1] + 3.0, abs=2e-3)
     assert e["shear_stress"].shape == e["time"].shape
-    saved = app.data_manager.get_data("runs/[0]/event_window")
-    assert saved == {"version": 1, "start_s": -2.0, "end_s": 3.0, "x_field": "time",
+    saved = app.data_manager.get_data("runs/[0]/event_extraction")
+    assert saved == {"version": 1, "event_indices": view.picks, "start_s": -2.0, "end_s": 3.0, "x_field": "time",
                      "y_field": "shear_stress", "n_events": n}
+    assert saved["event_indices"] is not view.picks
     assert f"{n} events extracted" in view.status_var.get()
     v2 = EventPickerView(app, 0)                        # reopening restores the window
     assert v2.start_var.get() == "-2" and v2.end_var.get() == "3"
@@ -242,28 +243,35 @@ def test_markers_follow_the_axes_limits(app, view):
     assert marker.width == pytest.approx(w0, rel=0.01)
 
 
-def test_window_comes_from_the_extracted_events(app):
+def test_form_starts_from_the_extraction_record(app):
     run = app.data_manager.get_data("runs/[0]")
-    indices = list(run["event_indices"])
-    run["event_window"] = {"version": 1, "start_s": -2.0, "end_s": 3.0}   # stale: the events decide
-    run["events"] = app.data_manager.event_processor.extract_events(run, [3] + indices, window=2.5, pre=1.5, post=2.5)
-    v = EventPickerView(app, 0)                                   # the event at sample 3 is truncated
-    assert v.start_var.get() == "-1.5" and v.end_var.get() == "2.5"
-    assert v.window_s() == (-1.5, 2.5)
+    picks = [int(i) for i in run["event_indices"]]
+    run["event_extraction"] = {"version": 1, "event_indices": picks[1:], "start_s": -2.0, "end_s": 3.0,
+                               "x_field": "index", "y_field": "friction", "n_events": 3}
+    v = EventPickerView(app, 0)                        # the run's own event_indices win over the record's copy
+    assert v.picks == picks and v.start_var.get() == "-2" and v.end_var.get() == "3"
+    assert v.x_combo.get() == "index" and v.y_combo.get() == "friction"
     v.on_close()
-    # a window that is not a multiple of the sample interval comes back within half a sample
-    dt = float(np.median(np.diff(app.truth[0].time)))
-    run["events"] = app.data_manager.event_processor.extract_events(run, indices, window=2.0, pre=0.4321, post=1.2345)
-    v = EventPickerView(app, 0)
-    assert float(v.start_var.get()) == pytest.approx(-0.4321, abs=dt)
-    assert float(v.end_var.get()) == pytest.approx(1.2345, abs=dt)
+    del run["event_indices"]
+    v = EventPickerView(app, 0)                        # without them the record's picks are used
+    assert v.picks == picks[1:]
     v.on_close()
-    # without events the saved window is used, and without that the defaults
-    run["events"] = []
+    # Save picks refreshes the record's copy and keeps the rest of the record
     v = EventPickerView(app, 0)
-    assert v.start_var.get() == "-2" and v.end_var.get() == "3"
+    v.picker.add_point(7)
+    v.save_picks()
+    record = app.data_manager.get_data("runs/[0]/event_extraction")
+    assert record["event_indices"] == [7] + picks[1:] and record["start_s"] == -2.0 and record["n_events"] == 3
+    assert app.data_manager.get_data("runs/[0]/event_indices") == [7] + picks[1:]
+    v.on_close()
+    # a file saved under the record's old name still restores the window; nothing saved means the defaults
+    del run["event_extraction"]
+    run["event_window"] = {"version": 1, "start_s": -1.0, "end_s": 4.0}
+    v = EventPickerView(app, 0)
+    assert v.start_var.get() == "-1" and v.end_var.get() == "4" and v.picks == [7] + picks[1:]
     v.on_close()
     del run["event_window"]
+    del run["event_indices"]
     v = EventPickerView(app, 0)
-    assert v.start_var.get() == "-5" and v.end_var.get() == "5"
+    assert v.start_var.get() == "-5" and v.end_var.get() == "5" and v.picks == []
     v.on_close()
