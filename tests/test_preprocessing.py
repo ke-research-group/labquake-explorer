@@ -45,7 +45,7 @@ def test_linear_friction_and_presets():
 
 def test_eddy_slip_sign_zero_and_displacement():
     run = synthetic_run()
-    step = EddySlip({"eddy_1": -0.0947}, zero_window_s=0.5, positions={"eddy_1": (120.0, 0.0, 25.0)})
+    step = EddySlip({"eddy_1": -0.0947}, zero_window_s=0.5, positions={"eddy_1": (120.0, 0.0, 25.0)}, displacement="mean")
     Calibration(step).apply(run)
     slip = run["slip"]
     assert C.is_channel_array(slip) and slip["channels"] == ["slip_1", "slip_2"] and slip["unit"] == "um"
@@ -68,7 +68,7 @@ def test_eddy_slip_sign_zero_and_displacement():
     Calibration(EddySlip({"eddy_1": -0.1, "eddy_2": -0.05}, displacement="slip_2")).apply(run)
     np.testing.assert_array_equal(run["displacement"], C.row(run["slip"], "slip_2"))
     run = synthetic_run()
-    Calibration(EddySlip({}, default_slope_mm_per_v=-0.1, displacement=None)).apply(run)
+    Calibration(EddySlip({}, default_slope_mm_per_v=-0.1)).apply(run)      # no displacement by default
     assert "displacement" not in run and C.channel_names(run["slip"]) == ["slip_1", "slip_2"]
     # sources inside a recorder's raw_data channel array, positions inherited from it
     n = 100
@@ -119,7 +119,8 @@ def test_run_from_tpc5(elsys, tmp_path):
     assert C.is_channel_array(raw) and raw["channels"] == ["pzt_1", "pressure_1", "pressure_2", "eddy_1"]
     assert raw["data"].shape == (4, 4000) and raw["unit"] == "V" and "raw_data" not in run
     assert "positions" not in raw
-    for f in ("normal_stress", "shear_stress", "friction", "displacement"):
+    assert "displacement" not in run
+    for f in ("normal_stress", "shear_stress", "friction"):
         assert run[f].shape == (4000,), f
     assert run["slip"]["data"].shape == (1, 4000) and run["slip"]["channels"] == ["slip_1"]
     assert run["units"]["normal_stress"] == "MPa" and run["units"]["slip"] == "um" and run["units"]["elsys/raw_data"] == "V"
@@ -179,7 +180,7 @@ def test_run_from_tpc5_ni(elsys, ni, tmp_path):
     assert run["elsys"]["clock_offset_method"].startswith("NI trigger")
     assert run["elsys"]["blocks"]["trigger_time_run"] == pytest.approx([1.2, 2.1])
     assert run["ni"]["decimation"] == 5 and run["ni"]["input_range_v"] == 10.0
-    assert run["slip"]["data"].dtype == np.float32 and run["units"]["displacement"] == "um"
+    assert run["slip"]["data"].dtype == np.float32 and run["units"]["slip"] == "um"
     # a given offset wins over the trigger-derived one
     run2 = run_from_tpc5_ni(elsys, ni, ELSYS_MAP, NI_MAP, tmp_path, clock_offset=0.5)
     assert run2["elsys"]["time_offset"] == 0.5 and run2["elsys"]["clock_offset_method"] == "given"

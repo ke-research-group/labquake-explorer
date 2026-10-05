@@ -38,8 +38,9 @@ def test_extract_from_tpc5_run(elsys, tmp_path):
     assert len(events) == 3
     e0 = events[0]
     assert e0["event_time"] == pytest.approx(0.5) and e0["time"][0] == pytest.approx(0.45) and e0["time"].size == 200
-    for f in ("normal_stress", "displacement"):
+    for f in ("normal_stress", "shear_stress"):
         assert e0[f].shape == e0["time"].shape, f
+    assert "displacement" not in e0 and "displacement" not in run        # fault slip lives in slip/slip_1
     for key in ("events", "calibration", "units", "sources"):
         assert key not in e0, key
     assert set(e0["elsys"]) == {"raw_data"}                 # the recorder's 2 kHz copy, no file reference

@@ -63,3 +63,30 @@ def test_interevent_uses_rows(app_with_arrays):
 def test_tree_label_for_channel_array(app_with_arrays):
     label = app_with_arrays.format_tree_label("slip", app_with_arrays.data_manager.get_data("runs/[0]/slip"))
     assert label.startswith("slip: 2 channels x ") and label.endswith(" um")
+
+
+def test_views_fall_back_to_the_first_slip_channel(app_with_arrays):
+    """Files without a 'displacement' field (fault slip is slip/slip_1) still open the analyses."""
+    app = app_with_arrays
+    run = app.data_manager.get_data("runs/[0]")
+    del run["displacement"]
+    for event in run["events"]:
+        del event["displacement"]
+    app.refresh_tree()
+    v = EventAnalyzerView(app, 0, 1)
+    assert v.item_x == "slip/slip_1" and v.data_x_combo.get() == "slip/slip_1"
+    v.on_close()
+    v = InterEventView(app, 0)
+    assert v.slip_combo.get() == "slip/slip_1"
+    v.on_close()
+
+
+def test_arrival_picker_without_a_slip_trace(app_with_strain):
+    from labquake_explorer.ui.views.dynamic_strain_arrival_picker_view import DynamicStrainArrivalPickerView
+    app = app_with_strain
+    event = app.data_manager.get_data("runs/[0]/events/[1]")
+    del event["displacement"]
+    v = DynamicStrainArrivalPickerView(app, 0, 1)
+    assert DynamicStrainArrivalPickerView.fault_slip(v.event) is None and len(v.axs[3].lines) == 0
+    assert len(v.axs[2].lines) == 1
+    v.on_close()

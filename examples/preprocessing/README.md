@@ -16,7 +16,7 @@ checks and saves. See `docs/extending.md`, "Raw-data references" and
 Each run of the produced file holds `time`, one block per recorder (`elsys`,
 `ni`) with its raw-file reference and its voltages as the `raw_data` channel
 array (sensor positions per channel), the calibrated scalars `normal_stress`, `shear_stress`, `friction`,
-`displacement`, the `slip` channel array (um, one row per eddy-current sensor,
+`LP_displacement`, the `slip` channel array (um, one row per eddy-current sensor,
 positions attached), `units`, a `calibration` record, and references to the
 raw files (`elsys`, `ni`) that **Pick Events → Extract Events** reads for each
 event's `waveform` records (`<recorder>/raw_data` holds the 2 kHz voltages of the window, as in the run). See `docs/extending.md`, "Run layout".

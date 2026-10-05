@@ -27,6 +27,7 @@ from scipy import signal
 from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import EVENT
 from labquake_explorer.ui.views.base import EventView
+from labquake_explorer.data.channels import aligned_fields, get_field
 from labquake_explorer.data.sources import (pick_waveform_block, waveform_block, waveform_data, waveform_store,
                                             waveform_time)
 
@@ -133,6 +134,17 @@ class DynamicStrainArrivalPickerView(EventView):
             return None
         key = pick_waveform_block(event, prefer_keys=("strain",))
         return waveform_block(event, key) if key else None
+
+    @staticmethod
+    def fault_slip(event):
+        """The event's fault slip trace: ``displacement`` (PSU files), else the
+        first slip channel (``slip/slip_1``); None without either."""
+        n = len(event.get("time", []))
+        for path in ["displacement"] + [f for f in aligned_fields(event, n) if f.split("/")[-1].lower().startswith("slip")]:
+            value = get_field(event, path)
+            if value is not None and np.asarray(value).shape == (n,):
+                return np.asarray(value, dtype=float)
+        return None
 
     @staticmethod
     def block_locations(block, n_channels: int):
@@ -259,8 +271,9 @@ class DynamicStrainArrivalPickerView(EventView):
         self.axs[1].plot(t, self.event["friction"], linestyle, color="C0")
         lp = np.asarray(self.event["LP_displacement"])
         self.axs[2].plot(t, lp - lp[0], linestyle, color="C0")
-        disp = np.asarray(self.event["displacement"])
-        self.axs[3].plot(t, disp - disp[0], linestyle, color="C0")
+        disp = self.fault_slip(self.event)
+        if disp is not None:
+            self.axs[3].plot(t, disp - disp[0], linestyle, color="C0")
 
         tt = waveform_time(strain) - event_time
         y = np.array(waveform_data(strain), dtype=float, copy=True)

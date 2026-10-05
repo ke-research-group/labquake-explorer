@@ -105,7 +105,9 @@ class InterEventView(RunView):
         lp = saved.get("lp_field") if saved else None
         slip = saved.get("slip_field") if saved else None
         self.lp_combo.set(lp if lp in candidates else ("LP_displacement" if "LP_displacement" in candidates else (candidates[0] if candidates else "")))
-        self.slip_combo.set(slip if slip in candidates else ("displacement" if "displacement" in candidates else (candidates[0] if candidates else "")))
+        slip_channels = [c for c in candidates if c.split("/")[-1].lower().startswith("slip")]
+        default_slip = "displacement" if "displacement" in candidates else (slip_channels[0] if slip_channels else (candidates[0] if candidates else ""))
+        self.slip_combo.set(slip if slip in candidates else default_slip)
         if saved:
             self.delay_var.set(f"{saved.get('delay_s', 0.05):g}")
             self.width_var.set(f"{saved.get('width_s', 0.05):g}")

@@ -11,8 +11,9 @@ Steps provided here:
 * :class:`Linear` -- ``field = factor * source + offset``; the source may be a
   top-level array or a channel of ``run['raw_data']``.
 * :class:`EddySlip` -- eddy-current voltages to the ``slip`` channel array
-  (micrometres, zeroed at the start of the run, sensor positions attached) plus
-  the ``displacement`` field the explorer uses.
+  (micrometres, zeroed at the start of the run, sensor positions attached);
+  optionally a ``displacement`` field (the views fall back to the first slip
+  channel without one).
 * :class:`Friction` -- ``shear_stress / normal_stress`` once both are in MPa.
 
 A new kind of conversion is a class with ``apply(run, units)`` and
@@ -75,8 +76,8 @@ class EddySlip(Step):
     The result is the channel array ``run[out_key]`` (rows ``slip_1``, ...,
     unit um, ``source`` naming the voltage channel of each row, ``positions``
     from ``positions`` or inherited from the recorder's ``raw_data``) plus
-    ``displacement``: the mean of all slip channels (``'mean'``), one of them
-    (e.g. ``'slip_5'``) or not written (None).
+    ``displacement``: not written (None, the default), the mean of all slip
+    channels (``'mean'``) or one of them (e.g. ``'slip_5'``).
     """
     slopes_mm_per_v: Mapping[str, float]
     default_slope_mm_per_v: Optional[float] = None
@@ -84,7 +85,7 @@ class EddySlip(Step):
     source_prefix: str = "eddy_"
     out_prefix: str = "slip_"
     out_key: str = "slip"
-    displacement: Optional[str] = "mean"
+    displacement: Optional[str] = None
     positions: Optional[Mapping[str, Sequence[float]]] = None   # source channel -> (x, y, z)
     position_unit: str = "mm"
     position_frame: str = ""

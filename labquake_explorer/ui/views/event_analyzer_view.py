@@ -162,8 +162,14 @@ class EventAnalyzerView(EventView):
         self.data_y_combo.config(values=matching_fields)
         
         if not (self.item_x and self.item_x in matching_fields):
+            # fault slip first: 'displacement' (PSU files), else the first slip channel, else any displacement
+            slip_fields = [f for f in matching_fields if f.split('/')[-1].lower().startswith('slip')]
             displacement_fields = [f for f in matching_fields if 'displacement' in f.lower()]
-            if displacement_fields:
+            if 'displacement' in matching_fields:
+                self.item_x = 'displacement'
+            elif slip_fields:
+                self.item_x = slip_fields[0]
+            elif displacement_fields:
                 self.item_x = displacement_fields[0]
             elif 'time' in matching_fields:
                 self.item_x = 'time'
