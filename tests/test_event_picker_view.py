@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 
 from labquake_explorer.ui.actions import actions_for
@@ -239,3 +240,30 @@ def test_markers_follow_the_axes_limits(app, view):
     marker = view.picker.markers[0]
     view.ax.set_xlim(lo, hi)
     assert marker.width == pytest.approx(w0, rel=0.01)
+
+
+def test_window_comes_from_the_extracted_events(app):
+    run = app.data_manager.get_data("runs/[0]")
+    indices = list(run["event_indices"])
+    run["event_window"] = {"version": 1, "start_s": -2.0, "end_s": 3.0}   # stale: the events decide
+    run["events"] = app.data_manager.event_processor.extract_events(run, [3] + indices, window=2.5, pre=1.5, post=2.5)
+    v = EventPickerView(app, 0)                                   # the event at sample 3 is truncated
+    assert v.start_var.get() == "-1.5" and v.end_var.get() == "2.5"
+    assert v.window_s() == (-1.5, 2.5)
+    v.on_close()
+    # a window that is not a multiple of the sample interval comes back within half a sample
+    dt = float(np.median(np.diff(app.truth[0].time)))
+    run["events"] = app.data_manager.event_processor.extract_events(run, indices, window=2.0, pre=0.4321, post=1.2345)
+    v = EventPickerView(app, 0)
+    assert float(v.start_var.get()) == pytest.approx(-0.4321, abs=dt)
+    assert float(v.end_var.get()) == pytest.approx(1.2345, abs=dt)
+    v.on_close()
+    # without events the saved window is used, and without that the defaults
+    run["events"] = []
+    v = EventPickerView(app, 0)
+    assert v.start_var.get() == "-2" and v.end_var.get() == "3"
+    v.on_close()
+    del run["event_window"]
+    v = EventPickerView(app, 0)
+    assert v.start_var.get() == "-5" and v.end_var.get() == "5"
+    v.on_close()
