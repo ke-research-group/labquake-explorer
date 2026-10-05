@@ -42,6 +42,20 @@ def positions_table(channels: Sequence[str], positions: Optional[Mapping] = None
             "unit": unit, "frame": frame}
 
 
+def positions_for(array, names: Sequence[str]) -> Optional[dict]:
+    """The positions table of channel array ``array`` restricted to ``names``
+    (NaN for a name it does not have); None when the array has no table."""
+    pos = array.get("positions") if isinstance(array, Mapping) else None
+    if not isinstance(pos, Mapping) or "x" not in pos:
+        return None
+    xs, ys, zs = (list(pos.get(k, [])) for k in ("x", "y", "z"))
+    mapping = {}
+    for i, name in enumerate(channel_names(array)):
+        if i < len(xs):
+            mapping[name] = (xs[i], ys[i] if i < len(ys) else np.nan, zs[i] if i < len(zs) else np.nan)
+    return positions_table(names, mapping, unit=str(pos.get("unit", "mm")), frame=str(pos.get("frame", "")))
+
+
 def channel_array(data, channels: Sequence[str], unit: str = "", positions: Optional[dict] = None,
                   dtype=np.float32, **meta) -> dict:
     """Build a channel array; ``positions`` is a table from :func:`positions_table`."""
@@ -185,5 +199,5 @@ def slice_channel_array(value: Mapping, sl: slice) -> dict:
     return out
 
 
-__all__ = ["RESERVED", "positions_table", "channel_array", "is_channel_array", "channel_names", "row",
+__all__ = ["RESERVED", "positions_table", "positions_for", "channel_array", "is_channel_array", "channel_names", "row",
            "channel_arrays", "find_channel", "get_channel", "aligned_fields", "get_field", "slice_channel_array"]

@@ -27,8 +27,11 @@ from typing import Callable, Mapping, Optional, Sequence
 import h5py
 import numpy as np
 
+from labquake_explorer.data.channels import channel_array, channel_names, is_channel_array
 from labquake_explorer.utils import tpc5
 from labquake_explorer.utils.ni_npz import NIRecord, open_ni_npz
+
+WAVEFORM = "waveform"    # event key: each recorder's full-rate record around the event
 
 SOURCE_FORMATS: dict = {}
 
@@ -62,6 +65,16 @@ class Window:
     def as_dict(self, dtype=np.float32) -> dict:
         return {"time": np.asarray(self.time, dtype=np.float64), "raw": np.asarray(self.data, dtype=dtype),
                 "fields": list(self.fields), "sample_rate": float(self.sample_rate), "block": self.block}
+
+    def as_channel_array(self, dtype=np.float32, unit: str = "V", positions: Optional[dict] = None, **meta) -> dict:
+        """The samples as a channel array (:mod:`labquake_explorer.data.channels`)
+        carrying ``time`` (run clock), ``sample_rate`` and, for a recorder that
+        writes separate records, ``block``; ``meta`` adds further entries."""
+        extra = {"time": np.asarray(self.time, dtype=np.float64), "sample_rate": float(self.sample_rate)}
+        if self.block is not None:
+            extra["block"] = int(self.block)
+        extra.update(meta)
+        return channel_array(self.data, self.fields, unit=unit, positions=positions, dtype=dtype, **extra)
 
 
 class Source:
@@ -120,6 +133,19 @@ class Source:
         if fields is None:
             fields = self.event_fields
         return self.read_window(float(event_time) - float(pre), float(event_time) + float(post), fields, dtype)
+
+    def waveform(self, event_time: float, pre: float, post: float,
+                  fields: Optional[Sequence[str]] = None, dtype=np.float32) -> Optional[Window]:
+        """The full-rate record copied into an event (``event['waveform'][key]``).
+
+        A recorder that writes separate records around triggers returns the
+        whole record that contains ``event_time`` and overlaps the most of
+        ``[event_time - pre, event_time + post]`` (see :class:`Tpc5Source`); a
+        continuous recorder returns that window clipped to its record, its own
+        ``event_window_s`` taking precedence.  ``fields`` defaults to the
+        source's ``event_fields``.  None when nothing covers the event time.
+        """
+        return self.event_window(event_time, pre, post, fields, dtype)
 
     # ----------------------------------------------------------- references
     def to_reference(self, base_dir) -> dict:
@@ -216,6 +242,31 @@ class Tpc5Source(Source):
         if self.trigger_blocks:
             return tpc5.find_block(self.trigger_blocks, t)
         return self.continuous if self.continuous.contains(t) else None
+
+    def block_for_window(self, t_run: float, pre: float, post: float) -> Optional[tpc5.BlockInfo]:
+        """Among the trigger blocks containing ``t_run``, the one overlapping the
+        most of ``[t_run - pre, t_run + post]`` (the earlier one on a tie)."""
+        t = self.to_file_time(t_run)
+        best, best_overlap = None, -1.0
+        for b in self.trigger_blocks:
+            if not b.contains(t):
+                continue
+            overlap = min(b.end, t + float(post)) - max(b.start, t - float(pre))
+            if overlap > best_overlap:
+                best, best_overlap = b, overlap
+        return best
+
+    def waveform(self, event_time, pre, post, fields=None, dtype=np.float32) -> Optional[Window]:
+        if not self.trigger_blocks:
+            return super().waveform(event_time, pre, post, fields, dtype)
+        block = self.block_for_window(event_time, pre, post)
+        if block is None:
+            return None
+        idx = self.field_indices(self.event_fields if fields is None else fields)
+        with h5py.File(self.path, "r") as f:
+            t, data = tpc5.read_block(f, block.block, [self.channel_numbers[i] for i in idx], dtype=np.float64)
+        return Window(self.to_run_time(t), np.asarray(data, dtype=dtype), [self.fields[i] for i in idx],
+                      block.sample_rate, block.block)
 
     def read_window(self, t_from, t_to, fields=None, dtype=np.float32) -> Optional[Window]:
         block = self.record_for(0.5 * (float(t_from) + float(t_to)))
@@ -423,32 +474,85 @@ def open_source(ref: Mapping, base_dir, run: Optional[Mapping] = None) -> Source
 # ---------------------------------------------------------------------------
 # waveform blocks inside an extracted event
 # ---------------------------------------------------------------------------
-def is_waveform_block(value) -> bool:
-    """True for an event entry holding ``original: {time, raw}`` (a full-rate record)."""
-    if not isinstance(value, Mapping):
-        return False
-    original = value.get("original")
+def _is_legacy_block(value) -> bool:
+    original = value.get("original") if isinstance(value, Mapping) else None
     return isinstance(original, Mapping) and "time" in original and "raw" in original
 
 
+def is_waveform_block(value) -> bool:
+    """True for a full-rate record of an event: a channel array with a ``time``
+    axis (``event['waveform'][recorder]``) or the PSU-era ``strain`` dict
+    holding ``original: {time, raw}``."""
+    if not isinstance(value, Mapping):
+        return False
+    return _is_legacy_block(value) or ("time" in value and is_channel_array(value))
+
+
 def waveform_blocks(event: Mapping) -> dict:
-    """``{key: block}`` for every full-rate record of an event, in event order
-    (``'strain'`` for the PSU layout, the reference keys such as ``'elsys'`` or
-    ``'ni'`` for files extracted through the sources)."""
-    return {key: value for key, value in event.items() if is_waveform_block(value)}
+    """``{key: block}`` for every full-rate record of an event, in event order:
+    ``'waveform/<recorder>'`` for each recorder's record and ``'strain'`` for
+    the PSU layout."""
+    out = {}
+    if not isinstance(event, Mapping):
+        return out
+    for key, value in event.items():
+        if key == WAVEFORM and isinstance(value, Mapping):
+            for recorder, block in value.items():
+                if is_waveform_block(block):
+                    out[f"{WAVEFORM}/{recorder}"] = block
+        elif is_waveform_block(value):
+            out[str(key)] = value
+    return out
+
+
+def waveform_block(event: Mapping, key: str) -> Optional[Mapping]:
+    """The block a :func:`waveform_blocks` key names, or None."""
+    current = event
+    for part in str(key).split("/"):
+        if not isinstance(current, Mapping) or part not in current:
+            return None
+        current = current[part]
+    return current if is_waveform_block(current) else None
+
+
+def waveform_time(block: Mapping) -> np.ndarray:
+    """The record's time axis on the run clock."""
+    source = block["original"] if _is_legacy_block(block) else block
+    return np.asarray(source["time"], dtype=np.float64).ravel()
+
+
+def waveform_data(block: Mapping) -> np.ndarray:
+    """The record's samples, ``(n_channels, n)``."""
+    data = np.asarray(block["original"]["raw"] if _is_legacy_block(block) else block["data"])
+    return data[None, :] if data.ndim == 1 else data
+
+
+def waveform_channels(block: Mapping) -> list:
+    """Channel labels of a record: its ``channels`` (or legacy ``fields``) when
+    they match the data, else indices."""
+    n = int(waveform_data(block).shape[0])
+    names = channel_names(block) if is_channel_array(block) else [str(f) for f in (block.get("fields") or [])]
+    return names if len(names) == n else [str(i) for i in range(n)]
+
+
+def waveform_store(block) -> dict:
+    """Where a view keeps per-record results such as ``picked_idx`` and
+    ``rupture_arrival_time``: the block itself, or ``original`` for the PSU layout."""
+    if not isinstance(block, Mapping):
+        return {}
+    return block["original"] if _is_legacy_block(block) else block
 
 
 def pick_waveform_block(event: Mapping, prefer_fields: Sequence[str] = (),
                         prefer_keys: Sequence[str] = ("strain",)) -> Optional[str]:
     """The key of the record a view should open first: the first block that has
-    a field starting with one of ``prefer_fields``, else the first key in
+    a channel starting with one of ``prefer_fields``, else the first key in
     ``prefer_keys`` that exists, else the first block; None without any."""
     blocks = waveform_blocks(event)
     if not blocks:
         return None
     for key, block in blocks.items():
-        fields = [str(f) for f in (block.get("fields") or [])]
-        if any(f.startswith(p) for f in fields for p in prefer_fields):
+        if any(c.startswith(p) for c in waveform_channels(block) for p in prefer_fields):
             return key
     for key in prefer_keys:
         if key in blocks:
@@ -457,16 +561,11 @@ def pick_waveform_block(event: Mapping, prefer_fields: Sequence[str] = (),
 
 
 def block_channel_labels(block: Mapping) -> list:
-    """Channel labels of a waveform block: its ``fields`` when stored, else indices."""
-    raw = np.asarray(block["original"]["raw"])
-    n = int(raw.shape[0]) if raw.ndim == 2 else 0
-    fields = block.get("fields")
-    if fields is not None and len(fields) == n:
-        return [str(f) for f in fields]
-    return [str(i) for i in range(n)]
+    """Alias of :func:`waveform_channels`."""
+    return waveform_channels(block)
 
 
-__all__ = ["SOURCE_FORMATS", "register_source", "Source", "Window", "Tpc5Source", "NINpzSource",
-           "LegacyTpc5Source", "short_label", "block_mean", "is_legacy_strain", "reference_format",
-           "run_sources", "open_source", "is_waveform_block", "waveform_blocks", "pick_waveform_block",
-           "block_channel_labels"]
+__all__ = ["SOURCE_FORMATS", "WAVEFORM", "register_source", "Source", "Window", "Tpc5Source",
+           "NINpzSource", "LegacyTpc5Source", "short_label", "block_mean", "is_legacy_strain", "reference_format",
+           "run_sources", "open_source", "is_waveform_block", "waveform_blocks", "waveform_block", "waveform_time",
+           "waveform_data", "waveform_channels", "waveform_store", "pick_waveform_block", "block_channel_labels"]

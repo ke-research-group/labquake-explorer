@@ -2,18 +2,22 @@
 
 For every picked event the run's time history is sliced around the event
 time, and each raw-data reference of the run (see
-:mod:`labquake_explorer.data.sources`) is asked for its full-rate window.  The
+:mod:`labquake_explorer.data.sources`) is asked for its full-rate record.  The
 result is one dict per event::
 
     event_time, time, <every run field aligned with time>,
     <channel array>: {'data': (n_channels, n_window), 'channels', 'unit', ...},   # e.g. 'slip'
-    <recorder key>: {'raw_data': <its channel array, sliced>,                      # e.g. 'elsys', 'ni'
-                     'format', 'filename', 'fields', 'sample_rate', 'block',
-                     'original': {'time', 'raw'}}        # the full-rate window, when a record covers the event
+    <recorder>: {'raw_data': <its channel array, sliced>},                        # e.g. 'elsys', 'ni', as in the run
+    waveform: {<recorder>: {'data', 'channels', 'unit', 'positions',              # the full-rate record:
+                            'time', 'sample_rate', 'filename', 'block'}}          # whole trigger block or window
+    notes: [...]                                                                   # recorders with no record
 
-The PSU-era ``strain`` layout keeps its historical output (``time``/``raw``
-downsampled copies plus ``original``), so older experiment files behave as
-before.
+The recorders' file references themselves are not copied.  ``waveform`` comes
+from ``Source.waveform`` so the rule (the whole record that contains the
+event time and overlaps the chosen window most, or the window for a
+continuous recorder) does not depend on the file format.  The PSU-era
+``strain`` layout keeps its historical output (``time``/``raw`` downsampled
+copies plus ``original``), so older experiment files behave as before.
 """
 from __future__ import annotations
 
@@ -22,8 +26,8 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from labquake_explorer.data.channels import is_channel_array, slice_channel_array
-from labquake_explorer.data.sources import LegacyTpc5Source, Source, open_source, run_sources
+from labquake_explorer.data.channels import is_channel_array, positions_for, slice_channel_array
+from labquake_explorer.data.sources import WAVEFORM, LegacyTpc5Source, Source, open_source, run_sources
 
 
 class EventProcessor:
@@ -97,28 +101,34 @@ class EventProcessor:
             elif isinstance(value, np.ndarray) and value.ndim == 1 and value.shape[0] == n:
                 event[key] = value[beg:end]
         notes = []
-        # the low-rate channels each recorder contributed (sliced), with or without the raw file
-        for key, ref in run_sources(run_data).items():
+        refs = run_sources(run_data)
+        # the time-history voltages each recorder contributed, sliced, under the recorder's key as in the run
+        for key, ref in refs.items():
             arrays = {sub: slice_channel_array(item, slice(beg, end)) for sub, item in ref.items()
                       if is_channel_array(item) and item["data"].shape[1] == n}
             if arrays:
-                event[key] = {"format": ref.get("format"), "filename": ref.get("filename"), **arrays}
+                event[key] = arrays
+        # waveform: the full-rate record of each recorder around the event
+        high: Dict[str, Any] = {}
         for key, source in sources.items():
             if isinstance(source, LegacyTpc5Source):
                 block = self._legacy_strain(run_data, source, event_time, pre, post)
-            else:
-                win = source.event_window(event_time, pre, post, dtype=dtype)
-                block = None if win is None else {
-                    "format": source.format,
-                    "filename": run_data[key].get("filename", source.path.name),
-                    **win.as_dict(dtype),
-                }
-                if block is not None:
-                    block["original"] = {"time": block.pop("time"), "raw": block.pop("raw")}
-            if block is None:
+                if block is None:
+                    notes.append(f"{key}: no raw record covers {event_time:.4f} s")
+                else:
+                    event[key] = block
+                continue
+            win = source.waveform(event_time, pre, post, dtype=dtype)
+            if win is None:
                 notes.append(f"{key}: no raw record covers {event_time:.4f} s")
-            else:
-                event.setdefault(key, {}).update(block)
+                continue
+            raw = refs.get(key, {}).get("raw_data")
+            unit = str(raw.get("unit", "V")) if is_channel_array(raw) else "V"
+            positions = positions_for(raw, win.fields) if is_channel_array(raw) else None
+            high[key] = win.as_channel_array(dtype, unit=unit, positions=positions,
+                                             filename=str(run_data[key].get("filename", source.path.name)))
+        if high:
+            event[WAVEFORM] = high
         if notes:
             event["notes"] = notes
         return event

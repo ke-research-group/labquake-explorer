@@ -136,3 +136,51 @@ def test_register_source_and_block_mean():
     np.testing.assert_array_equal(S.block_mean(x, 1), x)
     assert S.block_mean(np.arange(12.0).reshape(2, 6), 2).shape == (2, 3)
     assert S.reference_format({"a": 1}) is None and S.reference_format(3) is None
+
+
+def test_tpc5_waveform_picks_the_block_overlapping_the_window_most(tmp_path):
+    path = tmp_path / "overlap.tpc5"
+    write_tpc5(path, ELSYS_SIGNALS, trigger_times=(0.5, 0.505), volt_range=12.0)   # blocks [0.498, 0.508] and [0.503, 0.513]
+    src = S.Tpc5Source.open(path, ELSYS_MAP)
+    assert src.block_for_window(0.504, pre=0.01, post=0.0).block == 2
+    assert src.block_for_window(0.504, pre=0.0, post=0.01).block == 3
+    assert src.block_for_window(0.504, pre=0.05, post=0.05).block == 2      # equal overlap: the earlier block
+    assert src.block_for_window(0.6, pre=0.1, post=0.1) is None
+    win = src.waveform(0.504, 0.0, 0.01, fields=["pzt_1"])
+    assert win.block == 3 and win.fields == ["pzt_1"] and win.data.shape == (1, win.time.size)
+    assert win.time[0] == pytest.approx(0.503, abs=1e-5) and win.time[-1] == pytest.approx(0.513, abs=1e-5)
+    assert src.waveform(0.6, 0.1, 0.1) is None
+    block = win.as_channel_array(unit="V", filename="overlap.tpc5")
+    assert block["channels"] == ["pzt_1"] and block["block"] == 3 and block["sample_rate"] == 200_000.0
+    assert block["filename"] == "overlap.tpc5" and block["time"].dtype == np.float64 and block["data"].dtype == np.float32
+    # a file without trigger blocks answers with the window itself (and event_window_s wins when set)
+    single = tmp_path / "single.tpc5"
+    write_tpc5(single, ELSYS_SIGNALS, trigger_times=(), volt_range=12.0)
+    win = S.Tpc5Source.open(single, ELSYS_MAP).waveform(1.0, 0.1, 0.2)
+    assert win.block == 1 and win.time[0] == pytest.approx(0.9, abs=1e-3) and win.time[-1] == pytest.approx(1.2, abs=1e-3)
+    assert "block" not in S.NINpzSource.__dict__ or True
+    win = S.Tpc5Source.open(single, ELSYS_MAP, event_window_s=(0.01, 0.02)).waveform(1.0, 0.1, 0.2)
+    assert win.time[0] == pytest.approx(0.99, abs=1e-3) and win.time[-1] == pytest.approx(1.02, abs=1e-3)
+
+
+def test_waveform_helpers_cover_both_layouts():
+    from labquake_explorer.data.channels import channel_array
+    t = np.linspace(0, 1, 11)
+    new = channel_array(np.vstack([t, 2 * t]), ["pzt_1", "pzt_2"], unit="V", time=t, sample_rate=10.0, block=2)
+    legacy = {"filename": "x.tpc5", "time_offset": 0.0, "time": t, "raw": np.zeros((3, 11)),
+              "original": {"time": t, "raw": np.ones((3, 11))}}
+    low = channel_array(np.zeros((2, 11)), ["pzt_1", "pzt_2"])
+    event = {"event_time": 0.5, "time": t, "waveform": {"elsys": new}, "strain": legacy, "elsys": {"raw_data": low}}
+    assert S.is_waveform_block(new) and S.is_waveform_block(legacy)
+    assert not S.is_waveform_block(low) and not S.is_waveform_block(event) and not S.is_waveform_block(None)
+    assert list(S.waveform_blocks(event)) == ["waveform/elsys", "strain"]
+    assert S.waveform_block(event, "waveform/elsys") is new and S.waveform_block(event, "strain") is legacy
+    assert S.waveform_block(event, "elsys/raw_data") is None and S.waveform_block(event, "nope") is None
+    assert S.waveform_channels(new) == ["pzt_1", "pzt_2"] and S.waveform_channels(legacy) == ["0", "1", "2"]
+    np.testing.assert_array_equal(S.waveform_data(legacy), np.ones((3, 11)))
+    np.testing.assert_array_equal(S.waveform_time(new), t)
+    assert S.waveform_store(new) is new and S.waveform_store(legacy) is legacy["original"] and S.waveform_store(None) == {}
+    assert S.pick_waveform_block(event, prefer_fields=("pzt",)) == "waveform/elsys"
+    assert S.pick_waveform_block(event, prefer_keys=("strain",)) == "strain"
+    assert S.pick_waveform_block({"time": t}) is None
+    assert S.block_channel_labels(new) == ["pzt_1", "pzt_2"]

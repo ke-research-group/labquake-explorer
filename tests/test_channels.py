@@ -58,3 +58,13 @@ def test_aligned_fields_and_get_field(run):
     assert C.get_field(run, "slip/slip_1/x") is None and C.get_field(run, "name") is None
     sliced = C.slice_channel_array(run["slip"], slice(10, 20))
     assert sliced["data"].shape == (2, 10) and sliced["channels"] == ["slip_1", "slip_2"] and sliced["unit"] == "um"
+
+
+def test_positions_for_subsets_a_table():
+    raw = C.channel_array(np.zeros((3, 4)), ["a", "b", "c"],
+                          positions=C.positions_table(["a", "b", "c"], {"a": (1, 2, 3), "c": (7, 8, 9)}, unit="mm", frame="f"))
+    sub = C.positions_for(raw, ["c", "a", "zz"])
+    assert sub["x"][:2] == [7.0, 1.0] and sub["z"][:2] == [9.0, 3.0] and np.isnan(sub["x"][2])
+    assert sub["unit"] == "mm" and sub["frame"] == "f"
+    assert C.positions_for(C.channel_array(np.zeros((1, 4)), ["a"]), ["a"]) is None
+    assert C.positions_for(None, ["a"]) is None

@@ -91,10 +91,13 @@ path (`slip/slip_3`, `elsys/raw_data/pzt_1`); `aligned_fields(container, n)`
 lists every 1-D series of length `n` this way and `get_field(container,
 path)` resolves one, so a field is the same whether it is a top-level array
 or a row. Event extraction slices channel arrays along the sample axis and
-keeps their metadata: an event's `elsys` block holds the sliced low-rate
-`raw_data` and, when a trigger block covers the event, the full-rate
-`original`; `slip` is sliced too. Older files with top-level 1-D channels
-keep working: a channel array is only an additional place a field can live.
+keeps their metadata: `slip` is sliced, each recorder's `raw_data` slice stays
+under the recorder's key (`elsys/raw_data`, the same path as in the run), and
+the recorder's full-rate record becomes the channel array
+`waveform/<recorder>` (with `time`, `sample_rate`, `filename` and, for a
+recorder that writes separate records, `block`). Older files with
+top-level 1-D channels keep working: a channel array is only an additional
+place a field can live.
 
 ## Saved result schemas
 
@@ -230,15 +233,28 @@ answers inside a trigger block).
 any), decorate the class with `@register_source`, and write a synthetic-file
 test next to `tests/test_sources.py`.
 
-`EventProcessor.extract_events(run, indices, window)` slices every 1-D run
-field aligned with `time` around each pick and adds, per reference key,
-`{format, filename, fields, sample_rate, block, original: {time, raw}}` with
-`raw` shaped `(n_fields, n)`. Views find these blocks with
-`sources.waveform_blocks(event)`; the PZT Spectrum view offers every block
-and opens the one with `pzt` fields, the strain-gauge views (arrival picker,
-CZM) open `strain` when present, else the first block.
-Events no record covers get a `notes` entry instead. The legacy layout keeps
-its historical output (`time`/`raw` downsampled copies plus `original` with the
+`EventProcessor.extract_events(run, indices, window, pre, post)` slices every
+1-D run field aligned with `time` around each pick, keeps each recorder's
+`raw_data` slice under the recorder's key (`elsys/raw_data`, as in the run; the
+file reference itself is not copied), and adds `waveform/<recorder>`, the
+full-rate record as a channel array (`data (n_channels, n)`, `channels`,
+`unit`, `positions`, `time` on the run clock, `sample_rate`, `filename`,
+`block`). Which samples make the record
+is the source's decision, `Source.waveform(event_time, pre, post)`: a
+recorder that writes separate records around triggers (tpc5 ECR mode) copies
+the whole record that contains the event time and overlaps the most of the
+chosen window; a continuous recorder (NI npz, single-block tpc5) copies the
+window itself, its own `event_window_s` taking precedence. The references are
+not copied into the event. Views find the records with
+`sources.waveform_blocks(event)` (keys `waveform/<recorder>`, or `strain`)
+and read them through `waveform_time`, `waveform_data`, `waveform_channels`
+and `waveform_store` (where per-record picks such as `picked_idx` and
+`rupture_arrival_time` are kept), so the PSU layout and the new one look the
+same to them; the PZT Spectrum view offers every record and opens the one
+with `pzt` channels, the strain-gauge views (arrival picker, CZM) open
+`strain` when present, else the first record. Recorders with no record
+covering the event are listed in `notes`. The legacy layout keeps its
+historical output (`time`/`raw` downsampled copies plus `original` with the
 first 1 % removed as baseline).
 
 ## Preprocessing package

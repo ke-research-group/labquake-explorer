@@ -2,8 +2,8 @@
 
 The view is a thin Tk shell around :mod:`labquake_explorer.analysis.spectrum`
 and :mod:`labquake_explorer.analysis.source`: it reads
-a full-rate record of the event (``event[<record>]['original']['time'/'raw']``,
-where ``<record>`` is ``strain``, ``elsys``, ``ni``, ...) and ``event['event_time']``
+a full-rate record of the event (``event['waveform'][<recorder>]`` with ``time``
+and ``data``, or the PSU-era ``strain`` block) and ``event['event_time']``
 (or a picked per-channel arrival), collects and validates the user's
 parameters, and calls
 
@@ -48,7 +48,8 @@ from labquake_explorer.analysis import spectrum as sp
 from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import EVENT
 from labquake_explorer.ui.views.base import EventView
-from labquake_explorer.data.sources import block_channel_labels, pick_waveform_block, waveform_blocks
+from labquake_explorer.data.sources import (pick_waveform_block, waveform_block, waveform_blocks, waveform_channels,
+                                            waveform_data, waveform_store, waveform_time)
 
 RESULT_VERSION = 1
 
@@ -420,14 +421,14 @@ class PZTSpectrumView(EventView):
         """Channels of the selected record; restores the current channel's saved record."""
         self.strain_time, self.strain_raw = self._block_arrays(self.record_key)
         n_channels = 0 if self.strain_raw is None else int(self.strain_raw.shape[0])
-        block = self.event.get(self.record_key) if (self.record_key and isinstance(self.event, dict)) else None
-        self.channel_labels = block_channel_labels(block) if (n_channels and isinstance(block, dict)) else []
+        block = waveform_block(self.event, self.record_key) if (self.record_key and isinstance(self.event, dict)) else None
+        self.channel_labels = waveform_channels(block) if (n_channels and block is not None) else []
         self.channel_combobox.config(values=[self._channel_label(i) for i in range(n_channels)])
         saved = self.saved_channels()
         current = self.current_channel()
         if n_channels == 0:
             self.channel_combobox.set("")
-            self.status_var.set("event has no full-rate record (original time and raw arrays)")
+            self.status_var.set("event has no full-rate record (waveform or strain block)")
             self._clear_channel_state()
             return
         if self._first_load and saved and current not in saved:
@@ -461,14 +462,13 @@ class PZTSpectrumView(EventView):
         return None
 
     def _block_arrays(self, key):
-        block = self.event.get(key) if (key and isinstance(self.event, dict)) else None
-        original = block.get("original") if isinstance(block, dict) else None
-        if not isinstance(original, dict) or "time" not in original or "raw" not in original:
+        block = waveform_block(self.event, key) if (key and isinstance(self.event, dict)) else None
+        if block is None:
             return None, None
         try:
-            time = np.asarray(original["time"], dtype=float).ravel()
-            raw = np.asarray(original["raw"], dtype=float)
-        except (TypeError, ValueError):
+            time = np.asarray(waveform_time(block), dtype=float).ravel()
+            raw = np.asarray(waveform_data(block), dtype=float)
+        except (KeyError, TypeError, ValueError):
             return None, None
         if raw.ndim == 1:
             raw = raw[None, :]
@@ -618,7 +618,7 @@ class PZTSpectrumView(EventView):
     def read_parameters(self) -> dict:
         """Validated spectrum/fit parameters from the controls (ValueError on bad input)."""
         if self.strain_time is None or self.strain_raw is None:
-            raise ValueError("event has no full-rate record (original time and raw arrays)")
+            raise ValueError("event has no full-rate record (waveform or strain block)")
         channel = self.current_channel()
         if channel is None or not (0 <= channel < self.strain_raw.shape[0]):
             raise ValueError("select a channel")
@@ -694,11 +694,12 @@ class PZTSpectrumView(EventView):
                 raise ValueError("event has no event_time") from None
         else:
             try:
-                arrivals = np.asarray(self.event[self.record_key]["original"]["rupture_arrival_time"], dtype=float).ravel()
+                store = waveform_store(waveform_block(self.event, self.record_key))
+                arrivals = np.asarray(store["rupture_arrival_time"], dtype=float).ravel()
                 t = float(arrivals[p["channel"]])
             except (KeyError, TypeError, ValueError, IndexError):
                 raise ValueError(f"no picked arrival for channel {p['channel']} "
-                                 f"({self.record_key}/original/rupture_arrival_time)") from None
+                                 f"({self.record_key}: rupture_arrival_time)") from None
         if not math.isfinite(t):
             raise ValueError("trigger time is not finite")
         if not (self.strain_time[0] <= t <= self.strain_time[-1]):

@@ -18,7 +18,7 @@ from labquake_explorer.data.data_processor import DataProcessor
 from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import EVENT
 from labquake_explorer.ui.views.base import EventView
-from labquake_explorer.data.sources import pick_waveform_block
+from labquake_explorer.data.sources import pick_waveform_block, waveform_block, waveform_data, waveform_time
 from labquake_explorer.utils.cohesive_crack import CohesiveCrack
 
 
@@ -140,16 +140,18 @@ class CZMFitterView(EventView):
         if not isinstance(event, dict):
             return None
         key = pick_waveform_block(event, prefer_keys=("strain",))
-        return event[key] if key else None
+        return waveform_block(event, key) if key else None
 
     @staticmethod
     def strain_raw(event):
-        """The event's full-rate ``original/raw`` block (2-D, >= 1 channel), else None."""
+        """The event's full-rate samples (2-D, >= 1 channel), else None."""
         strain = CZMFitterView.strain_block(event)
-        original = strain.get("original") if isinstance(strain, dict) else None
-        if not isinstance(original, dict) or "raw" not in original or "time" not in original:
+        if strain is None:
             return None
-        raw = original["raw"]
+        try:
+            raw = waveform_data(strain)
+        except (KeyError, TypeError, ValueError):
+            return None
         try:
             if np.ndim(raw) != 2 or len(raw) == 0:
                 return None
@@ -187,7 +189,7 @@ class CZMFitterView(EventView):
         if raw is None:
             # first load only (set_event refuses such events): EventView.__init__
             # unregisters and destroys the half-built window before re-raising
-            raise ValueError(f"{self.event_path} has no strain data (strain/original/raw) "
+            raise ValueError(f"{self.event_path} has no strain data (no waveform record or strain block) "
                              "to fit a cohesive zone model to")
         self.num_gauges = len(raw)
         self.gauge_combobox.config(values=[str(i) for i in range(self.num_gauges)])
@@ -284,7 +286,7 @@ class CZMFitterView(EventView):
 
     def _strain(self, gauge_idx):
         """Strain of one gauge, Savitzky-Golay filtered when filtering is on."""
-        strain = DataProcessor.voltage_to_strain(self.strain_block(self.event)["original"]["raw"][gauge_idx])
+        strain = DataProcessor.voltage_to_strain(waveform_data(self.strain_block(self.event))[gauge_idx])
         if self.filtering:
             strain = signal.savgol_filter(strain, self._filter_window_length(), 2)
         return strain
@@ -294,7 +296,7 @@ class CZMFitterView(EventView):
         return self.EYY_GAUGE if 0 <= self.EYY_GAUGE < self.num_gauges else None
 
     def _time(self):
-        return self.strain_block(self.event)["original"]["time"] - self.event["event_time"]
+        return waveform_time(self.strain_block(self.event)) - self.event["event_time"]
 
     def _model_strains(self, t, x_tip, Xc, Gc):
         """Cohesive-zone (Exy, Eyy) strains along the gauge line at times ``t``."""

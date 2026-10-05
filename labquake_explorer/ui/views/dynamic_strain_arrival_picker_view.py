@@ -10,8 +10,8 @@ Results are written into the event's existing layout:
 * ``event['rupture_speed']`` (only when the fit is well-posed; a degenerate
   fit removes the key so downstream views fall back to their defaults)
 * ``event['strain']['enabled_channels']``, ``event['strain']['fitting_channels']``
-* ``event['strain']['original']['picked_idx']``,
-  ``event['strain']['original']['rupture_arrival_time']``
+* ``picked_idx`` and ``rupture_arrival_time`` next to the record's samples
+  (``event['waveform'][recorder]``, or ``event['strain']['original']`` for the PSU layout)
 """
 from __future__ import annotations
 
@@ -27,7 +27,8 @@ from scipy import signal
 from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import EVENT
 from labquake_explorer.ui.views.base import EventView
-from labquake_explorer.data.sources import pick_waveform_block
+from labquake_explorer.data.sources import (pick_waveform_block, waveform_block, waveform_data, waveform_store,
+                                            waveform_time)
 
 # Experiments from this number on use the 16-channel layout with three
 # extra gauges at the ends of the fault; older ones use paired gauges.
@@ -127,11 +128,22 @@ class DynamicStrainArrivalPickerView(EventView):
     @staticmethod
     def strain_block(event):
         """The event's full-rate record: ``strain`` when present, else the first
-        waveform block (``elsys``, ``ni``, ...); None without any."""
+        waveform block (``waveform/elsys``, ``waveform/ni``, ...); None without any."""
         if not isinstance(event, dict):
             return None
         key = pick_waveform_block(event, prefer_keys=("strain",))
-        return event[key] if key else None
+        return waveform_block(event, key) if key else None
+
+    @staticmethod
+    def block_locations(block, n_channels: int):
+        """Gauge positions along the fault from the record's ``positions`` table
+        (its ``x``), when it has one finite entry per channel; else None."""
+        positions = block.get("positions") if isinstance(block, dict) else None
+        xs = positions.get("x") if isinstance(positions, dict) else None
+        if xs is None or len(xs) != n_channels:
+            return None
+        xs = [float(v) for v in xs]
+        return xs if all(math.isfinite(v) for v in xs) else None
 
     def set_event(self, event_idx: int) -> None:
         """Switch events, but refuse (with a warning) an event without strain data.
@@ -162,7 +174,7 @@ class DynamicStrainArrivalPickerView(EventView):
             if self.axs is None:  # first load: nothing to show, do not leave a dead window
                 self.on_close()
             raise ValueError(f"{self.event_path} has no strain data to pick arrivals on")
-        original = strain["original"]
+        store = waveform_store(strain)
 
         # saved channel state lives in the strain dict, not on the event
         if "enabled_channels" in strain:
@@ -173,8 +185,8 @@ class DynamicStrainArrivalPickerView(EventView):
             self.fitting_channels = [bool(v) for v in strain["fitting_channels"]]
         else:
             self.fitting_channels = None
-        if "picked_idx" in original:
-            self.picked_idx = [int(v) for v in original["picked_idx"]]
+        if "picked_idx" in store:
+            self.picked_idx = [int(v) for v in store["picked_idx"]]
         else:
             self.picked_idx = None
 
@@ -228,7 +240,6 @@ class DynamicStrainArrivalPickerView(EventView):
     def plot(self):
         exp_number = self.exp_number()
         strain = self.strain_block(self.event)
-        original = strain["original"]
         linestyle = ".-"
 
         self.figure.clear()
@@ -251,8 +262,8 @@ class DynamicStrainArrivalPickerView(EventView):
         disp = np.asarray(self.event["displacement"])
         self.axs[3].plot(t, disp - disp[0], linestyle, color="C0")
 
-        tt = np.asarray(original["time"]) - event_time
-        y = np.array(original["raw"], dtype=float, copy=True)
+        tt = waveform_time(strain) - event_time
+        y = np.array(waveform_data(strain), dtype=float, copy=True)
         n_channels = y.shape[0]
 
         if self.enabled_channels is None or len(self.enabled_channels) != n_channels:
@@ -260,7 +271,7 @@ class DynamicStrainArrivalPickerView(EventView):
         if self.fitting_channels is None or len(self.fitting_channels) != n_channels:
             self.fitting_channels = self.default_fitting_channels(n_channels, exp_number)
         if "locations" not in strain or len(strain["locations"]) != n_channels:
-            strain["locations"] = self.default_locations(n_channels, exp_number)
+            strain["locations"] = self.block_locations(strain, n_channels) or self.default_locations(n_channels, exp_number)
 
         if self.filtering:
             nf = self.filter_window()
@@ -453,12 +464,12 @@ class DynamicStrainArrivalPickerView(EventView):
     # ---------------------------------------------------------------- save
     def save(self):
         strain = self.strain_block(self.event)
-        original = strain["original"]
+        store = waveform_store(strain)
         picked = [int(i) for i in self.picked_idx]
         strain["enabled_channels"] = [bool(v) for v in self.enabled_channels]
         strain["fitting_channels"] = [bool(v) for v in self.fitting_channels]
-        original["picked_idx"] = picked
-        original["rupture_arrival_time"] = np.asarray(original["time"])[picked]
+        store["picked_idx"] = picked
+        store["rupture_arrival_time"] = waveform_time(strain)[picked]
         if self.has_rupture_speed():
             rupture_speed = float(self.rupture_speed)
             self.data_manager.set_data(f"{self.event_path}/rupture_speed", rupture_speed, True)
