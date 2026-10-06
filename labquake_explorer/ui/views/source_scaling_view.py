@@ -5,7 +5,8 @@ the PZT spectrum view (``event['pzt_spectrum']['channels'][ch]['source']``:
 seismic moment, Mw, source radius, stress drop; the corner frequency and its
 quality flags come from the same channel record's ``fit``) together with the
 mechanical results of the event analyser (``event['event_analysis']``:
-stress drop and coseismic slip).  It plots a chosen quantity against seismic
+``-delta_y`` and ``delta_x`` of a version 3 record run on stress against
+slip, ``stress_drop`` and ``displacement`` of older records).  It plots a chosen quantity against seismic
 moment on log-log axes, fits a power law with
 :mod:`labquake_explorer.analysis.scaling` and, for the corner frequency,
 draws the constant-stress-drop reference ``fc ~ M0^-1/3`` through the
@@ -317,6 +318,10 @@ def mechanical_values(event: dict, trend: bool = False) -> dict[str, float]:
     mech = event.get(MECH_KEY) if isinstance(event, dict) else None
     if not isinstance(mech, dict):
         return {"mech_stress_drop": nan, "mech_slip": nan}
+    if "delta_y" in mech or "delta_x" in mech:          # version 3: plain differences, no trend values
+        if trend:
+            return {"mech_stress_drop": nan, "mech_slip": nan}
+        return {"mech_stress_drop": -_finite(mech.get("delta_y")), "mech_slip": _finite(mech.get("delta_x"))}
     if trend:
         return {"mech_stress_drop": _finite(mech.get("stress_drop_trend")),
                 "mech_slip": _finite(mech.get("displacement_trend"))}

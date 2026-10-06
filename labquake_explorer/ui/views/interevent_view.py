@@ -37,12 +37,12 @@ class InterEventView(RunView):
     Each event is sampled ``delay`` seconds after its ``event_time`` by a
     mean over ``width`` seconds; the per-cycle value is the difference to the
     previous event.  Coseismic slip comes from each event's saved
-    ``event_analysis['displacement']`` when that record was analysed on the
-    SAME run signal as the fault-slip combobox (``x_field``, schema v2):
-    creep = slip per cycle - coseismic slip.  Records analysed on another X
-    (e.g. ``LP_displacement`` for machine stiffness, or ``time``) and legacy
-    v1 records (no ``x_field``, unsigned displacement) leave the coseismic
-    slip NaN and are counted in the status line.
+    ``event_analysis['delta_x']`` (``displacement`` in version 2 records) when
+    that record was analysed on the SAME run signal as the fault-slip
+    combobox (``x_field``): creep = slip per cycle - coseismic slip.  Records
+    analysed on another X (e.g. ``LP_displacement`` for machine stiffness, or
+    ``time``) and legacy v1 records (no ``x_field``, unsigned displacement)
+    leave the coseismic slip NaN and are counted in the status line.
     Saved under ``runs/[r]['interevent']``.
     """
 
@@ -127,11 +127,11 @@ class InterEventView(RunView):
     def coseismic_slips(self, n: int, slip_field: str) -> tuple[np.ndarray, dict]:
         """Per-event coseismic slip from saved ``event_analysis`` records.
 
-        Only a record analysed on ``slip_field`` (``x_field == slip_field``,
-        schema v2) is used: ``displacement`` is X(rupture end) - X(rupture
-        start) of WHATEVER X the analyser was run on, so a record analysed on
-        ``LP_displacement`` or ``time`` is not a fault slip.  Legacy v1
-        records (no ``x_field``, unsigned displacement) are skipped too.
+        Only a record analysed on ``slip_field`` (``x_field == slip_field``)
+        is used: ``delta_x`` (``displacement`` in version 2 records) is
+        X(end) - X(start) of WHATEVER X the analyser was run on, so a record
+        analysed on ``LP_displacement`` or ``time`` is not a fault slip.
+        Legacy v1 records (no ``x_field``, unsigned displacement) are skipped too.
         Returns ``(slips, skipped)`` with ``skipped`` mapping a reason text
         to the number of events it applies to.
         """
@@ -139,7 +139,10 @@ class InterEventView(RunView):
         skipped: dict[str, int] = {}
         for j, event in enumerate(event_list(self.run)[:n]):
             analysis = event.get("event_analysis") if isinstance(event, dict) else None
-            if not isinstance(analysis, dict) or "displacement" not in analysis:
+            if not isinstance(analysis, dict):
+                continue
+            key = "delta_x" if "delta_x" in analysis else ("displacement" if "displacement" in analysis else None)
+            if key is None:
                 continue
             x_field = analysis.get("x_field")
             if x_field is None:
@@ -152,7 +155,7 @@ class InterEventView(RunView):
                 skipped[reason] = skipped.get(reason, 0) + 1
                 continue
             try:
-                out[j] = float(analysis["displacement"])
+                out[j] = float(analysis[key])
             except (TypeError, ValueError):
                 pass
         return out, skipped

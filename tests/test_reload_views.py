@@ -59,15 +59,14 @@ def populated(app_with_strain, tmp_path):
         finally:
             pv.on_close()
 
-    # event analyser with Theil-Sen, applied to all events
+    # event analyser, applied to all events
     ea = EventAnalyzerView(app, 0, 1)
     try:
-        ea.fit_combo.set("Theil-Sen")
-        for point, t_rel in ((0, -4.0), (1, -1.0), (4, -0.001), (5, 0.001), (6, 0.5), (7, 2.5)):
+        for point, t_rel in ((0, -4.0), (1, -1.0), (4, -0.001), (5, 0.001)):
             ea.move_point(point, int(np.argmin(np.abs(ea.data_t - ea.event["event_time"] - t_rel))))
         assert ea.apply_to_all_events(confirm=False) == len(events)
         expected["picks"] = list(ea.picked_idx)
-        expected["stress_drop"] = ea.result["stress_drop"]
+        expected["delta_y"] = ea.result["delta_y"]
     finally:
         ea.on_close()
 
@@ -133,15 +132,14 @@ def test_views_reopen_after_hdf5_reload(populated, app_from_file, tmp_path):
     finally:
         pv.on_close()
 
-    # event analyser: picks, fit method and fields restored
+    # event analyser: picks and fields restored
     ea = EventAnalyzerView(app2, 0, 1)
     try:
         assert ea.picked_idx == expected["picks"]
-        assert ea.fit_combo.get() == "Theil-Sen"
         assert ea.data_x_combo.get() == "displacement" and ea.data_y_combo.get() == "shear_stress"
-        assert float(ea.stress_drop_text.get()) == pytest.approx(expected["stress_drop"], rel=1e-5)
+        assert float(ea.delta_y_text.get()) == pytest.approx(expected["delta_y"], rel=1e-5)
         ea.save_event()
-        assert events[1]["event_analysis"]["fit_method"] == "theilsen"
+        assert events[1]["event_analysis"]["version"] == 3
     finally:
         ea.on_close()
 

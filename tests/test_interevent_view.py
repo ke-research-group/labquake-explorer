@@ -34,7 +34,7 @@ def test_creep_uses_saved_event_analysis(app):
     truth = app.truth[0]
     events = app.data_manager.get_data("runs/[0]/events")
     for event in events:
-        event["event_analysis"] = {"version": 2, "x_field": "displacement", "displacement": truth.slip}
+        event["event_analysis"] = {"version": 3, "x_field": "displacement", "delta_x": truth.slip}
     v = InterEventView(app, 0)
     creep = v.result["creep"]
     assert np.isnan(creep[0])
@@ -47,7 +47,7 @@ def test_creep_uses_saved_event_analysis(app):
 
 
 def test_creep_ignores_event_analysis_on_another_x_field(app):
-    """``event_analysis['displacement']`` is X(end) - X(start) of WHATEVER X the
+    """``event_analysis['delta_x']`` is X(end) - X(start) of WHATEVER X the
     analyser ran on: a record analysed on LP_displacement (machine stiffness)
     or time is not a fault slip and must not be subtracted from the
     per-cycle slip of ``run['displacement']``."""
@@ -58,7 +58,7 @@ def test_creep_ignores_event_analysis_on_another_x_field(app):
     ea = EventAnalyzerView(app, 0, 1, item_x="LP_displacement")
     try:
         i_ev = int(np.argmin(np.abs(ea.data_t - ea.event["event_time"])))
-        for point, t_rel in ((0, -4.0), (1, -1.0), (6, 0.5), (7, 2.5)):
+        for point, t_rel in ((0, -4.0), (1, -1.0)):
             ea.move_point(point, int(np.argmin(np.abs(ea.data_t - ea.event["event_time"] - t_rel))))
         ea.move_point(4, i_ev - 2)
         ea.move_point(5, i_ev + 2)
@@ -67,7 +67,7 @@ def test_creep_ignores_event_analysis_on_another_x_field(app):
         ea.on_close()
     saved = events[1]["event_analysis"]
     assert saved["x_field"] == "LP_displacement"
-    assert abs(saved["displacement"]) < 1.0            # LP advance over 4 samples, not the 30 um slip
+    assert abs(saved["delta_x"]) < 1.0                 # LP advance over 4 samples, not the 30 um slip
 
     v = InterEventView(app, 0)
     try:
@@ -85,9 +85,9 @@ def test_creep_ignores_event_analysis_on_another_x_field(app):
         r = v.result
         assert r["coseismic_field"] == "LP_displacement" and r["coseismic_skipped"] == {}
         assert np.all(np.isfinite(r["coseismic_slip"]))
-        assert r["coseismic_slip"][1] == pytest.approx(saved["displacement"])
+        assert r["coseismic_slip"][1] == pytest.approx(saved["delta_x"])
         assert r["creep"][1:] == pytest.approx(
-            [truth.lp_velocity * 12.0 - saved["displacement"]] * (len(events) - 1), rel=1e-6)
+            [truth.lp_velocity * 12.0 - saved["delta_x"]] * (len(events) - 1), rel=1e-6)
     finally:
         v.on_close()
 

@@ -34,9 +34,9 @@ file untouched).
 
 - Load and analyze labquake data stored in NPZ and HDF5 formats
 - Pick events on a run and extract event windows
-- Event Analyzer: loading/unloading stiffness, stress drop and slip from
-  draggable ranges, plus trend-extrapolated stress drop and slip; apply one
-  set of windows to all events of a run
+- Event Analyzer: slopes and differences of any two event fields over
+  draggable ranges (stiffness, stress drop and slip when run on stress against
+  slip); apply one set of ranges to all events of a run
 - Inter-event Metrics: recurrence, load-point advance, fault slip and creep
   per stick-slip cycle
 - Pick dynamic strain arrivals and estimate rupture speed

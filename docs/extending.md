@@ -110,29 +110,29 @@ What the Pick Events form last saved, and what it starts from when reopened:
 wrote). Save picks updates `event_indices` only; Extract writes the whole
 record.
 
-### `event_analysis` (EventAnalyzerView, version 2)
+### `event_analysis` (EventAnalyzerView, version 3)
 
-Sign convention: stress drop positive, slip positive. Windows are times in
-seconds relative to `event_time`.
+Six picked samples on the event slice and what they give on the chosen
+fields, nothing more. The numbers are slopes and differences of whatever
+`x_field` and `y_field` were: with fault slip on X and shear stress on Y the
+slopes are stiffnesses, `delta_x` the coseismic slip and `-delta_y` the
+stress drop.
 
 | key | meaning |
 |---|---|
-| `version` | 2 |
-| `x_field`, `y_field`, `fit_method` | fields plotted and `ols` or `theilsen` |
-| `loading_indices`, `unloading_indices`, `rupture_start_index`, `rupture_end_index`, `post_indices` | picked sample indices on the event slice |
-| `loading_window`, `unloading_window`, `rupture_window`, `post_window` | the same as relative times |
-| `loading_stiffness`, `loading_fit` | dY/dX over the loading range and the full fit record (slope, intercept, r2, stderr, n, x_range, valid, reason) |
-| `unloading_stiffness`, `unloading_fit` | same over the unloading range |
-| `stress_drop` | Y(rupture start) - Y(rupture end) |
-| `displacement` | X(rupture end) - X(rupture start) |
-| `stress_drop_trend` | pre-trend(t_event) - post-trend(t_event); trends are Y(t) lines over the loading and post ranges |
-| `displacement_trend` | post-trend_X(t_event) - pre-trend_X(t_event); the same trend lines fitted to X(t), subtracted in the reversed order so slip is positive (creep-corrected coseismic slip) |
-| `pre_trend`, `post_trend`, `pre_trend_x`, `post_trend_x` | fit records of the four trend lines |
+| `version` | 3 |
+| `x_field`, `y_field` | the fields plotted |
+| `loading_indices`, `unloading_indices` | inclusive index ranges of the two slopes |
+| `delta_indices` | the two samples differenced (start, end) |
+| `loading_slope`, `unloading_slope` | dY/dX by least squares over each range (NaN when degenerate) |
+| `delta_x`, `delta_y` | X and Y at `delta_indices[1]` minus at `delta_indices[0]` |
 
-Version 1 dicts (six indices, absolute `stress_drop`) are still read; the post
-range falls back to defaults. "Apply to All Events" converts the current
-windows (relative times) to picks on every event of the run and saves each
-result, so one carefully placed set of windows can be propagated.
+Version 1 and 2 records (`rupture_start_index`/`rupture_end_index`,
+`stress_drop`, `displacement`, trend fits) are still read for their picks;
+the inter-event and scaling views take `displacement`/`stress_drop` from
+them and `delta_x`/`-delta_y` from version 3. "Apply to All Events" turns
+the current picks into times relative to the event, places them on every
+event of the run and saves each result.
 
 ### Pick Arrivals (DynamicStrainArrivalPickerView, no result key)
 
@@ -155,7 +155,7 @@ Arrivals has saved one. A legacy list of eight values is still read.
 
 `delay_s`, `width_s`, `lp_field`, `slip_field`, `event_times`, `recurrence`,
 `lp_after`, `slip_after`, `lp_per_cycle`, `slip_per_cycle`, `coseismic_slip`
-(from each event's `event_analysis.displacement`, used only when that
+(from each event's `event_analysis.delta_x`, `displacement` in older records, used only when that
 analysis was computed on the same X field, recorded as `coseismic_field`;
 events skipped for that reason are listed in `coseismic_skipped`), `creep`. Each event is
 sampled by a mean over `width_s` starting `delay_s` after its `event_time`;

@@ -6,7 +6,7 @@ what to display and save.
 """
 from labquake_explorer.analysis.fitting import LinearFit, linear_fit
 from labquake_explorer.analysis.event_metrics import (
-    EventPicks, TrendDrop, analyze_event, trend_drop, RESULT_VERSION,
+    EventPicks, analyze_event, picks_from_result, picks_from_windows, windows_from_picks, RESULT_VERSION,
 )
 from labquake_explorer.analysis.interevent import interevent_metrics, sample_after, creep_per_cycle
 from labquake_explorer.analysis.scaling import PowerLawFit, fit_power_law, bootstrap_exponent, reference_line
@@ -23,7 +23,7 @@ from labquake_explorer.analysis.source import (
 
 __all__ = [
     "LinearFit", "linear_fit",
-    "EventPicks", "TrendDrop", "analyze_event", "trend_drop", "RESULT_VERSION",
+    "EventPicks", "analyze_event", "picks_from_result", "picks_from_windows", "windows_from_picks", "RESULT_VERSION",
     "interevent_metrics", "sample_after", "creep_per_cycle",
     "PowerLawFit", "fit_power_law", "bootstrap_exponent", "reference_line",
     "WindowResult", "Calibration", "SpectrumResult", "SpectralFit",

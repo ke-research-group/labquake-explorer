@@ -746,3 +746,15 @@ def test_close_unregisters(app, view):
     assert view in app.child_windows
     view.on_close()
     assert view not in app.child_windows
+
+
+def test_mechanical_values_read_version_3_records():
+    from labquake_explorer.ui.views.source_scaling_view import mechanical_values
+    v3 = {"event_analysis": {"version": 3, "x_field": "slip/slip_1", "y_field": "shear_stress",
+                             "delta_x": 30.0, "delta_y": -0.4}}
+    assert mechanical_values(v3) == {"mech_stress_drop": pytest.approx(0.4), "mech_slip": 30.0}
+    trend = mechanical_values(v3, trend=True)
+    assert np.isnan(trend["mech_stress_drop"]) and np.isnan(trend["mech_slip"])
+    v2 = {"event_analysis": {"version": 2, "stress_drop": 0.4, "displacement": 30.0,
+                             "stress_drop_trend": 0.5, "displacement_trend": 60.0}}
+    assert mechanical_values(v2, trend=True) == {"mech_stress_drop": 0.5, "mech_slip": 60.0}
