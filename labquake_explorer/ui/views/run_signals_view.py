@@ -24,6 +24,7 @@ import numpy as np
 from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import RUN
 from labquake_explorer.ui.views.base import RunView
+from labquake_explorer.data.picks import picked_indices
 from labquake_explorer.data.channels import aligned_fields, get_field
 
 X_TIME = "time"
@@ -97,17 +98,13 @@ def event_times(run: dict) -> np.ndarray:
     """One time per event of the run; NaN where an event has no usable time.
 
     Each entry of ``run['events']`` contributes its ``event_time``; an event
-    without one falls back to ``run['time'][run['event_indices'][i]]`` for the
-    same position ``i``.  Without an ``events`` list every ``event_indices``
-    entry is used.  The length of the result is the number of events known to
+    without one falls back to ``run['time'][picks[i]]`` for the same position
+    ``i``, the picks being ``event_extraction['event_indices']`` (or the legacy
+    top-level ``event_indices``).  Without an ``events`` list every pick is used.  The length of the result is the number of events known to
     the run, so callers can report how many could not be placed.
     """
     time = np.asarray(run.get("time", []), dtype=float).ravel() if isinstance(run, dict) else np.array([])
-    indices = run.get("event_indices") if isinstance(run, dict) else None
-    try:
-        idx = np.asarray(indices, dtype=float).ravel() if indices is not None else np.array([])
-    except (TypeError, ValueError):
-        idx = np.array([])
+    idx = np.asarray(picked_indices(run), dtype=float)
 
     def time_at(i: int) -> float:
         if i >= idx.size or not np.isfinite(idx[i]):

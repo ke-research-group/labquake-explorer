@@ -56,7 +56,7 @@ class StickSlipRun:
             "LP_velocity": self.LP_velocity,
             "normal_stress": self.normal_stress,
             "friction": self.shear_stress / self.normal_stress,
-            "event_indices": list(self.event_indices),
+            "event_extraction": {"version": 1, "event_indices": list(self.event_indices)},
         }
         d.update(self.extra)
         return d
@@ -136,13 +136,13 @@ def extract_events(run: dict, window: float) -> list[dict]:
     """Slice a run dict into event dicts the way EventProcessor does (no strain)."""
     events = []
     time = run["time"]
-    for idx in run["event_indices"]:
+    for idx in run["event_extraction"]["event_indices"]:
         event_time = time[idx]
         beg = int(np.argmin(np.abs(event_time - window - time)))
         end = int(np.argmin(np.abs(event_time + window - time)))
         event = {"event_time": event_time, "time": time[beg:end]}
         for key, value in run.items():
-            if key in ("time", "events", "event_indices"):
+            if key in ("time", "events", "event_extraction"):
                 continue
             if isinstance(value, np.ndarray) and value.shape == time.shape:
                 event[key] = value[beg:end]
@@ -159,6 +159,8 @@ def make_experiment(name: str = "p0001", n_runs: int = 1, window: float = 5.0, *
         run = ssr.as_dict()
         run["name"] = f"run{i:02d}"
         run["events"] = extract_events(run, window)
+        run["event_extraction"].update({"start_s": -float(window), "end_s": float(window), "x_field": "time",
+                                        "y_field": "shear_stress", "n_events": len(run["events"])})
         runs.append(run)
         truth.append(ssr)
     return {"name": name, "runs": runs}, truth

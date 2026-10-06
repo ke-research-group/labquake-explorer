@@ -8,7 +8,7 @@
 2. Decorate it with `@register_view(label, kinds=[...])` from
    `labquake_explorer/ui/actions.py`. `kinds` are tree-node kinds from
    `labquake_explorer/ui/context.py` (`EVENT`, `RUN`, `RUN_ARRAY`,
-   `EVENT_ARRAY`, `EVENT_INDICES`, `ARRAY`, `STRING`). The main window builds
+   `EVENT_ARRAY`, `EVENT_EXTRACTION`, `ARRAY`, `STRING`). The main window builds
    the right-click menu for a node from the registry; nothing else to edit.
 3. Import the module in `labquake_explorer/ui/views/__init__.py` so it is
    registered at start-up.
@@ -81,7 +81,7 @@ looks like this:
 | `units` | unit of every top-level array and channel array |
 | `calibration` | the steps that produced the physical channels (see the preprocessing package) |
 | `sources` | `{recorder key: format}` |
-| `event_indices`, `events`, `event_extraction` | picks, extracted events, and the Pick Events form's record (schema below) |
+| `event_extraction`, `events` | the Pick Events form's record, with the picks (`event_indices`) inside (schema below), and the extracted events |
 
 A **channel array** (`labquake_explorer/data/channels.py`) is a dict with
 `data` shaped `(n_channels, n)`, `channels` naming the rows, `unit`, and an
@@ -104,11 +104,14 @@ place a field can live.
 ### `event_extraction` (EventPickerView, run level, version 1)
 
 What the Pick Events form last saved, and what it starts from when reopened:
-`event_indices` (the picks, also kept at the run's top level), `start_s` and
+`event_indices` (the picks, sample indices on the run's time axis), `start_s` and
 `end_s` (the window around each pick, seconds, start negative), `x_field` and
 `y_field` (the series shown), `n_events` (how many events the last Extract
 wrote). Save picks updates `event_indices` only; Extract writes the whole
-record.
+record. Older files that kept `event_indices` at the run's top level (and the
+window under `event_window`) are read; saving moves both into the record.
+`labquake_explorer/data/picks.py` gives readers `picked_indices(run)` for
+either layout.
 
 ### `event_analysis` (EventAnalyzerView, version 3)
 

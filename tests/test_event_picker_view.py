@@ -1,4 +1,3 @@
-import numpy as np
 import pytest
 
 from labquake_explorer.ui.actions import actions_for
@@ -41,7 +40,7 @@ def test_opened_from_array_run_and_event_indices(app):
     v = open_from(app, "runs/[0]/friction")
     assert isinstance(v, EventPickerView) and v.y_combo.get() == "friction"
     v.on_close()
-    for path in ("runs/[0]", "runs/[0]/event_indices"):
+    for path in ("runs/[0]", "runs/[0]/event_extraction", "runs/[0]/event_extraction/event_indices"):
         v = open_from(app, path)
         assert isinstance(v, EventPickerView) and v.run_idx == 0 and v.y_combo.get() == "shear_stress"
         v.on_close()
@@ -63,7 +62,7 @@ def test_picks_stay_sorted_and_follow_edits(app, view):
     assert view.event_combo.get() == "0"
     view.on_picks_changed("move", 1)
     assert view.picks[0] == 1 and view.event_combo.get() == "0"
-    assert app.data_manager.get_data("runs/[0]/event_indices") == saved
+    assert app.data_manager.get_data("runs/[0]/event_extraction/event_indices") == saved
 
 
 def test_zoom_survives_a_replot(app, view):
@@ -114,7 +113,7 @@ def test_extract_saves_picks_and_uses_the_window(app, view):
     view.picker.add_point(5)
     n = view.extract(confirm=False)
     assert n == len(truth.event_indices) + 1
-    assert app.data_manager.get_data("runs/[0]/event_indices") == view.picks
+    assert app.data_manager.get_data("runs/[0]/event_extraction/event_indices") == view.picks
     events = app.data_manager.get_data("runs/[0]/events")
     assert len(events) == n
     e = events[2]                                       # the second original event
@@ -150,14 +149,14 @@ def test_bad_window_is_reported(app, view):
 
 def test_without_picks(app):
     run = app.data_manager.get_data("runs/[0]")
-    del run["event_indices"]
+    del run["event_extraction"]
     v = EventPickerView(app, 0)
     assert v.picks == [] and v.event_combo.get() == ""
     assert v.extract_button.instate(["disabled"]) and v.extract(confirm=False) == 0
     v.picker.add_point(100)
     assert not v.extract_button.instate(["disabled"]) and v.event_combo.get() == "0"
     v.save_picks()
-    assert app.data_manager.get_data("runs/[0]/event_indices") == [100]
+    assert app.data_manager.get_data("runs/[0]/event_extraction/event_indices") == [100]
     v.on_close()
 
 
@@ -245,33 +244,31 @@ def test_markers_follow_the_axes_limits(app, view):
 
 def test_form_starts_from_the_extraction_record(app):
     run = app.data_manager.get_data("runs/[0]")
-    picks = [int(i) for i in run["event_indices"]]
+    picks = [int(i) for i in run["event_extraction"]["event_indices"]]
     run["event_extraction"] = {"version": 1, "event_indices": picks[1:], "start_s": -2.0, "end_s": 3.0,
                                "x_field": "index", "y_field": "friction", "n_events": 3}
-    v = EventPickerView(app, 0)                        # the run's own event_indices win over the record's copy
-    assert v.picks == picks and v.start_var.get() == "-2" and v.end_var.get() == "3"
-    assert v.x_combo.get() == "index" and v.y_combo.get() == "friction"
-    v.on_close()
-    del run["event_indices"]
-    v = EventPickerView(app, 0)                        # without them the record's picks are used
-    assert v.picks == picks[1:]
-    v.on_close()
-    # Save picks refreshes the record's copy and keeps the rest of the record
     v = EventPickerView(app, 0)
+    assert v.picks == picks[1:] and v.start_var.get() == "-2" and v.end_var.get() == "3"
+    assert v.x_combo.get() == "index" and v.y_combo.get() == "friction"
+    # Save picks refreshes the record's picks and keeps the rest of the record
     v.picker.add_point(7)
     v.save_picks()
     record = app.data_manager.get_data("runs/[0]/event_extraction")
     assert record["event_indices"] == [7] + picks[1:] and record["start_s"] == -2.0 and record["n_events"] == 3
-    assert app.data_manager.get_data("runs/[0]/event_indices") == [7] + picks[1:]
+    assert "event_indices" not in run                  # the picks live in the record only
     v.on_close()
-    # a file saved under the record's old name still restores the window; nothing saved means the defaults
+    # an older file: picks at the run's top level and the window under the record's old name
     del run["event_extraction"]
+    run["event_indices"] = picks
     run["event_window"] = {"version": 1, "start_s": -1.0, "end_s": 4.0}
     v = EventPickerView(app, 0)
-    assert v.start_var.get() == "-1" and v.end_var.get() == "4" and v.picks == [7] + picks[1:]
+    assert v.picks == picks and v.start_var.get() == "-1" and v.end_var.get() == "4"
+    v.save_picks()                                     # saving moves everything into event_extraction
+    assert "event_indices" not in run and "event_window" not in run
+    assert run["event_extraction"]["event_indices"] == picks and run["event_extraction"]["start_s"] == -1.0
     v.on_close()
-    del run["event_window"]
-    del run["event_indices"]
+    # nothing saved at all: the defaults
+    del run["event_extraction"]
     v = EventPickerView(app, 0)
     assert v.start_var.get() == "-5" and v.end_var.get() == "5" and v.picks == []
     v.on_close()

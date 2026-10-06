@@ -11,7 +11,7 @@ import numpy as np
 ROOT = "root"
 RUN = "run"                      # runs/[i]
 RUN_ARRAY = "run_array"          # runs/[i]/<array>
-EVENT_INDICES = "event_indices"  # runs/[i]/event_indices
+EVENT_EXTRACTION = "event_extraction"  # runs/[i]/event_extraction and its entries (the picks)
 EVENTS = "events"                # runs/[i]/events
 EVENT = "event"                  # runs/[i]/events/[j] or a non-array child of it
 EVENT_ARRAY = "event_array"      # runs/[i]/events/[j]/<array>
@@ -19,7 +19,7 @@ ARRAY = "array"                  # top-level array
 STRING = "string"                # any string value
 OTHER = "other"
 
-KINDS = (ROOT, RUN, RUN_ARRAY, EVENT_INDICES, EVENTS, EVENT, EVENT_ARRAY, ARRAY, STRING, OTHER)
+KINDS = (ROOT, RUN, RUN_ARRAY, EVENT_EXTRACTION, EVENTS, EVENT, EVENT_ARRAY, ARRAY, STRING, OTHER)
 
 
 @dataclass(frozen=True)
@@ -97,14 +97,16 @@ def resolve_context(path: str, value: Any = None) -> TreeContext:
     elif run_idx is not None and len(parts) == 2:
         kind = RUN
     elif run_idx is not None and len(parts) == 3:
-        if key == "event_indices":
-            kind = EVENT_INDICES
+        if key == "event_extraction":
+            kind = EVENT_EXTRACTION
         elif key == "events":
             kind = EVENTS
         elif _is_array(value):
             kind = RUN_ARRAY
         else:
             kind = OTHER
+    elif run_idx is not None and len(parts) == 4 and parts[2] == "event_extraction":
+        kind = EVENT_EXTRACTION                 # an entry of the record (the picks) opens the same form
     elif event_idx is not None and len(parts) == 4:
         kind = EVENT
     elif event_idx is not None and len(parts) == 5:

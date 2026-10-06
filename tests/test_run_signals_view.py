@@ -1,4 +1,6 @@
 import numpy as np
+
+from labquake_explorer.data.picks import picked_indices
 import pytest
 from matplotlib.lines import Line2D
 
@@ -117,7 +119,7 @@ def test_open_lists_candidates_and_plots_default(app, view):
     for expected in ("shear_stress", "displacement", "LP_displacement", "LP_velocity",
                      "normal_stress", "friction"):
         assert expected in listed
-    for excluded in ("events", "event_indices", "name", "time"):
+    for excluded in ("events", "event_extraction", "name", "time"):
         assert excluded not in listed
     x_values = list(view.x_combo["values"])
     assert x_values[:2] == ["time", "index"]
@@ -189,7 +191,7 @@ def test_x_axis_lp_displacement(app, view):
     view.plot_button.invoke()
     np.testing.assert_array_equal(view.signal_lines[0].get_xdata(), run["LP_displacement"])
     assert view.ax.get_xlabel() == "LP_displacement"
-    expected = run["LP_displacement"][np.asarray(run["event_indices"])]
+    expected = run["LP_displacement"][np.asarray(picked_indices(run))]
     marker_x = sorted(l.get_xdata()[0] for l in view.event_lines)
     assert marker_x == pytest.approx(sorted(expected))
     # sample index axis
@@ -349,7 +351,7 @@ def test_status_reports_unmarkable_events(app, view):
         # an event whose x sample is NaN cannot be marked either
         run["events"].pop()
         x = np.array(run["LP_displacement"], dtype=float)
-        x[np.asarray(run["event_indices"])[0]] = np.nan
+        x[np.asarray(picked_indices(run))[0]] = np.nan
         run["lp_gappy"] = x
         view.refresh_candidates()
         view.x_combo.set("lp_gappy")
@@ -425,9 +427,9 @@ def test_event_indices_fallback_marks_events(app):
     idx = _add_run(app, run)
     v = RunSignalsView(app, idx)
     try:
-        assert len(v.event_lines) == len(run["event_indices"])
+        assert len(v.event_lines) == len(picked_indices(run))
         marker_x = sorted(l.get_xdata()[0] for l in v.event_lines)
-        expected = np.asarray(run["time"])[np.asarray(run["event_indices"])]
+        expected = np.asarray(run["time"])[np.asarray(picked_indices(run))]
         assert marker_x == pytest.approx(sorted(expected))
         assert "not markable" not in v.status_var.get()
     finally:
@@ -440,7 +442,7 @@ def test_unsorted_time_axis_marks_events_at_the_right_sample(app):
     k = n // 3
     perm = np.r_[np.arange(k, n), np.arange(k)]          # a clock reset mid-run
     run = {key: (np.asarray(val)[perm] if key in signal_candidates(base) else val)
-           for key, val in base.items() if key not in ("events", "event_indices")}
+           for key, val in base.items() if key not in ("events", "event_extraction")}
     run["name"] = "run_clock_reset"
     run["events"] = [{"event_time": float(e["event_time"])} for e in base["events"]]
     idx = _add_run(app, run)

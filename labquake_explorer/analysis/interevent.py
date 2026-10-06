@@ -16,6 +16,8 @@ from typing import Mapping, Optional
 
 import numpy as np
 
+from labquake_explorer.data.picks import picked_indices
+
 RESULT_VERSION = 1
 
 
@@ -109,7 +111,8 @@ def creep_per_cycle(slip_per_cycle, coseismic_slip) -> np.ndarray:
 
 
 def event_times_from_run(run: Mapping) -> Optional[np.ndarray]:
-    """Event times of a run dict: from ``events[*].event_time``, else ``time[event_indices]``."""
+    """Event times of a run dict: from ``events[*].event_time``, else ``time`` at the picks
+    (``event_extraction['event_indices']``, or the legacy top-level ``event_indices``)."""
     events = run.get("events")
     if events is not None and len(events) > 0:
         times = []
@@ -119,7 +122,7 @@ def event_times_from_run(run: Mapping) -> Optional[np.ndarray]:
             except (KeyError, TypeError, ValueError):
                 return None
         return np.asarray(times)
-    indices = run.get("event_indices")
-    if indices is not None and len(indices) > 0 and "time" in run:
+    indices = picked_indices(run)
+    if len(indices) > 0 and "time" in run:
         return np.asarray(run["time"], dtype=float)[np.asarray(indices, dtype=int)]
     return None

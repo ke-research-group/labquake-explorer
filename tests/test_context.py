@@ -20,7 +20,9 @@ def test_split_path_handles_separators_and_empties():
         ("runs", None, C.OTHER, None, None),
         ("runs/[2]", {}, C.RUN, 2, None),
         ("runs/[2]/shear_stress", np.arange(10), C.RUN_ARRAY, 2, None),
-        ("runs/[2]/event_indices", [1, 2, 3], C.EVENT_INDICES, 2, None),
+        ("runs/[2]/event_extraction", {}, C.EVENT_EXTRACTION, 2, None),
+        ("runs/[2]/event_extraction/event_indices", [1, 2, 3], C.EVENT_EXTRACTION, 2, None),
+        ("runs/[2]/event_indices", [1, 2, 3], C.RUN_ARRAY, 2, None),          # legacy picks: just an array
         ("runs/[2]/events", [{}, {}], C.EVENTS, 2, None),
         ("runs/[2]/name", "run02", C.STRING, 2, None),
         ("runs/[2]/strain", {}, C.OTHER, 2, None),
@@ -56,8 +58,8 @@ def test_backslash_paths_resolve_like_slash_paths():
     ctx = resolve_context("runs\\[0]\\shear_stress", np.arange(10))
     assert ctx.kind == C.RUN_ARRAY and ctx.run_idx == 0
     assert ctx.parent_path == "runs/[0]"
-    ctx = resolve_context("runs\\[0]\\event_indices", [1, 2, 3])
-    assert ctx.kind == C.EVENT_INDICES
+    ctx = resolve_context("runs\\[0]\\event_extraction", {})
+    assert ctx.kind == C.EVENT_EXTRACTION
     assert ctx.parent_path == "runs/[0]"
     ctx = resolve_context("runs\\[0]\\events\\[1]\\displacement", np.arange(10))
     assert ctx.kind == C.EVENT_ARRAY

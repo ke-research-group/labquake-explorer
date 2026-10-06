@@ -1,13 +1,15 @@
 """Pick the events of a run and extract them, in one window.
 
-Opened from a run, one of its arrays or ``event_indices``.  Plots Y against X
+Opened from a run, one of its arrays or ``event_extraction``.  Plots Y against X
 for the whole run; picks are placed on the curve (left double-click adds one
 at the nearest sample, right double-click on a pick removes it, drag moves
 it) and the ``[start, end]`` window of every pick is shaded, the selected one
-highlighted.  "Save picks" writes ``event_indices``; "Extract Events" writes
-the picks and then the events.  Everything the form needs to reopen as it was
-is kept in ``runs/[r]['event_extraction']``: the picks, start and end, the
-series shown and how many events the last extraction wrote.
+highlighted.  "Save picks" writes the picks; "Extract Events" writes the
+picks and then the events.  Everything the form needs to reopen as it was is
+kept in ``runs/[r]['event_extraction']``: the picks (``event_indices``), start
+and end, the series shown and how many events the last extraction wrote.
+Older files with the picks at the run's top level are read, and saving moves
+them into the record.
 """
 from __future__ import annotations
 
@@ -18,8 +20,9 @@ from typing import Optional
 import numpy as np
 
 from labquake_explorer.data.channels import aligned_fields, get_field
+from labquake_explorer.data.picks import LEGACY_INDICES_KEY, picked_indices
 from labquake_explorer.ui.actions import register_view
-from labquake_explorer.ui.context import EVENT_INDICES, RUN, RUN_ARRAY, TreeContext
+from labquake_explorer.ui.context import EVENT_EXTRACTION, RUN, RUN_ARRAY, TreeContext
 from labquake_explorer.ui.views.base import RunView, event_list
 from labquake_explorer.ui.views.point_picker import PointPicker
 
@@ -30,10 +33,10 @@ ZOOM_FACTOR = 3.0                # "Zoom to event" shows this many windows aroun
 STEP_S = 0.5                     # one tick of the start/end spinboxes
 HELP_TEXT = ("Left double-click on the curve: add a pick at the nearest sample.   "
              "Right double-click on a pick: remove it.   Drag a pick to move it.   "
-             "Save picks writes event_indices; Extract Events writes the picks and then the events.")
+             "Save picks stores the picks; Extract Events stores the picks and then the events.")
 
 
-@register_view("Pick Events", kinds=[RUN, RUN_ARRAY, EVENT_INDICES], order=0)
+@register_view("Pick Events", kinds=[RUN, RUN_ARRAY, EVENT_EXTRACTION], order=0)
 class EventPickerView(RunView):
     window_title = "Pick Events"
     result_key = "event_extraction"
@@ -152,15 +155,11 @@ class EventPickerView(RunView):
         return dict(value) if isinstance(value, dict) else {}
 
     def saved_picks(self) -> list:
-        """The run's picks as sorted ints within the record: ``event_indices``
-        at the run's top level, else those kept in the extraction record."""
-        raw = self.run.get("event_indices")
-        if raw is None:
-            raw = (self.load_results() or {}).get("event_indices")
-        if raw is None or self.time.size == 0:
+        """The run's picks as sorted ints within the record (from the
+        extraction record, or the legacy top-level ``event_indices``)."""
+        if self.time.size == 0:
             return []
-        values = np.asarray(raw).ravel()
-        return sorted({int(i) for i in values if 0 <= int(i) < self.time.size})
+        return sorted({i for i in picked_indices(self.run) if 0 <= i < self.time.size})
 
     def window_s(self) -> tuple[float, float]:
         """``(start, end)`` in seconds relative to the event; ValueError on bad input."""
@@ -215,7 +214,7 @@ class EventPickerView(RunView):
             self.extract_button.state(["disabled"])
 
     def dirty(self) -> bool:
-        """True when the picks differ from the run's ``event_indices``."""
+        """True when the picks differ from the saved ones."""
         return self.picks != self.saved_picks()
 
     def update_status(self, note: str = "") -> None:
@@ -350,17 +349,17 @@ class EventPickerView(RunView):
 
     # ------------------------------------------------------------- saving
     def save_picks(self, refresh: bool = True) -> list:
-        """Write the picks to ``runs/[r]/event_indices`` (a copy, sorted) and
-        into the extraction record, whose other entries are kept."""
+        """Write the picks (a sorted copy) into the extraction record, whose
+        other entries are kept; the legacy top-level keys are removed."""
         self.picker.sort()
         picks = list(self.picks)
-        self.data_manager.set_data(f"{self.run_path}/event_indices", picks, add_key=True)
-        self.run["event_indices"] = picks
         record = dict(self.load_results() or self.legacy_results())
         record.setdefault("version", RESULT_VERSION)
         record["event_indices"] = list(picks)
         self.data_manager.set_data(self.result_path, record, True)
         self.run[self.result_key] = record
+        for legacy in (LEGACY_INDICES_KEY, self.legacy_result_key):
+            self.run.pop(legacy, None)
         if refresh:
             self.app.refresh_tree()
             self.update_status("picks saved")

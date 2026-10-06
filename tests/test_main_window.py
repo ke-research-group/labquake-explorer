@@ -24,12 +24,12 @@ def labels(app, path):
 def test_tree_paths_are_slash_joined(app):
     """Tree paths are data paths (never os.path.join'ed: backslashes on Windows
     would break the context resolver, pick/extract events and delete)."""
-    for path in ("runs/[0]/events/[1]/shear_stress", "runs/[0]/event_indices", "name"):
+    for path in ("runs/[0]/events/[1]/shear_stress", "runs/[0]/event_extraction", "name"):
         item = app.find_item(path)
         full, key = app.get_full_path(item)
         assert full == path and "\\" not in full
         assert key == path.rsplit("/", 1)[-1]
-    assert app.context_at(app.find_item("runs/[0]/event_indices")).parent_path == "runs/[0]"
+    assert app.context_at(app.find_item("runs/[0]/event_extraction")).parent_path == "runs/[0]"
 
 
 def test_right_click_destroys_previous_menu(app, monkeypatch):
@@ -61,7 +61,7 @@ def test_find_item_and_context(app):
 
 def test_context_menus_from_registry(app):
     assert labels(app, "runs/[0]/shear_stress")[1] == ["Pick Events", "Pick Indices", "Extract Slopes"]
-    assert labels(app, "runs/[0]/event_indices")[1] == ["Pick Events"]
+    assert labels(app, "runs/[0]/event_extraction")[1] == ["Pick Events"]
     event_labels = ["Analyze Event", "Pick Arrivals", "Fit Cohesive Zone Model", "PZT Spectrum"]
     assert labels(app, "runs/[0]/events/[0]")[1] == event_labels
     assert labels(app, "runs/[0]/events/[0]/event_time")[1] == event_labels

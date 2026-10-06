@@ -255,14 +255,14 @@ def test_pick_events_action_opens_the_event_picker(app):
     # saving writes a copy into the data manager; later edits stay local
     view.picker.add_point(5)
     view.save_picks()
-    stored = app.data_manager.get_data("runs/[0]/event_indices")
+    stored = app.data_manager.get_data("runs/[0]/event_extraction/event_indices")
     assert stored == sorted([5] + [int(i) for i in truth.event_indices])
     assert stored is not view.picks
     view.picker.remove_point(0)
     view.picker.add_point(7)
-    assert app.data_manager.get_data("runs/[0]/event_indices") == stored
+    assert app.data_manager.get_data("runs/[0]/event_extraction/event_indices") == stored
     view.save_picks()
-    assert app.data_manager.get_data("runs/[0]/event_indices") == sorted([7] + [int(i) for i in truth.event_indices])
+    assert app.data_manager.get_data("runs/[0]/event_extraction/event_indices") == sorted([7] + [int(i) for i in truth.event_indices])
     view.on_close()
 
 
