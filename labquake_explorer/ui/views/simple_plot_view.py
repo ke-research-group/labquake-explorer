@@ -1,36 +1,42 @@
+"""A bare figure window: the main window plots into ``view.ax`` on double-click.
+
+``BaseView`` already registers the window with the application, so callers
+must not append it to ``app.child_windows`` again; ``on_close`` nevertheless
+drops *every* occurrence of the view so a duplicate registration by a caller
+cannot leave a destroyed Toplevel behind in the list.
+"""
 import tkinter as tk
 from tkinter import ttk
-from matplotlib.figure import Figure
+
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.figure import Figure
 
-class SimplePlotView(tk.Toplevel):
-    def __init__(self, parent):
-        self.parent = parent
-        super().__init__(self.parent.root)
-        self.title("Simple Plot")
+from labquake_explorer.ui.views.base import BaseView
 
-        # Matplotlib Figure and Tkinter Canvas
+
+class SimplePlotView(BaseView):
+    """One axes with a navigation toolbar; the caller draws into ``self.ax``."""
+
+    window_title = "Simple Plot"
+
+    def __init__(self, app):
+        super().__init__(app)
         self.figure = Figure(figsize=(5, 4), dpi=100)
         self.ax = self.figure.add_subplot(111)
         self.canvas = FigureCanvasTkAgg(self.figure, master=self)
         self.canvas_widget = self.canvas.get_tk_widget()
-        
-        # Navigation toolbar for zooming and panning
+
         toolbar_frame = ttk.Frame(self)
         toolbar_frame.pack(side=tk.BOTTOM, fill=tk.X)
+        self.toolbar = NavigationToolbar2Tk(self.canvas, toolbar_frame)
+        self.toolbar.update()
+        self.canvas_widget.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=1)
 
-        toolbar = NavigationToolbar2Tk(self.canvas, toolbar_frame)
-        toolbar.update()
-        
-        canvas_widget = self.canvas_widget.get_tk_widget() if hasattr(self.canvas_widget, 'get_tk_widget') else self.canvas_widget
-        canvas_widget.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=1)
-
-
-if __name__ == "__main__":
-    root = tk.Tk()
-    class Parent:
-        def __init__(self, root):
-            self.root = root
-    parent = Parent(root)
-    view = SimplePlotView(parent)
-    root.mainloop()
+    def on_close(self) -> None:
+        # ``unregister_child`` removes one occurrence; guard against a caller
+        # that appended the view a second time (see module docstring).
+        windows = getattr(self.app, "child_windows", None)
+        if windows is not None:
+            while self in windows:
+                windows.remove(self)
+        super().on_close()

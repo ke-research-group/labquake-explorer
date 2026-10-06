@@ -6,6 +6,11 @@ from labquake_explorer.ui.views.slope_analyzer_view import SlopeAnalyzerView
 from labquake_explorer.ui.views.dynamic_strain_arrival_picker_view import DynamicStrainArrivalPickerView
 from labquake_explorer.ui.views.czm_fitter_view import CZMFitterView
 from labquake_explorer.ui.views.event_analyzer_view import EventAnalyzerView
+from labquake_explorer.ui.views.interevent_view import InterEventView
+from labquake_explorer.ui.views.event_picker_view import EventPickerView
+from labquake_explorer.ui.views.run_signals_view import RunSignalsView
+from labquake_explorer.ui.views.pzt_spectrum_view import PZTSpectrumView
+from labquake_explorer.ui.views.source_scaling_view import SourceScalingView
 from labquake_explorer.ui.views.misc import *
 
 __all__ = [
@@ -15,5 +20,10 @@ __all__ = [
     'SlopeAnalyzerView',
     'DynamicStrainArrivalPickerView',
     'CZMFitterView',
-    'EventAnalyzerView'
+    'EventAnalyzerView',
+    'InterEventView',
+    'EventPickerView',
+    'RunSignalsView',
+    'PZTSpectrumView',
+    'SourceScalingView',
 ]

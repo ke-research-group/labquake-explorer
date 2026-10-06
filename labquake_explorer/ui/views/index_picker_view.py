@@ -1,211 +1,228 @@
+"""Pick sample indices on one array plotted against a sibling array.
+
+``ArrayPairView`` is the shared machinery: two comboboxes listing the arrays
+that are siblings of ``item_y`` in the main window's tree, a figure with the
+Y array plotted against the X array (or against its index), and draggable
+markers snapped to samples.  ``IndexPickerView`` reports the picked indices;
+``SlopeAnalyzerView`` (its own module) reports the slope between two picks.
+"""
+from __future__ import annotations
+
 import tkinter as tk
 from tkinter import ttk
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-import matplotlib.pyplot as plt
+from typing import Optional
+
 import matplotlib.patches as patches
 import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-from typing import Optional
-import os
+from matplotlib.figure import Figure
 
-class IndexPickerView(tk.Toplevel):
-    def __init__(self, parent, item_y=None, item_x=None):
-        self.root = parent.root
-        super().__init__(self.root)
-        self.title("Index Picker")
-        self.parent = parent
-        self.data_manager = parent.data_manager
-        
-        # Store the initial full path
-        self.base_path = None
-        if item_y:
-            self.base_path = os.path.dirname(item_y)
-            self.item_y = os.path.basename(item_y)
-        else:
-            self.item_y = None
+from labquake_explorer.ui.views.base import BaseView, nearest_sample
+
+
+def split_item_path(path: Optional[str]) -> tuple[str, Optional[str]]:
+    """'runs/[0]/shear_stress' -> ('runs/[0]', 'shear_stress'); 'x' -> ('', 'x')."""
+    if not path:
+        return "", None
+    path = path.replace("\\", "/").rstrip("/")
+    base, _, name = path.rpartition("/")
+    return base, name
+
+
+class ArrayPairView(BaseView):
+    """Y array vs sibling X array (or index) with draggable, sample-snapped markers.
+
+    Subclasses set ``readout_label`` and implement ``update_readout()``, which
+    is called whenever ``picked_idx`` changes.  ``picked_idx`` holds Python
+    ints; ``data_x`` is the X array or ``arange(len(data_y))`` when no X array
+    is selected.
+    """
+
+    readout_label = "Picked Index"
+    marker_color = "red"
+
+    def __init__(self, app, item_y=None, item_x=None):
+        self.base_path, self.item_y = split_item_path(item_y)
         self.item_x = item_x
+        self.data_x = np.array([])
+        self.data_y = np.array([])
+        self.markers: list[patches.Ellipse] = []
+        self.picked_idx: list[int] = []
+        self.offset = [0.0, 0.0]
+        self.current_artist = None
+        self.currently_dragging = False
+        super().__init__(app)
 
-        # Grid configuration
+        self.build_ui()
+        self.init_comboboxes()
+        self.plot_data()
+        if len(self.data_y) > 0:
+            n = len(self.data_y)
+            self.picked_idx = [int(n / 3), int(n / 3 * 2)]
+        self.plot_picked_points()
+
+        self.canvas.mpl_connect("pick_event", self.on_pick)
+        self.canvas.mpl_connect("motion_notify_event", self.on_motion)
+        self.canvas.mpl_connect("button_press_event", self.on_press)
+        self.canvas.mpl_connect("button_release_event", self.on_release)
+        self.canvas.mpl_connect("resize_event", self.on_resize)
+        self.canvas.mpl_connect("scroll_event", self.on_resize)
+
+    # ------------------------------------------------------------------ ui
+    def build_ui(self):
         self.grid_rowconfigure(2, weight=1)
         self.grid_columnconfigure(2, weight=1)
 
-        # Row 0 - Labels
         tk.Label(self, text="X Data").grid(row=0, column=0, padx=5, pady=5)
         tk.Label(self, text="Y Data").grid(row=0, column=1, padx=5, pady=5)
-        tk.Label(self, text="Picked Index").grid(row=0, column=3, padx=5, pady=5)
+        tk.Label(self, text=self.readout_label).grid(row=0, column=3, padx=5, pady=5)
 
-        # Row 1 - Comboboxes and Textbox
         self.data_x_combo = ttk.Combobox(self, state="readonly")
         self.data_x_combo.grid(row=1, column=0, padx=5, pady=5)
         self.data_y_combo = ttk.Combobox(self, state="readonly")
         self.data_y_combo.grid(row=1, column=1, padx=5, pady=5)
-        self.index_textbox = tk.Entry(self, state="readonly")
-        self.index_textbox.grid(row=1, column=3, padx=5, pady=5)
+        self.readout_textbox = tk.Entry(self, state="readonly")
+        self.readout_textbox.grid(row=1, column=3, padx=5, pady=5)
+        self.data_y_combo.bind("<<ComboboxSelected>>", self.data_y_selected)
+        self.data_x_combo.bind("<<ComboboxSelected>>", self.data_x_selected)
 
-        # Row 2 - Matplotlib Figure and Canvas
-        self.figure = plt.figure()
+        self.figure = Figure()
         self.ax = self.figure.add_subplot(111)
         self.canvas = FigureCanvasTkAgg(self.figure, master=self)
         self.canvas_widget = self.canvas.get_tk_widget()
         self.canvas_widget.grid(row=2, column=0, columnspan=4, padx=5, pady=5, sticky="nsew")
 
-        # Row 3 - Navigation toolbar
         toolbar_frame = ttk.Frame(self)
         toolbar_frame.grid(row=3, column=0, columnspan=4, padx=0, pady=0, sticky="ew")
-        toolbar = NavigationToolbar2Tk(self.canvas, toolbar_frame)
-        toolbar.update()
+        self.toolbar = NavigationToolbar2Tk(self.canvas, toolbar_frame)
+        self.toolbar.update()
 
-        # Data points initialization
-        self.index_y = None
-        self.index_x = None
-        self.data_x = []
-        self.data_y = []
-        self.markers = []
-        self.offset = [0, 0]
-        self.mouse_button_pressed = None
-        self.current_artist = None
-        self.currently_dragging = False
-        self.picked_idx = []
+    # --------------------------------------------------------------- paths
+    def item_path(self, name: str) -> str:
+        return f"{self.base_path}/{name}" if self.base_path else name
 
-        # Initialize UI components
-        self.init_comboboxes()
-        self.plot_data()
-        if len(self.data_y) > 0:
-            self.picked_idx = [int(len(self.data_y)/3), int(len(self.data_y)/3*2)]
-            self.plot_picked_points()
+    def sibling_arrays(self) -> list[str]:
+        """Names of the array-valued siblings of ``item_y`` in the main window's tree."""
+        if not self.item_y:
+            return []
+        tree = self.app.data_tree
+        item = self.app.find_item(self.item_path(self.item_y))
+        if item is None:
+            return []
+        parent_id = tree.parent(item)
+        if parent_id:
+            siblings = tree.get_children(parent_id)
+            self.base_path = self.app.get_full_path(parent_id)[0]
+        else:
+            siblings = tree.get_children("")
+            self.base_path = ""
+        names = []
+        for sibling in siblings:
+            text = tree.item(sibling)["text"]
+            if ":" in text and "array" in text.split(":", 1)[1]:
+                names.append(text.split(":", 1)[0].strip())
+        return names
 
-        # Event bindings
-        self.figure.canvas.mpl_connect('pick_event', self.on_pick)
-        self.figure.canvas.mpl_connect('motion_notify_event', self.on_motion)
-        self.figure.canvas.mpl_connect('button_press_event', self.on_press)
-        self.figure.canvas.mpl_connect('button_release_event', self.on_release)
-        self.figure.canvas.mpl_connect('resize_event', self.on_resize)
-        self.figure.canvas.mpl_connect('scroll_event', self.on_resize)
-        self.data_y_combo.bind("<<ComboboxSelected>>", self.data_y_selected)
-        self.data_x_combo.bind("<<ComboboxSelected>>", self.data_x_selected)
+    def init_comboboxes(self):
+        names = self.sibling_arrays()
+        self.data_x_combo.config(values=names)
+        self.data_y_combo.config(values=names)
+        if self.item_y in names:
+            self.data_y_combo.set(self.item_y)
+        if self.item_x in names:
+            self.data_x_combo.set(self.item_x)
+        elif self.item_x is not None:
+            print(f"Warning: '{self.item_x}' is not a sibling of '{self.item_y}'")
+            self.item_x = None
+        if self.item_x is None:
+            self.item_x = self.default_x(names)
+            if self.item_x is not None:
+                self.data_x_combo.set(self.item_x)
 
-    def data_y_selected(self, event):
-        """Handle Y-data combobox selection"""
+    def default_x(self, names: list[str]) -> Optional[str]:
+        """The X array to start with when none was given (None = sample index)."""
+        return None
+
+    def data_y_selected(self, event=None):
         self.item_y = self.data_y_combo.get()
         self.plot_data()
         self.plot_picked_points()
 
-    def data_x_selected(self, event):
-        """Handle X-data combobox selection"""
-        self.item_x = self.data_x_combo.get()
+    def data_x_selected(self, event=None):
+        self.item_x = self.data_x_combo.get() or None
         self.plot_data()
         self.plot_picked_points()
 
+    # ------------------------------------------------------------- plotting
     def plot_data(self):
-        """Plot the selected data on the matplotlib figure"""
-        if self.item_y is None:
+        if not self.item_y:
             return
-        
+        self.ax.clear()
+        self.markers = []
+        self.data_y = np.asarray(self.data_manager.get_data(self.item_path(self.item_y)))
         if self.item_x is None:
-            self.ax.clear()
-            y_path = os.path.join(self.base_path, self.item_y) if self.base_path else self.item_y
-            self.data_y = self.parent.data_manager.get_data(y_path)
-            self.data_x = np.array([])  # Empty array for when no x data is selected
-            self.ax.plot(self.data_y, zorder=-100)
-            self.ax.set_ylabel(self.item_y)
+            self.data_x = np.arange(len(self.data_y))
             self.ax.set_xlabel("Index")
         else:
-            self.ax.clear()
-            x_path = os.path.join(self.base_path, self.item_x) if self.base_path else self.item_x
-            y_path = os.path.join(self.base_path, self.item_y) if self.base_path else self.item_y
-            self.data_x = self.parent.data_manager.get_data(x_path)
-            self.data_y = self.parent.data_manager.get_data(y_path)
-            self.ax.plot(self.data_x, self.data_y, zorder=-100)
-            self.ax.set_ylabel(self.item_y)
-            self.ax.set_xlabel(self.item_x)
+            self.data_x = np.asarray(self.data_manager.get_data(self.item_path(self.item_x)))
+            if len(self.data_x) != len(self.data_y):
+                print(f"Warning: '{self.item_x}' and '{self.item_y}' differ in length; plotting against index")
+                self.data_x = np.arange(len(self.data_y))
+                self.ax.set_xlabel("Index")
+            else:
+                self.ax.set_xlabel(self.item_x)
+        self.ax.plot(self.data_x, self.data_y, zorder=-100)
+        self.ax.set_ylabel(self.item_y)
         self.canvas.draw()
 
+    def clamp_picked(self):
+        n = len(self.data_y)
+        if n == 0:
+            self.picked_idx = []
+            return
+        self.picked_idx = [min(max(int(i), 0), n - 1) for i in self.picked_idx]
+
     def plot_picked_points(self):
-        """Plot the picked points on the graph"""
+        """(Re)draw the markers for ``picked_idx``, then refresh the readout."""
+        if len(self.data_y) == 0:
+            return
+        self.clamp_picked()
         width, height = self.get_circle_dims()
-        
-        # Remove old markers properly
         for marker in self.markers:
             if marker in self.ax.patches:
                 marker.remove()
         self.markers = []
-        
-        # Create new markers
-        for i in range(len(self.picked_idx)):
-            idx = self.picked_idx[i]
-            x = self.data_x[idx] if len(self.data_x) > 0 else idx
-            y = self.data_y[idx]
-            marker = patches.Ellipse((x, y), width=width, height=height, color='red', fill=False, lw=2, picker=8, label=str(i))
+        for i, idx in enumerate(self.picked_idx):
+            marker = patches.Ellipse((self.data_x[idx], self.data_y[idx]), width=width, height=height,
+                                     color=self.marker_color, fill=False, lw=2, picker=8, label=str(i))
             self.ax.add_patch(marker)
             self.markers.append(marker)
-        
+        self.draw_overlays()
         self.canvas.draw()
-        picked_indices = [int(idx) for idx in self.picked_idx]
-        self.set_index_textbox(str(picked_indices))
+        self.update_readout()
 
-    def on_pick(self, event):
-        """Handle pick events for the markers"""
-        if self.current_artist is None:
-            self.current_artist = event.artist
-            if isinstance(event.artist, patches.Ellipse):
-                x0, y0 = self.current_artist.center
-                x1, y1 = event.mouseevent.xdata, event.mouseevent.ydata
-                self.offset = [(x0 - x1), (y0 - y1)]
+    def draw_overlays(self):
+        """Hook for subclasses to add artists that depend on the picks."""
 
-    def on_motion(self, event):
-        """Handle motion events for dragging markers"""
-        if not self.currently_dragging:
-            return
-        if self.current_artist is None:
-            return
-        if event.xdata is None or event.ydata is None:
-            return
-        
-        if isinstance(self.current_artist, patches.Ellipse):
-            try:
-                dx, dy = self.offset
-                cx, cy = event.xdata + dx, event.ydata + dy
-                xl = self.ax.get_xlim()
-                yl = self.ax.get_ylim()
-                yw = yl[-1] - yl[0]
-                xw = xl[-1] - xl[0]
-                
-                # Handle case where no x data is selected
-                if len(self.data_x) == 0:
-                    # Use index as x coordinate
-                    x_values = np.arange(len(self.data_y))
-                    idx = np.argmin(((x_values - cx) / xw) ** 2 + ((self.data_y - cy) / yw) ** 2)
-                    x_coord = idx
-                else:
-                    # Use actual x data
-                    idx = np.argmin(((self.data_x - cx) / xw) ** 2 + ((self.data_y - cy) / yw) ** 2)
-                    x_coord = self.data_x[idx]
-                
-                # Update marker position
-                self.current_artist.set_center((x_coord, self.data_y[idx]))
-                self.canvas.draw()
-                self.picked_idx[int(self.current_artist.get_label())] = idx
-                picked_indices = [int(idx) for idx in self.picked_idx]
-                self.set_index_textbox(str(picked_indices))
-            except Exception as e:
-                print(f"Error in on_motion: {e}")
+    def update_overlays(self):
+        """Hook for subclasses to move those artists while dragging."""
 
-    def on_press(self, event):
-        """Handle mouse press events"""
-        self.currently_dragging = True
-        if event.button == 1:
-            self.mouse_button_pressed = "left"
-        else:
-            self.mouse_button_pressed = "right"
+    def update_readout(self):
+        self.set_readout(str([int(i) for i in self.picked_idx]))
 
-    def on_release(self, event):
-        """Handle mouse release events"""
-        self.current_artist = None
-        self.currently_dragging = False
-        self.on_resize(None)
+    def set_readout(self, text: str):
+        """Show ``text`` in the readout box and copy it to the clipboard."""
+        self.readout_textbox.config(state="normal")
+        self.readout_textbox.delete(0, tk.END)
+        self.readout_textbox.insert(0, text)
+        self.readout_textbox.config(state="readonly")
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+        except tk.TclError:
+            pass
 
     def get_circle_dims(self):
-        """Calculate dimensions for the marker circles"""
         self.canvas.draw()
         xl = self.ax.get_xlim()
         yl = self.ax.get_ylim()
@@ -215,80 +232,71 @@ class IndexPickerView(tk.Toplevel):
         width = (xl[-1] - xl[0]) / fig_size[0] * 0.15
         return width, width * ratio
 
+    def nearest_index(self, cx: float, cy: float) -> int:
+        """Finite sample nearest to (cx, cy) in axes-normalized distance.
+
+        NaN samples are never candidates; with no finite sample at all the
+        drag is refused (ValueError, caught by ``on_motion``).
+        """
+        idx = nearest_sample(self.data_x, self.data_y, cx, cy, self.ax.get_xlim(), self.ax.get_ylim())
+        if idx is None:
+            raise ValueError("no finite samples to snap to")
+        return idx
+
+    # ------------------------------------------------------------- dragging
+    def on_pick(self, event):
+        if self.toolbar_active():
+            return
+        if self.current_artist is None and isinstance(event.artist, patches.Ellipse):
+            self.current_artist = event.artist
+            x0, y0 = self.current_artist.center
+            self.offset = [x0 - event.mouseevent.xdata, y0 - event.mouseevent.ydata]
+
+    def on_press(self, event):
+        self.currently_dragging = True
+
+    def on_release(self, event):
+        self.current_artist = None
+        self.currently_dragging = False
+        self.on_resize(None)
+
+    def on_motion(self, event):
+        if not self.currently_dragging or self.current_artist is None:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        if not isinstance(self.current_artist, patches.Ellipse):
+            return
+        try:
+            dx, dy = self.offset
+            idx = self.nearest_index(event.xdata + dx, event.ydata + dy)
+            self.current_artist.set_center((self.data_x[idx], self.data_y[idx]))
+            self.picked_idx[int(self.current_artist.get_label())] = idx
+            self.update_overlays()
+            self.update_readout()
+            self.canvas.draw_idle()
+        except Exception as e:
+            print(f"Error in on_motion: {e}")
+
     def on_resize(self, event):
-        """Handle window resize events"""
-        if self.ax:
-            width, height = self.get_circle_dims()
-            for marker in self.markers:
-                marker.set_width(width)
-                marker.set_height(height)
-            self.canvas.draw()
+        if getattr(self, "ax", None) is None or not self.markers:
+            return
+        width, height = self.get_circle_dims()
+        for marker in self.markers:
+            marker.set_width(width)
+            marker.set_height(height)
+        self.canvas.draw()
 
-    def init_comboboxes(self):
-        """Initialize comboboxes with available data items"""
-        items = []
-        i = 0
-        
-        # Get the parent of the selected item
-        selected_item = None
-        if self.item_y:
-            full_path = os.path.join(self.base_path, self.item_y) if self.base_path else self.item_y
-            for item in self.parent.data_tree.get_children(""):
-                if self._find_item_by_path(item, full_path):
-                    selected_item = self._find_item_by_path(item, full_path)
-                    break
-        
-        if selected_item:
-            parent_id = self.parent.data_tree.parent(selected_item)
-            
-            # Get all siblings
-            if parent_id:
-                siblings = self.parent.data_tree.get_children(parent_id)
-                self.base_path = self.parent.get_full_path(parent_id)[0]
-            else:
-                siblings = self.parent.data_tree.get_children("")
-                self.base_path = ""
-                
-            # Add each array sibling
-            for item in siblings:
-                item_text = self.parent.data_tree.item(item)['text']
-                if ':' in item_text and "array" in item_text.split(':')[1]:
-                    item_label = item_text.split(':')[0].strip()
-                    items.append(item_label)
-                    if item_label == self.item_y:
-                        self.index_y = i
-                    elif item_label == self.item_x:
-                        self.index_x = i
-                    i += 1
-        
-        # Update comboboxes
-        self.data_x_combo.config(values=items)
-        self.data_y_combo.config(values=items)
-        if self.index_y is not None:
-            self.data_y_combo.current(self.index_y)
-        if self.index_x is not None:
-            self.data_x_combo.current(self.index_x)
 
-    def _find_item_by_path(self, current_item: str, target_path: str) -> Optional[str]:
-        """Recursively find a tree item by its full path"""
-        current_path = self.parent.get_full_path(current_item)[0]
-        if current_path == target_path:
-            return current_item
+class IndexPickerView(ArrayPairView):
+    """Two draggable markers; the picked sample indices go to the readout and clipboard."""
 
-        # Search children
-        for child in self.parent.data_tree.get_children(current_item):
-            result = self._find_item_by_path(child, target_path)
-            if result:
-                return result
+    window_title = "Index Picker"
+    readout_label = "Picked Index"
 
-        return None
+    @property
+    def index_textbox(self):
+        return self.readout_textbox
 
-    def set_index_textbox(self, text):
-        """Update the index textbox with new value"""
-        self.index_textbox.config(state="normal")
-        self.index_textbox.delete(0, tk.END)
-        self.index_textbox.insert(0, text)
-        self.index_textbox.config(state="readonly")
-        self.clipboard_clear()
-        self.clipboard_append(text)
-        
+    def set_index_textbox(self, text: str):
+        self.set_readout(text)
