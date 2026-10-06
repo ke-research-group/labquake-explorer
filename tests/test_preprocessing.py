@@ -85,8 +85,8 @@ def test_eddy_slip_sign_zero_and_displacement():
 
 
 def test_parse_run_name():
-    assert parse_run_name("t0211_03_12MPa_run3") == {"name": "run3", "file_index": 3, "normal_stress_level": 12.0, "experiment": "t0211"}
-    assert parse_run_name("T0207_04_16MPa_run5") == {"name": "run5", "file_index": 4, "normal_stress_level": 16.0, "experiment": "t0207"}
+    assert parse_run_name("t0211_03_12MPa_run3") == {"name": "run3", "normal_stress_level": 12.0, "experiment": "t0211"}
+    assert parse_run_name("T0207_04_16MPa_run5") == {"name": "run5", "normal_stress_level": 16.0, "experiment": "t0207"}
     assert parse_run_name("p5986_01_1kHz_load") == {"name": "p5986_01_1kHz_load"}
 
 
@@ -113,7 +113,8 @@ def test_run_from_tpc5(elsys, tmp_path):
     run = run_from_tpc5(elsys, ELSYS_MAP, tmp_path, calibration(), event_fields=["pzt_1"],
                         event_window_s=(0.001, 0.004), operator="x")
     assert run["name"] == "run1" and run["normal_stress_level"] == 8.0 and run["operator"] == "x"
-    assert run["file"] == elsys.name and run["start_time"].startswith("2026-01-01")
+    assert run["elsys"]["filename"] == elsys.name and run["start_time"].startswith("2026-01-01")
+    assert not any(k in run for k in ("file", "file_index", "ni_file", "sources"))     # the recorder block says it all
     assert run["time"].size == 4000 and run["time"][0] == 0.0
     raw = run["elsys"]["raw_data"]
     assert C.is_channel_array(raw) and raw["channels"] == ["pzt_1", "pressure_1", "pressure_2", "eddy_1"]
@@ -126,8 +127,8 @@ def test_run_from_tpc5(elsys, tmp_path):
     assert run["units"]["normal_stress"] == "MPa" and run["units"]["slip"] == "um" and run["units"]["elsys/raw_data"] == "V"
     assert "pzt_1" not in run and "eddy_1" not in run
     assert run["normal_stress"].mean() == pytest.approx(8.0, abs=1e-3)
-    assert run["sources"] == {"elsys": "tpc5"}
     ref = run["elsys"]
+    assert ref["format"] == "tpc5"
     assert ref["format"] == "tpc5" and ref["filename"] == elsys.name and ref["time_offset"] == 0.0
     assert ref["event_fields"] == ["pzt_1"] and ref["event_window_s"] == [0.001, 0.004]
     assert ref["blocks"]["trigger_time"] == pytest.approx([0.5, 1.4])
@@ -164,8 +165,10 @@ def test_offset_and_slip_step_table(elsys, ni, tmp_path):
 def test_run_from_tpc5_ni(elsys, ni, tmp_path):
     run = run_from_tpc5_ni(elsys, ni, ELSYS_MAP, NI_MAP, tmp_path, calibration(), ni_decimation=5,
                            ni_meta={"input_range_v": 10.0}, elsys_event_fields=["pzt_1"])
-    assert run["name"] == "run1" and run["ni_file"] == ni.name and run["file"] == elsys.name
-    assert run["sources"] == {"ni": "ni_npz", "elsys": "tpc5"}
+    assert run["name"] == "run1" and run["ni"]["filename"] == ni.name and run["elsys"]["filename"] == elsys.name
+    assert run["ni"]["format"] == "ni_npz" and run["elsys"]["format"] == "tpc5"
+    assert not any(k in run for k in ("file", "file_index", "ni_file", "sources"))
+    assert "labels" not in run["ni"] and "member_offsets" not in run["ni"]
     # NI is the time base: 3 s at 2 kHz
     assert run["time"].size == 6000 and run["time"][1] - run["time"][0] == pytest.approx(5e-4)
     assert run["ni"]["raw_data"]["channels"] == ["pressure_1", "pressure_2", "eddy_1"]

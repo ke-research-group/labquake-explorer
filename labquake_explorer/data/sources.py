@@ -364,7 +364,8 @@ class NINpzSource(Source):
     def to_reference(self, base_dir) -> dict:
         ref = super().to_reference(base_dir)
         info = self.record.as_dict()
-        info.pop("format", None)
+        for key in ("format", "labels", "member_offsets"):   # the file's own channel labels and zip offsets: not needed in the run
+            info.pop(key, None)
         for key, value in info.items():
             ref.setdefault(key, value)
         ref["decimation"] = self.decimation

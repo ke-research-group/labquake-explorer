@@ -26,12 +26,11 @@ RUN_NAME = re.compile(r"^(?P<experiment>[A-Za-z]\d{3,5})_(?P<index>\d+)_(?P<sigm
 
 
 def parse_run_name(stem: str) -> dict:
-    """``t0211_03_12MPa_run3`` -> name, file index, nominal normal stress."""
+    """``t0211_03_12MPa_run3`` -> name, nominal normal stress, experiment."""
     m = RUN_NAME.match(str(stem))
     if not m:
         return {"name": str(stem)}
-    return {"name": m["run"], "file_index": int(m["index"]), "normal_stress_level": float(m["sigma"]),
-            "experiment": m["experiment"].lower()}
+    return {"name": m["run"], "normal_stress_level": float(m["sigma"]), "experiment": m["experiment"].lower()}
 
 
 def run_from_sources(sources: Mapping[str, Source], base_dir, calibration: Optional[Calibration] = None,
@@ -61,7 +60,6 @@ def run_from_sources(sources: Mapping[str, Source], base_dir, calibration: Optio
     t_run, data = base.time_history(decimation.get(time_base, 1))
     run = {"name": name or metadata.pop("name", base.path.stem)}
     run.update(metadata)
-    run["file"] = base.path.name
     if isinstance(base, Tpc5Source):
         run["start_time"] = base.start_time
     run["time"] = np.asarray(t_run, dtype=np.float64)
@@ -82,8 +80,7 @@ def run_from_sources(sources: Mapping[str, Source], base_dir, calibration: Optio
             taken.add(field_name)
         recorded[key] = (columns, names)
     run["units"] = {}
-    run["sources"] = {key: src.format for key, src in sources.items()}
-    for key, src in sources.items():
+    for key, src in sources.items():                 # each recorder's block: file reference (format, filename, ...) + raw_data
         run[key] = src.to_reference(base_dir)
         columns, names = recorded[key]
         if names:
@@ -133,8 +130,6 @@ def run_from_tpc5_ni(tpc5_path, ni_path, elsys_channel_map, ni_channel_map, base
     meta = {**parse_run_name(tpc5_path.stem), **metadata}
     run = run_from_sources({"ni": ni, "elsys": elsys}, base_dir, calibration,
                            time_base="ni", decimation={"ni": ni_decimation}, positions=positions, **meta)
-    run["file"] = tpc5_path.name
-    run["ni_file"] = ni_path.name
     run["start_time"] = elsys.start_time
     return run
 

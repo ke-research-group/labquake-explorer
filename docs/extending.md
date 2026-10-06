@@ -80,7 +80,6 @@ looks like this:
 | `slip` | channel array of the eddy-current sensors in um: `data`, `channels` (`slip_1`...), `source` (the voltage channel of each row), `slope_mm_per_v`, `positions` |
 | `units` | unit of every top-level array and channel array |
 | `calibration` | the steps that produced the physical channels (see the preprocessing package) |
-| `sources` | `{recorder key: format}` |
 | `event_extraction`, `events` | the Pick Events form's record, with the picks (`event_indices`) inside (schema below), and the extracted events |
 
 A **channel array** (`labquake_explorer/data/channels.py`) is a dict with
