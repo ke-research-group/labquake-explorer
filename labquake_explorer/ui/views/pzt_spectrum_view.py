@@ -57,6 +57,8 @@ from labquake_explorer.data.sources import (pick_waveform_block, read_arrivals, 
 RESULT_VERSION = 1
 
 LIVE_DELAY_MS = 400                    # recompute this long after the last keystroke
+HANDLE_PICK_PX = 6                     # how close (points) to a window edge counts as grabbing it
+HANDLES = ("noise_start", "noise_end", "signal_start", "signal_end")
 TRIGGER_EVENT_TIME = "event_time"
 TRIGGER_RECORD = "record trigger"      # where the recorder fired (the PZT trigger of an Elsys block)
 TRIGGER_PICKED = "picked arrival"
@@ -244,6 +246,13 @@ class PZTSpectrumView(EventView):
         self.ax_spec = self.figure.add_subplot(gs[1])
         self.ax_resid = self.figure.add_subplot(gs[2])   # x limits copied from ax_spec in plot()
         self.axes = (self.ax_time, self.ax_spec, self.ax_resid)
+        self.handles: dict = {}                            # window edges on the top panel
+        self.signal_span = self.noise_span = None
+        self._drag = None
+        self.canvas.mpl_connect("pick_event", self.on_pick)
+        self.canvas.mpl_connect("button_press_event", self.on_press)
+        self.canvas.mpl_connect("motion_notify_event", self.on_motion)
+        self.canvas.mpl_connect("button_release_event", self.on_release)
         self._decorate_axes()
         self.canvas.draw()
 
@@ -292,25 +301,32 @@ class PZTSpectrumView(EventView):
         self.post_var = tk.StringVar(master=self, value=DEFAULTS["post_ms"])
         self.highpass_var = tk.StringVar(master=self, value=DEFAULTS["highpass_hz"])
         self.remove_step_var = tk.BooleanVar(master=self, value=DEFAULTS["remove_step"])
+        self.noise_start_var = tk.StringVar(master=self, value="")
+        self.noise_end_var = tk.StringVar(master=self, value="")
         self._entry(frame, "Pre (ms):", self.pre_var, 0)
         self._entry(frame, "Post (ms):", self.post_var, 1)
-        ttk.Label(frame, text="Taper:").grid(row=2, column=0, padx=4, pady=2, sticky="e")
+        self._entry(frame, "Noise start (ms):", self.noise_start_var, 2)
+        self._entry(frame, "Noise end (ms):", self.noise_end_var, 3)
+        ttk.Label(frame, text="noise: from the trigger; blank = the same length\njust before the signal. "
+                              "Drag the windows on the plot.",
+                  foreground="#606060", justify="left").grid(row=4, column=0, columnspan=2, padx=4, pady=(0, 2), sticky="w")
+        ttk.Label(frame, text="Taper:").grid(row=5, column=0, padx=4, pady=2, sticky="e")
         self.taper_combobox = ttk.Combobox(frame, width=10, state="readonly", values=list(sp.TAPER_KINDS))
         self.taper_combobox.set(DEFAULTS["taper"])
-        self.taper_combobox.grid(row=2, column=1, padx=4, pady=2, sticky="w")
+        self.taper_combobox.grid(row=5, column=1, padx=4, pady=2, sticky="w")
         self._live(self.taper_combobox)
-        ttk.Label(frame, text="Baseline:").grid(row=3, column=0, padx=4, pady=2, sticky="e")
+        ttk.Label(frame, text="Baseline:").grid(row=6, column=0, padx=4, pady=2, sticky="e")
         self.baseline_combobox = ttk.Combobox(frame, width=10, state="readonly", values=list(sp.BASELINE_MODES))
         self.baseline_combobox.set(DEFAULTS["baseline"])
-        self.baseline_combobox.grid(row=3, column=1, padx=4, pady=2, sticky="w")
+        self.baseline_combobox.grid(row=6, column=1, padx=4, pady=2, sticky="w")
         self._live(self.baseline_combobox)
-        self._entry(frame, "Highpass (Hz):", self.highpass_var, 4)
+        self._entry(frame, "Highpass (Hz):", self.highpass_var, 7)
         ttk.Checkbutton(frame, text="Remove coseismic step", variable=self.remove_step_var,
                         command=lambda: self.schedule_compute(now=True)).grid(
-            row=5, column=0, columnspan=2, padx=4, pady=2, sticky="w")
+            row=8, column=0, columnspan=2, padx=4, pady=2, sticky="w")
         ttk.Label(frame, text=f"tukey ramp = {TUKEY_ALPHA / 2:.0%} of the window: keep\n"
                               f"pre >= post / {(2.0 / TUKEY_ALPHA) - 1.0:g} or Omega0 is attenuated",
-                  foreground="#606060", justify="left").grid(row=6, column=0, columnspan=2, padx=4, pady=2, sticky="w")
+                  foreground="#606060", justify="left").grid(row=9, column=0, columnspan=2, padx=4, pady=2, sticky="w")
 
     def _build_calibration_frame(self, master) -> None:
         frame = ttk.LabelFrame(master, text="Calibration / attenuation")
@@ -697,6 +713,8 @@ class PZTSpectrumView(EventView):
         self.taper_combobox.set(g("taper") if g("taper") in sp.TAPER_KINDS else DEFAULTS["taper"])
         self.baseline_combobox.set(g("baseline") if g("baseline") in sp.BASELINE_MODES else DEFAULTS["baseline"])
         self.highpass_var.set(_text(g("highpass_hz")))
+        self.noise_start_var.set(_text(g("noise_start_ms")))
+        self.noise_end_var.set(_text(g("noise_end_ms")))
         self.remove_step_var.set(bool(g("remove_step", False)))
         self.calibration_path_var.set(str(g("calibration_path") or ""))
         self.unit_combobox.set(g("calibration_unit") if g("calibration_unit") in CALIBRATION_UNITS
@@ -741,6 +759,8 @@ class PZTSpectrumView(EventView):
             "trigger": trigger,
             "pre_ms": _parse_float(self.pre_var.get(), "pre window (ms)", lo=0.0),
             "post_ms": _parse_float(self.post_var.get(), "post window (ms)", lo=0.0),
+            "noise_start_ms": _parse_float(self.noise_start_var.get(), "noise start (ms)", required=False),
+            "noise_end_ms": _parse_float(self.noise_end_var.get(), "noise end (ms)", required=False),
             "taper": self.taper_combobox.get(),
             "baseline": self.baseline_combobox.get(),
             "highpass_hz": None,
@@ -758,6 +778,13 @@ class PZTSpectrumView(EventView):
         }
         if p["pre_ms"] + p["post_ms"] <= 0:
             raise ValueError("pre + post window must be > 0")
+        if (p["noise_start_ms"] is None) != (p["noise_end_ms"] is None):
+            raise ValueError("give both noise start and noise end (ms from the trigger), or neither")
+        if p["noise_start_ms"] is not None:
+            if p["noise_start_ms"] >= p["noise_end_ms"]:
+                raise ValueError("noise start must be before noise end")
+            if p["noise_end_ms"] > -p["pre_ms"] + 1e-9:
+                raise ValueError("the noise window must end at or before the signal window (-pre)")
         if p["taper"] not in sp.TAPER_KINDS:
             raise ValueError("select a taper")
         if p["baseline"] not in sp.BASELINE_MODES:
@@ -847,9 +874,12 @@ class PZTSpectrumView(EventView):
             p = self.read_parameters()
             trigger = self.trigger_time(p)
             calibration = self.load_calibration(p)
+            noise_window = (None if p["noise_start_ms"] is None
+                            else (p["noise_start_ms"] * 1e-3, p["noise_end_ms"] * 1e-3))
             window = sp.extract_window(self.strain_time, self.strain_raw[p["channel"]], trigger,
                                        p["pre_ms"] * 1e-3, p["post_ms"] * 1e-3, baseline=p["baseline"],
-                                       highpass_hz=p["highpass_hz"], remove_step=p["remove_step"])
+                                       highpass_hz=p["highpass_hz"], remove_step=p["remove_step"],
+                                       noise_window=noise_window)
             spectrum = sp.compute_spectrum(window, taper=p["taper"], alpha=TUKEY_ALPHA,
                                            calibration=calibration, t_star_s=p["t_star_s"],
                                            fmin=p["fmin_hz"], fmax=p["fmax_hz"],
@@ -897,6 +927,8 @@ class PZTSpectrumView(EventView):
             "fs_hz": float(spectrum.meta.get("fs", float("nan"))),
             "pre_ms": float(p["pre_ms"]),
             "post_ms": float(p["post_ms"]),
+            "noise_start_ms": p["noise_start_ms"],
+            "noise_end_ms": p["noise_end_ms"],
             "taper": p["taper"],
             "baseline": p["baseline"],
             "highpass_hz": p["highpass_hz"],
@@ -1104,6 +1136,8 @@ class PZTSpectrumView(EventView):
         for ax in self.axes:
             ax.clear()
         self.ax_taper.clear()
+        self.handles = {}
+        self.signal_span = self.noise_span = None
         self._decorate_axes()
         w, s, rec = self.window, self.spectrum, self.record
 
@@ -1112,12 +1146,32 @@ class PZTSpectrumView(EventView):
             kind = kind if kind in sp.TAPER_KINDS else self.taper_combobox.get()
             taper = sp.taper_window(w.signal.size, kind if kind in sp.TAPER_KINDS else DEFAULTS["taper"], TUKEY_ALPHA)
             t_ms = w.t_rel * 1e3
+            edges = self.window_edges_ms(w)
+            # the trace around both windows, so there is room to drag them
+            span = max(edges["signal_end"] - min(edges["noise_start"], edges["signal_start"]), 1e-3)
+            lo, hi = min(edges["noise_start"], edges["signal_start"]) - span, edges["signal_end"] + span
+            t_all = (self.strain_time - w.trigger_time) * 1e3
+            keep = (t_all >= lo) & (t_all <= hi)
+            if np.any(keep):
+                self.ax_time.plot(t_all[keep], self.strain_raw[self.current_channel()][keep],
+                                  color="#bbbbbb", lw=0.6, label="trace")
             if w.noise_available:
-                t_noise = (np.arange(-w.noise.size, 0) - w.n_pre) / w.fs * 1e3
+                t_noise = (np.arange(w.i_noise0, w.i_noise1) - w.i_trigger) / w.fs * 1e3
                 self.ax_time.plot(t_noise, w.noise, color="#7f7f7f", lw=0.8, label="noise window")
+                self.noise_span = self.ax_time.axvspan(edges["noise_start"], edges["noise_end"],
+                                                       color="#7f7f7f", alpha=0.12, zorder=0)
+            self.signal_span = self.ax_time.axvspan(edges["signal_start"], edges["signal_end"],
+                                                    color="#1f77b4", alpha=0.08, zorder=0)
             self.ax_time.plot(t_ms, w.signal, color="#1f77b4", lw=1.0, label="signal window")
             self.ax_time.plot(t_ms, w.signal * taper, color="#d62728", lw=1.0, label="tapered (what is transformed)")
             self.ax_time.axvline(0.0, color="k", lw=0.8, ls=":")
+            for name in HANDLES:
+                if name.startswith("noise") and not w.noise_available:
+                    continue
+                color = "#7f7f7f" if name.startswith("noise") else "#1f77b4"
+                self.handles[name] = self.ax_time.axvline(edges[name], color=color, lw=1.6, picker=HANDLE_PICK_PX,
+                                                          label="_" + name)
+            self.ax_time.set_xlim(lo, hi)
             self.ax_taper.plot(t_ms, taper, color="k", lw=0.8, ls="--", label=f"{kind} taper")
             self.ax_taper.set_ylim(0.0, 1.05)
             self.ax_taper.set_ylabel("taper")
@@ -1193,6 +1247,117 @@ class PZTSpectrumView(EventView):
             self.ax_spec.set_title(f"{self.figure_title()} {label}", fontsize=10)
             self.ax_resid.set_xlim(self.ax_spec.get_xlim())
         self.canvas.draw_idle()
+
+    # ------------------------------------------------------ window dragging
+    @staticmethod
+    def window_edges_ms(w: sp.WindowResult) -> dict:
+        """The four window edges in ms from the trigger."""
+        pre_ms, post_ms = w.n_pre / w.fs * 1e3, w.n_post / w.fs * 1e3
+        edges = {"signal_start": -pre_ms, "signal_end": post_ms}
+        if w.noise_available:
+            edges["noise_start"] = (w.i_noise0 - w.i_trigger) / w.fs * 1e3
+            edges["noise_end"] = (w.i_noise1 - w.i_trigger) / w.fs * 1e3
+        else:
+            edges["noise_start"] = edges["noise_end"] = -pre_ms
+        return edges
+
+    def current_edges_ms(self) -> Optional[dict]:
+        return self.window_edges_ms(self.window) if self.window is not None else None
+
+    def _in_time_axes(self, event) -> bool:
+        return event.inaxes in (self.ax_time, self.ax_taper) and event.xdata is not None
+
+    def on_pick(self, event) -> None:
+        """Grab a window edge."""
+        if self.toolbar_active() or self._drag is not None or self.window is None:
+            return
+        for name, line in self.handles.items():
+            if event.artist is line:
+                self.begin_drag(name, float(event.mouseevent.xdata))
+                return
+
+    def on_press(self, event) -> None:
+        """Grab a window by its body when no edge was hit (the figure dispatches
+        pick events before this handler)."""
+        if self.toolbar_active() or self._drag is not None or self.window is None or not self._in_time_axes(event):
+            return
+        if event.button != 1:
+            return
+        edges = self.current_edges_ms()
+        x = float(event.xdata)
+        if edges["signal_start"] <= x <= edges["signal_end"]:
+            self.begin_drag("signal", x)
+        elif self.window.noise_available and edges["noise_start"] <= x <= edges["noise_end"]:
+            self.begin_drag("noise", x)
+
+    def begin_drag(self, what: str, x_ms: float) -> None:
+        self._drag = {"what": what, "x0": x_ms, "edges": dict(self.current_edges_ms())}
+
+    def on_motion(self, event) -> None:
+        if self._drag is None or not self._in_time_axes(event):
+            return
+        self.drag_to(float(event.xdata))
+
+    def drag_to(self, x_ms: float) -> dict:
+        """Move the grabbed edge or window to ``x_ms`` (ms from the trigger),
+        keeping the windows in order, and show the new values in the entries."""
+        d = self._drag
+        e = dict(d["edges"])
+        dx = x_ms - d["x0"]
+        what = d["what"]
+        if what == "signal_start":
+            e["signal_start"] = min(x_ms, 0.0)
+            self._push_noise(e)
+        elif what == "signal_end":
+            e["signal_end"] = max(x_ms, 0.0)
+        elif what == "signal":
+            length = e["signal_end"] - e["signal_start"]
+            start = min(max(e["signal_start"] + dx, -1e9), 0.0)
+            start = max(start, -length)                     # the trigger stays inside the window
+            e["signal_start"], e["signal_end"] = start, start + length
+            self._push_noise(e)
+        elif what == "noise_start":
+            e["noise_start"] = min(x_ms, e["noise_end"])
+        elif what == "noise_end":
+            e["noise_end"] = max(min(x_ms, e["signal_start"]), e["noise_start"])
+        elif what == "noise":
+            length = e["noise_end"] - e["noise_start"]
+            end = min(e["noise_end"] + dx, e["signal_start"])
+            e["noise_start"], e["noise_end"] = end - length, end
+        self.show_edges(e)
+        return e
+
+    @staticmethod
+    def _push_noise(e: dict) -> None:
+        """A signal window moving earlier pushes the noise window ahead of it, length kept."""
+        if e["noise_end"] > e["signal_start"]:
+            length = e["noise_end"] - e["noise_start"]
+            e["noise_end"] = e["signal_start"]
+            e["noise_start"] = e["noise_end"] - length
+
+    def show_edges(self, e: dict) -> None:
+        """Entries and the top panel follow the edges being dragged (no recompute yet)."""
+        self.pre_var.set(_text(round(abs(e["signal_start"]), 4)))     # never "-0"
+        self.post_var.set(_text(round(e["signal_end"], 4)))
+        self.noise_start_var.set(_text(round(e["noise_start"], 4)))
+        self.noise_end_var.set(_text(round(e["noise_end"], 4)))
+        for name, line in self.handles.items():
+            line.set_xdata([e[name], e[name]])
+        for patch, a, b in ((self.signal_span, "signal_start", "signal_end"), (self.noise_span, "noise_start", "noise_end")):
+            if patch is not None:
+                patch.set_x(e[a])
+                patch.set_width(e[b] - e[a])
+        self.canvas.draw_idle()
+
+    def on_release(self, event) -> None:
+        if self._drag is None:
+            return
+        self.end_drag()
+
+    def end_drag(self) -> None:
+        """The dragged windows become the settings: recompute."""
+        self._drag = None
+        self.schedule_compute(now=True)
 
     # ------------------------------------------------------------- dialogs
     def browse_calibration(self) -> None:

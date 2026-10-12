@@ -796,3 +796,112 @@ def test_source_parameters_follow_automatically(brune_app, view):
     view.schedule_compute(now=True)
     assert "source parameters computed" in view.status_var.get()
     assert view.record["source"] is not None and view.record["source"]["valid"]
+
+
+# ------------------------------------------------------- window dragging
+def test_noise_window_entries_reach_the_analysis_and_the_record(brune_app, view):
+    view.set_channel(BRUNE_CH)
+    w0 = view.window
+    assert w0.i_noise1 == w0.i_trigger - w0.n_pre                     # default: just before the signal
+    assert view.record["noise_start_ms"] is None and view.record["noise_end_ms"] is None
+    view.noise_start_var.set("-4")
+    view.noise_end_var.set("-2.5")
+    view.schedule_compute(now=True)
+    w = view.window
+    assert w.i_noise0 == w.i_trigger - int(round(4e-3 * w.fs)) and w.i_noise1 == w.i_trigger - int(round(2.5e-3 * w.fs))
+    assert view.record["noise_start_ms"] == -4.0 and view.record["noise_end_ms"] == -2.5
+    assert view.save()
+    view.set_channel(TANH_CH)
+    view.set_channel(BRUNE_CH)
+    assert (view.noise_start_var.get(), view.noise_end_var.get()) == ("-4", "-2.5")
+    view.noise_end_var.set("0.1")                                     # past the signal start
+    view.schedule_compute(now=True)
+    assert "noise window" in view.status_var.get()
+    view.noise_end_var.set("")
+    view.noise_start_var.set("")
+    view.schedule_compute(now=True)
+    assert view.record["noise_start_ms"] is None
+
+
+def test_dragging_the_windows_updates_settings_and_recomputes(brune_app, view):
+    view.set_channel(BRUNE_CH)
+    e0 = view.current_edges_ms()
+    assert e0["signal_start"] == pytest.approx(-0.5) and e0["signal_end"] == pytest.approx(2.0)
+    assert e0["noise_end"] == pytest.approx(-0.5) and e0["noise_start"] == pytest.approx(-3.0)
+    assert set(view.handles) == {"noise_start", "noise_end", "signal_start", "signal_end"}
+    # the post edge
+    view.begin_drag("signal_end", e0["signal_end"])
+    view.drag_to(2.5)
+    assert view.post_var.get() == "2.5" and view.handles["signal_end"].get_xdata()[0] == pytest.approx(2.5)
+    view.end_drag()
+    assert view.record["post_ms"] == 2.5 and view.window.n_post == int(round(2.5e-3 * brune_app.fs))
+    # the pre edge cannot cross the trigger; moved earlier, it pushes the noise window ahead of it, length kept
+    view.begin_drag("signal_start", -0.5)
+    e = view.drag_to(0.3)
+    assert e["signal_start"] == 0.0 and e["noise_end"] == pytest.approx(-0.5) and view.pre_var.get() == "0"
+    e = view.drag_to(-1.0)
+    assert e["noise_end"] == pytest.approx(-1.0) and e["noise_start"] == pytest.approx(-3.5)
+    view.end_drag()
+    assert view.record["pre_ms"] == 1.0 and view.record["noise_end_ms"] == -1.0 and view.record["noise_start_ms"] == -3.5
+    # the whole signal window slides, keeping its length and the trigger inside
+    e1 = view.current_edges_ms()
+    view.begin_drag("signal", 0.5)
+    e = view.drag_to(0.5 - 0.25)
+    assert e["signal_end"] - e["signal_start"] == pytest.approx(e1["signal_end"] - e1["signal_start"])
+    assert e["signal_start"] == pytest.approx(e1["signal_start"] - 0.25)
+    e = view.drag_to(0.5 + 5.0)
+    assert e["signal_start"] == 0.0                                   # stops at the trigger
+    view.end_drag()
+    assert view.record["pre_ms"] == 0.0 and view.record["post_ms"] == pytest.approx(e1["signal_end"] - e1["signal_start"])
+    # the noise window: its end never passes the signal start, its body slides as one
+    view.pre_var.set("0.5"); view.post_var.set("2.0")
+    view.schedule_compute(now=True)
+    e2 = view.current_edges_ms()
+    view.begin_drag("noise_end", e2["noise_end"])
+    e = view.drag_to(1.0)
+    assert e["noise_end"] == pytest.approx(e2["signal_start"])
+    view.drag_to(-1.0)
+    view.end_drag()
+    assert view.record["noise_end_ms"] == -1.0 and view.window.i_noise1 == view.window.i_trigger - int(round(1e-3 * brune_app.fs))
+    e3 = view.current_edges_ms()
+    view.begin_drag("noise", e3["noise_start"] + 0.5)
+    e = view.drag_to(e3["noise_start"] + 0.5 - 1.0)
+    assert e["noise_end"] - e["noise_start"] == pytest.approx(e3["noise_end"] - e3["noise_start"])
+    assert e["noise_start"] == pytest.approx(e3["noise_start"] - 1.0)
+    view.end_drag()
+    assert view.record["noise_start_ms"] == pytest.approx(e3["noise_start"] - 1.0)
+
+
+def test_mouse_events_grab_edges_and_bodies(brune_app, view):
+    from matplotlib.backend_bases import MouseEvent, PickEvent
+    view.set_channel(BRUNE_CH)
+    view.canvas.draw()
+    e0 = view.current_edges_ms()
+    ax = view.ax_time
+    y_mid = float(np.mean(ax.get_ylim()))
+    # an edge, through a pick event on its line
+    px, py = ax.transData.transform((e0["signal_end"], y_mid))
+    mouse = MouseEvent("button_press_event", view.canvas, px, py, button=1)
+    view.on_pick(PickEvent("pick_event", view.canvas, mouse, view.handles["signal_end"]))
+    assert view._drag["what"] == "signal_end"
+    px2, _ = ax.transData.transform((e0["signal_end"] + 1.0, y_mid))
+    view.on_motion(MouseEvent("motion_notify_event", view.canvas, px2, py, button=1))
+    assert view.post_var.get() == "3"
+    view.on_release(MouseEvent("button_release_event", view.canvas, px2, py, button=1))
+    assert view._drag is None and view.record["post_ms"] == 3.0
+    # the signal body, through a press inside the span
+    e1 = view.current_edges_ms()
+    px, py = ax.transData.transform((0.5 * (e1["signal_start"] + e1["signal_end"]), y_mid))
+    view.on_press(MouseEvent("button_press_event", view.canvas, px, py, button=1))
+    assert view._drag["what"] == "signal"
+    view.on_release(MouseEvent("button_release_event", view.canvas, px, py, button=1))
+    # the noise body
+    px, py = ax.transData.transform((0.5 * (e1["noise_start"] + e1["noise_end"]), y_mid))
+    view.on_press(MouseEvent("button_press_event", view.canvas, px, py, button=1))
+    assert view._drag["what"] == "noise"
+    view.on_release(MouseEvent("button_release_event", view.canvas, px, py, button=1))
+    # with the toolbar's zoom active nothing is grabbed
+    view.toolbar.zoom()
+    view.on_press(MouseEvent("button_press_event", view.canvas, px, py, button=1))
+    assert view._drag is None
+    view.toolbar.zoom()

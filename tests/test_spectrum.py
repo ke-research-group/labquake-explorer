@@ -891,3 +891,36 @@ def test_compute_spectrum_applies_attenuation_table(tmp_path):
     assert corrected.meta["attenuation"]["travel_time_s"] == 5e-5
     with pytest.raises(ValueError):
         sp.compute_spectrum(w, t_star_s=1e-5, attenuation=att)
+
+
+def test_extract_window_with_an_explicit_noise_window():
+    fs = 100e3
+    t = np.arange(0, 0.05, 1 / fs)
+    x = 0.01 * np.sin(2 * np.pi * 300 * t)                       # a slow wobble, no transient
+    trigger = 0.030
+    pre_s, post_s = 0.0005, 0.002
+    default = sp.extract_window(t, x, trigger, pre_s, post_s, baseline="none")
+    n = default.n_pre + default.n_post
+    assert default.i_noise1 == default.i_trigger - default.n_pre and default.i_noise1 - default.i_noise0 == n
+    # a noise window of its own, with a gap before the signal
+    w = sp.extract_window(t, x, trigger, pre_s, post_s, baseline="none", noise_window=(-0.0040, -0.0025))
+    assert w.noise_available and w.i_noise0 == w.i_trigger - 400 and w.i_noise1 == w.i_trigger - 250
+    np.testing.assert_allclose(w.noise, x[w.i_noise0:w.i_noise1])
+    assert w.noise_fraction == pytest.approx(150 / n)
+    # the pre-linear baseline is fitted over that window at its true position
+    wb = sp.extract_window(t, x, trigger, pre_s, post_s, baseline="pre_linear", noise_window=(-0.0040, -0.0025))
+    assert wb.baseline_region == "noise"
+    k = np.arange(wb.i_noise0 - (wb.i_trigger - wb.n_pre), wb.i_noise1 - (wb.i_trigger - wb.n_pre), dtype=float)
+    slope, intercept = np.polyfit(k, x[wb.i_noise0:wb.i_noise1], 1)
+    np.testing.assert_allclose(wb.noise, x[wb.i_noise0:wb.i_noise1] - (slope * k + intercept), atol=1e-12)
+    # too short to count, or badly ordered, or overlapping the signal
+    short = sp.extract_window(t, x, trigger, pre_s, post_s, noise_window=(-0.0012, -0.0010))
+    assert not short.noise_available and short.i_noise0 == -1
+    with pytest.raises(ValueError):
+        sp.extract_window(t, x, trigger, pre_s, post_s, noise_window=(-0.001, -0.002))
+    with pytest.raises(ValueError):
+        sp.extract_window(t, x, trigger, pre_s, post_s, noise_window=(-0.003, 0.0))
+    # a gap with the highpass baseline filters the two stretches on their own
+    hp = sp.extract_window(t, x, trigger, pre_s, post_s, baseline="highpass", highpass_hz=1e3,
+                           noise_window=(-0.0040, -0.0025))
+    assert hp.noise_available and hp.noise.size == 150 and np.all(np.isfinite(hp.noise))

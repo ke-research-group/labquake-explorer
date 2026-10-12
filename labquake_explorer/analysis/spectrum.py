@@ -108,6 +108,8 @@ class WindowResult:
     trigger_time: float = float("nan")          # the caller's trigger_time (s, trace clock)
     step_width_fraction: Optional[float] = None  # requested width (None = fitted); None if no step
     step_residual: float = float("nan")         # rms antisymmetric residual after removal / |amplitude|
+    i_noise0: int = -1                          # trace index of the first noise sample (-1 when unavailable)
+    i_noise1: int = -1                          # one past the last noise sample
 
     @property
     def n(self) -> int:
@@ -251,8 +253,15 @@ def extract_window(time, x, trigger_time: float, pre_s: float, post_s: float,
                    baseline: str = "pre_linear", highpass_hz: Optional[float] = None,
                    remove_step: bool = False,
                    step_width_fraction: Optional[float] = STEP_WIDTH_FRACTION,
-                   step_centre: str = "antisymmetric") -> WindowResult:
+                   step_centre: str = "antisymmetric",
+                   noise_window: Optional[tuple] = None) -> WindowResult:
     """Cut ``[trigger - pre_s, trigger + post_s)`` out of ``x`` by sample counts.
+
+    The noise window is the stretch of the same length just before the signal
+    window, or ``noise_window = (start_s, end_s)`` relative to the trigger
+    when given (it must end at or before the signal window; a gap between
+    the two is allowed).  Either way it has to hold at least
+    ``MIN_NOISE_FRACTION`` of the signal window's samples to count.
 
     For the spectrum's no-coherent-gain amplitude convention the transient
     must sit in the flat part of the taper: choose ``pre_s`` larger than
@@ -318,13 +327,25 @@ def extract_window(time, x, trigger_time: float, pre_s: float, post_s: float,
             f"window [{i0}, {i1}) is not inside the trace of {x.size} samples "
             f"(trigger sample {i_trigger}, n_pre={n_pre}, n_post={n_post})")
 
-    n_noise = min(n, i0)
+    if noise_window is None:
+        i_n1 = i0
+        i_n0 = max(0, i0 - n)
+    else:
+        start_s, end_s = (float(v) for v in noise_window)
+        if not (np.isfinite(start_s) and np.isfinite(end_s)) or start_s >= end_s:
+            raise ValueError("noise_window must be (start, end) seconds relative to the trigger, start < end")
+        if end_s > -pre_s + 0.5 * dt:
+            raise ValueError("the noise window must end at or before the signal window")
+        i_n0 = max(0, i_trigger + int(round(start_s * fs)))
+        i_n1 = min(i0, i_trigger + int(round(end_s * fs)))
+    n_noise = max(0, i_n1 - i_n0)
     noise_available = n_noise >= max(2, int(math.ceil(MIN_NOISE_FRACTION * n)))
     if noise_available:
-        noise = x[i0 - n_noise:i0].copy()
+        noise = x[i_n0:i_n1].copy()
     else:
         n_noise = 0
         noise = np.full(n, np.nan)
+        i_n0 = i_n1 = -1
     sig = x[i0:i1].copy()
 
     # --- baseline ---------------------------------------------------------
@@ -332,7 +353,7 @@ def extract_window(time, x, trigger_time: float, pre_s: float, post_s: float,
     if baseline == "pre_linear":
         # sample indices relative to the start of the signal window
         if noise_available:
-            k = np.arange(-n_noise, 0, dtype=float)
+            k = np.arange(i_n0 - i0, i_n1 - i0, dtype=float)   # noise samples relative to the signal start
             y = noise
             region = "noise"
         elif n_pre >= 2:
@@ -345,7 +366,7 @@ def extract_window(time, x, trigger_time: float, pre_s: float, post_s: float,
             slope, intercept = np.polyfit(k, y, 1)
             sig = sig - (slope * np.arange(n) + intercept)
             if noise_available:
-                noise = noise - (slope * np.arange(-n_noise, 0) + intercept)
+                noise = noise - (slope * np.arange(i_n0 - i0, i_n1 - i0) + intercept)
 
     # --- coseismic step ---------------------------------------------------
     step_amp = step_scale = step_fit_scale = step_resid = float("nan")
@@ -375,11 +396,14 @@ def extract_window(time, x, trigger_time: float, pre_s: float, post_s: float,
         if highpass_hz is None or not (0.0 < float(highpass_hz) < 0.5 * fs):
             raise ValueError("highpass_hz must be given and lie in (0, fs/2) for baseline='highpass'")
         sos = sps.butter(2, float(highpass_hz), btype="highpass", fs=fs, output="sos")
-        if noise_available:
+        if noise_available and i_n1 == i0:
             joint = np.concatenate([noise, sig])
             padlen = min(3 * 2 * 2, joint.size - 1)  # scipy default is small; keep it valid
             joint = sps.sosfiltfilt(sos, joint, padlen=padlen)
             noise, sig = joint[:n_noise].copy(), joint[n_noise:].copy()
+        elif noise_available:                        # a gap: filter the two stretches on their own
+            noise = sps.sosfiltfilt(sos, noise, padlen=min(12, noise.size - 1))
+            sig = sps.sosfiltfilt(sos, sig, padlen=min(12, sig.size - 1))
         else:
             sig = sps.sosfiltfilt(sos, sig, padlen=min(12, sig.size - 1))
         region = "highpass"
@@ -396,6 +420,7 @@ def extract_window(time, x, trigger_time: float, pre_s: float, post_s: float,
         highpass_hz=float(highpass_hz) if highpass_hz is not None else None,
         step_centre_method=centre_method, trigger_time=float(trigger_time),
         step_width_fraction=width_fraction, step_residual=step_resid,
+        i_noise0=int(i_n0), i_noise1=int(i_n1),
     )
 
 
