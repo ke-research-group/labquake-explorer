@@ -4,7 +4,11 @@
 note per change; ``upgrade_file(path)`` does it for a file (keeping a copy of
 the original next to it).  Run it from the command line::
 
-    python -m labquake_explorer.data.migrate experiment.h5 [--no-backup]
+    python -m labquake_explorer.data.migrate experiment.h5 [--no-backup] [--lvdt-um-per-v=-5040]
+
+``--lvdt-um-per-v`` converts an ``LP_displacement`` still in LVDT volts to
+micrometres in every run and event (``recalibrate_lp_displacement``), for
+files made before the LVDT slope was known.
 
 What is brought up to date (see ``docs/extending.md`` for the layouts):
 
@@ -26,6 +30,7 @@ The PSU-era ``strain`` layout is left as it is: the views read it directly.
 """
 from __future__ import annotations
 
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -42,6 +47,7 @@ from labquake_explorer.data.sources import (WAVEFORM, ARRIVALS_KEY, is_legacy_st
 RUN_KEYS_DROPPED = ("file", "file_index", "ni_file", "sources")
 NI_KEYS_DROPPED = ("labels", "member_offsets")
 LEGACY_WINDOW_KEY = "event_window"
+LP_FIELD = "LP_displacement"
 INTERIM_ARRIVAL_KEYS = ("picked_idx", "rupture_arrival_time", "enabled_channels", "fitting_channels", "locations")
 
 
@@ -245,18 +251,66 @@ def upgrade_experiment(data: dict) -> list:
     return notes
 
 
-def upgrade_file(path, backup: bool = True) -> list:
-    """Load an experiment file, upgrade it and write it back (a copy of the
-    original is kept as ``<name>.before-upgrade<suffix>`` unless ``backup`` is False)."""
+def recalibrate_lp_displacement(data: dict, um_per_v: float) -> list:
+    """Turn an ``LP_displacement`` still in LVDT volts into micrometres, in
+    every run (and its events) whose unit says ``V``; the calibration record's
+    step and note follow.  Runs already in micrometres are left alone, so the
+    conversion can be run twice without harm."""
+    notes = []
+    factor = float(um_per_v)
+    runs = data.get("runs") if isinstance(data, Mapping) else None
+    for i, run in enumerate(runs if isinstance(runs, (list, tuple)) else []):
+        if not isinstance(run, dict) or LP_FIELD not in run:
+            continue
+        units = run.get("units") if isinstance(run.get("units"), dict) else {}
+        if str(units.get(LP_FIELD, "")) != "V":
+            continue
+        run[LP_FIELD] = (np.asarray(run[LP_FIELD], dtype=np.float64) * factor).astype(np.float32)
+        units[LP_FIELD] = "um"
+        run["units"] = units
+        calibration = run.get("calibration")
+        if isinstance(calibration, dict):
+            for step in calibration.get("steps") or []:
+                if isinstance(step, dict) and step.get("field") == LP_FIELD and step.get("kind") == "linear":
+                    step["factor"] = float(step.get("factor", 1.0)) * factor
+                    step["unit"] = "um"
+                    step["formula"] = (f"{LP_FIELD} (um) = {step['factor']:.6g} * {step.get('source', 'lvdt')} "
+                                       f"+ {float(step.get('offset', 0.0)):.6g}")
+            note = calibration.get("note")
+            if isinstance(note, str) and "LVDT" in note:
+                calibration["note"] = re.sub(r"LVDT:[^;]*", f"LVDT: {factor:g} um/V", note)
+        n_events = n_stale = 0
+        for event in run.get("events") or []:
+            if isinstance(event, dict) and LP_FIELD in event:
+                event[LP_FIELD] = (np.asarray(event[LP_FIELD], dtype=np.float64) * factor).astype(np.float32)
+                n_events += 1
+                analysis = event.get("event_analysis")
+                if isinstance(analysis, dict) and LP_FIELD in (analysis.get("x_field"), analysis.get("y_field")):
+                    n_stale += 1
+        notes.append(f"runs/[{i}]: {LP_FIELD} converted from V to um with {factor:g} um/V ({n_events} events)")
+        if n_stale:
+            notes.append(f"runs/[{i}]: {n_stale} event_analysis record(s) were computed on {LP_FIELD} in volts; "
+                         "reopen them in the Event Analyzer to recompute")
+    return notes
+
+
+def upgrade_file(path, backup: bool = True, lvdt_um_per_v=None) -> list:
+    """Load an experiment file, upgrade it (and convert ``LP_displacement`` to
+    micrometres when ``lvdt_um_per_v`` is given) and write it back.  The first
+    time a file is changed a copy of the original is kept as
+    ``<name>.before-upgrade<suffix>``; an existing copy is never overwritten."""
     from labquake_explorer.data.data_manager import DataManager
     path = Path(path)
     dm = DataManager()
     dm.load_file(path)
     notes = upgrade_experiment(dm.data)
+    if lvdt_um_per_v is not None:
+        notes += recalibrate_lp_displacement(dm.data, float(lvdt_um_per_v))
     if not notes:
         return notes
-    if backup:
-        shutil.copy2(path, path.with_name(f"{path.stem}.before-upgrade{path.suffix}"))
+    copy = path.with_name(f"{path.stem}.before-upgrade{path.suffix}")
+    if backup and not copy.exists():
+        shutil.copy2(path, copy)
     dm.save_file(path)
     return notes
 
@@ -264,12 +318,16 @@ def upgrade_file(path, backup: bool = True) -> list:
 def main(argv=None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     backup = "--no-backup" not in args
+    lvdt = None
+    for a in args:
+        if a.startswith("--lvdt-um-per-v="):
+            lvdt = float(a.split("=", 1)[1])
     files = [a for a in args if not a.startswith("--")]
     if not files:
         print(__doc__)
         return 2
     for name in files:
-        notes = upgrade_file(name, backup=backup)
+        notes = upgrade_file(name, backup=backup, lvdt_um_per_v=lvdt)
         print(f"{name}: {len(notes)} change(s)" + ("" if notes else " (already up to date)"))
         for note in notes:
             print("  " + note)

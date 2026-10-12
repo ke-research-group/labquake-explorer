@@ -132,3 +132,39 @@ def test_upgrade_file_keeps_a_copy(tmp_path):
     assert run["events"][0]["waveform"]["elsys"]["trigger_time"] == pytest.approx(13.98)
     assert M.upgrade_file(path) == []                         # already up to date: no write, no second copy
     assert M.main([str(path)]) == 0
+
+
+def test_recalibrate_lp_displacement_from_volts(tmp_path):
+    data, truth = make_experiment(n_runs=1)
+    run = data["runs"][0]
+    volts = (run["LP_displacement"] / -5040.0).astype(np.float32)          # what an uncalibrated file holds
+    run["LP_displacement"] = volts.copy()
+    run["units"] = {"LP_displacement": "V", "slip": "um"}
+    run["calibration"] = {"note": "pressure: x; LVDT: slope unknown, LP_displacement in volts",
+                          "steps": [{"kind": "linear", "field": "LP_displacement", "source": "lvdt", "factor": 1.0,
+                                     "offset": 0.0, "unit": "V", "formula": "LP_displacement (V) = 1 * lvdt + 0"}]}
+    for event in run["events"]:
+        event["LP_displacement"] = (event["LP_displacement"] / -5040.0).astype(np.float32)
+    run["events"][0]["event_analysis"] = {"version": 3, "x_field": "LP_displacement", "y_field": "shear_stress"}
+    notes = M.recalibrate_lp_displacement(data, -5040.0)
+    assert len(notes) == 2 and "5040" in notes[0] and "event_analysis" in notes[1]
+    np.testing.assert_allclose(run["LP_displacement"], volts * -5040.0, rtol=1e-6)
+    assert run["units"]["LP_displacement"] == "um"
+    step = run["calibration"]["steps"][0]
+    assert step["factor"] == -5040.0 and step["unit"] == "um" and step["formula"].startswith("LP_displacement (um) = -5040")
+    assert run["calibration"]["note"] == "pressure: x; LVDT: -5040 um/V"
+    e = run["events"][1]
+    assert e["LP_displacement"].dtype == np.float32 and abs(e["LP_displacement"]).max() > 1.0
+    assert M.recalibrate_lp_displacement(data, -5040.0) == []                   # already in micrometres
+    # through the file tool, with the flag, keeping the first backup only
+    path = tmp_path / "exp.h5"
+    dm = DataManager(); dm.data = data; dm.save_file(path)
+    data2, _ = make_experiment(n_runs=1)
+    data2["runs"][0]["units"] = {"LP_displacement": "V"}
+    dm2 = DataManager(); dm2.data = data2; dm2.save_file(path)
+    copy = tmp_path / "exp.before-upgrade.h5"
+    copy.write_bytes(b"first original")
+    assert M.main([str(path), "--lvdt-um-per-v=-5040"]) == 0
+    assert copy.read_bytes() == b"first original"                            # never overwritten
+    again = DataManager(); again.load_file(path)
+    assert again.get_data("runs/[0]/units")["LP_displacement"] == "um"
