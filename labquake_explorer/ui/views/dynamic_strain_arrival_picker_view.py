@@ -1,17 +1,18 @@
-"""Pick rupture-front arrival times on the strain-gauge array of one event.
+"""Pick rupture-front arrival times on one full-rate record of an event.
 
-The figure stacks the four mechanical traces above the strain waveforms,
-each waveform drawn at its location along the fault.  One draggable marker
-per enabled channel marks the arrival; a straight line through the markers
-of the *fitting* channels gives the rupture speed ``Cf``.
+The figure stacks the four mechanical traces above the record's waveforms
+(strain gauges or PZTs), each drawn at its sensor position along the fault.
+One draggable marker per enabled channel marks the arrival; a straight line
+through the markers of the *fitting* channels gives the rupture speed ``Cf``.
 
-Results are written into the event's existing layout:
-
-* ``event['rupture_speed']`` (only when the fit is well-posed; a degenerate
-  fit removes the key so downstream views fall back to their defaults)
-* ``event['strain']['enabled_channels']``, ``event['strain']['fitting_channels']``
-* ``picked_idx`` and ``rupture_arrival_time`` next to the record's samples
-  (``event['waveform'][recorder]``, or ``event['strain']['original']`` for the PSU layout)
+A Record selector chooses which record is picked on, and the results belong
+to that record (``read_arrivals``/``write_arrivals`` in
+:mod:`labquake_explorer.data.sources`): ``event['waveform'][recorder]['arrivals']``
+holds ``picked_idx``, ``arrival_time``, ``enabled_channels``,
+``fitting_channels``, ``locations`` and ``rupture_speed`` (absent when the
+picks define no line), so strain and PZT picks never overwrite each other.
+The PSU ``strain`` layout keeps its historical keys (``strain/original/picked_idx``,
+``event['rupture_speed']``, ...).
 """
 from __future__ import annotations
 
@@ -28,8 +29,8 @@ from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import EVENT
 from labquake_explorer.ui.views.base import EventView
 from labquake_explorer.data.channels import aligned_fields, get_field
-from labquake_explorer.data.sources import (pick_waveform_block, waveform_block, waveform_data, waveform_store,
-                                            waveform_time)
+from labquake_explorer.data.sources import (pick_waveform_block, read_arrivals, waveform_block, waveform_blocks,
+                                            waveform_data, waveform_time, waveform_trigger_time, write_arrivals)
 
 # Experiments from this number on use the 16-channel layout with three
 # extra gauges at the ends of the fault; older ones use paired gauges.
@@ -39,6 +40,7 @@ NEW_LAYOUT_EXP_NUMBER = 5958
 FILTER_POLYORDER = 2
 MIN_FILTER_WINDOW = FILTER_POLYORDER + 1
 DEFAULT_FILTER_WINDOW = 51
+DEFAULT_TRACE_AMPLITUDE_MM = 12.0     # trace amplitude when the sensor spacing is unknown
 
 _RankWarning = getattr(np, "exceptions", np).RankWarning
 
@@ -62,37 +64,43 @@ class DynamicStrainArrivalPickerView(EventView):
         self.fitted_line = None
         self.filtering = False
         self.xlim = None
+        self.record_key = None
+        self.locations = []
         super().__init__(app, run_idx, event_idx)
 
     # ------------------------------------------------------------------ ui
     def build_ui(self):
-        # 7 columns, 4 rows: controls / figure / toolbar / filter row
+        # 9 columns, 4 rows: controls / figure / toolbar / filter row
         self.grid_rowconfigure(1, weight=1)
-        self.grid_columnconfigure(5, weight=1)
+        self.grid_columnconfigure(6, weight=1)
 
         self.build_event_selector(self, row=0, column=0)
+        ttk.Label(self, text="Record:").grid(row=0, column=2, padx=(10, 2), pady=5, sticky="e")
+        self.record_combobox = ttk.Combobox(self, width=16, state="readonly")
+        self.record_combobox.grid(row=0, column=3, padx=(0, 5), pady=5, sticky="w")
+        self.record_combobox.bind("<<ComboboxSelected>>", self.on_record_selected)
 
         self.enabled_channels_mb = tk.Menubutton(self, text="Enabled Channels")
-        self.enabled_channels_mb.grid(row=0, column=2, padx=5, pady=5)
+        self.enabled_channels_mb.grid(row=0, column=4, padx=5, pady=5)
         self.enabled_channels_mb.menu = tk.Menu(self.enabled_channels_mb, tearoff=0)
         self.enabled_channels_mb["menu"] = self.enabled_channels_mb.menu
         self.enabled_channels_mb.items = []
 
         self.fitting_channels_mb = tk.Menubutton(self, text="Fitting Channels")
-        self.fitting_channels_mb.grid(row=0, column=3, padx=5, pady=5)
+        self.fitting_channels_mb.grid(row=0, column=5, padx=5, pady=5)
         self.fitting_channels_mb.menu = tk.Menu(self.fitting_channels_mb, tearoff=0)
         self.fitting_channels_mb["menu"] = self.fitting_channels_mb.menu
         self.fitting_channels_mb.items = []
 
         self.cf_label = ttk.Label(self, text="Cf = n/a")
-        self.cf_label.grid(row=0, column=4, padx=5, pady=5, sticky="e")
+        self.cf_label.grid(row=0, column=6, padx=5, pady=5, sticky="e")
         self.magic_button = tk.Button(self, text="Magic", command=self.magic)
-        self.magic_button.grid(row=0, column=5, padx=5, pady=5, sticky="e")
+        self.magic_button.grid(row=0, column=7, padx=5, pady=5, sticky="e")
         self.save_button = tk.Button(self, text="Save", command=self.save)
-        self.save_button.grid(row=0, column=6, padx=5, pady=5, sticky="e")
+        self.save_button.grid(row=0, column=8, padx=5, pady=5, sticky="e")
 
         # figure (row 1) and toolbar (row 2)
-        self.make_figure(figsize=(7, 7), row=1, column=0, columnspan=7, padx=5, pady=5, sticky="nsew")
+        self.make_figure(figsize=(7, 7), row=1, column=0, columnspan=9, padx=5, pady=5, sticky="nsew")
         self.figure.set_layout_engine("constrained")
         self.fig = self.figure  # legacy alias
 
@@ -128,12 +136,26 @@ class DynamicStrainArrivalPickerView(EventView):
 
     @staticmethod
     def strain_block(event):
-        """The event's full-rate record: ``strain`` when present, else the first
-        waveform block (``waveform/elsys``, ``waveform/ni``, ...); None without any."""
+        """The record the view opens first: ``strain`` when present, else the
+        first waveform block (``waveform/elsys``, ``waveform/ni``, ...); None without any."""
         if not isinstance(event, dict):
             return None
         key = pick_waveform_block(event, prefer_keys=("strain",))
         return waveform_block(event, key) if key else None
+
+    def current_block(self):
+        """The record selected in the Record combobox (None without any)."""
+        return waveform_block(self.event, self.record_key) if self.record_key else None
+
+    def on_record_selected(self, event=None):
+        key = self.record_combobox.get().strip()
+        if key and key != self.record_key:
+            self.record_key = key
+            self.load_record()
+
+    def is_legacy_record(self) -> bool:
+        block = self.current_block()
+        return isinstance(block, dict) and "original" in block
 
     @staticmethod
     def fault_slip(event):
@@ -172,8 +194,8 @@ class DynamicStrainArrivalPickerView(EventView):
         if self.strain_block(candidate) is None:
             self.refresh_event_selector()  # combobox may already show the refused index
             messagebox.showwarning(
-                "No strain data",
-                f"Event {event_idx} has no strain data to pick arrivals on; "
+                "No waveform record",
+                f"Event {event_idx} has no full-rate record to pick arrivals on; "
                 f"staying on event {self.event_idx}.",
                 parent=self,
             )
@@ -181,26 +203,36 @@ class DynamicStrainArrivalPickerView(EventView):
         super().set_event(event_idx)
 
     def on_event_loaded(self):
-        strain = self.strain_block(self.event)
-        if strain is None:
+        keys = list(waveform_blocks(self.event)) if isinstance(self.event, dict) else []
+        if not keys:
             if self.axs is None:  # first load: nothing to show, do not leave a dead window
                 self.on_close()
-            raise ValueError(f"{self.event_path} has no strain data to pick arrivals on")
-        store = waveform_store(strain)
+            raise ValueError(f"{self.event_path} has no full-rate record to pick arrivals on")
+        if self.record_key not in keys:
+            self.record_key = pick_waveform_block(self.event, prefer_keys=("strain",))
+        self.record_combobox.config(values=keys)
+        self.record_combobox.set(self.record_key)
+        self.load_record()
 
-        # saved channel state lives in the strain dict, not on the event
-        if "enabled_channels" in strain:
-            self.enabled_channels = [bool(v) for v in strain["enabled_channels"]]
+    def load_record(self):
+        """Show the selected record with its saved picks, or the defaults."""
+        block = self.current_block()
+        saved = read_arrivals(block, self.event)
+        n = int(waveform_data(block).shape[0])
+
+        def flags(key):
+            value = saved.get(key)
+            return [bool(v) for v in value] if value is not None and len(value) == n else None
+
+        self.enabled_channels = flags("enabled_channels")
+        self.fitting_channels = flags("fitting_channels")
+        picks = saved.get("picked_idx")
+        self.picked_idx = [int(v) for v in picks] if picks is not None and len(picks) == n else None
+        locations = saved.get("locations")
+        if locations is not None and len(locations) == n:
+            self.locations = [float(v) for v in locations]
         else:
-            self.enabled_channels = None
-        if "fitting_channels" in strain:
-            self.fitting_channels = [bool(v) for v in strain["fitting_channels"]]
-        else:
-            self.fitting_channels = None
-        if "picked_idx" in store:
-            self.picked_idx = [int(v) for v in store["picked_idx"]]
-        else:
-            self.picked_idx = None
+            self.locations = self.block_locations(block, n) or self.default_locations(n, self.exp_number())
 
         self.xlim = None
         self.fitting_markers = []
@@ -217,18 +249,43 @@ class DynamicStrainArrivalPickerView(EventView):
 
     # ------------------------------------------------------------ defaults
     @staticmethod
-    def default_enabled_channels(n_channels: int, exp_number: int) -> list:
+    def default_enabled_channels(n_channels: int, exp_number: int, legacy: bool = True) -> list:
+        """PSU strain layouts show a chosen subset; any other record shows every channel."""
+        if not legacy:
+            return [True] * n_channels
         if exp_number >= NEW_LAYOUT_EXP_NUMBER:
             return [i < 13 for i in range(n_channels)]
         return [i % 2 == 0 for i in range(n_channels)]
 
     @staticmethod
-    def default_fitting_channels(n_channels: int, exp_number: int) -> list:
+    def default_fitting_channels(n_channels: int, exp_number: int, legacy: bool = True) -> list:
+        if not legacy:
+            return [True] * n_channels
         if exp_number >= NEW_LAYOUT_EXP_NUMBER:
             base = [False] + [True] * 8 + [False] * 7
         else:
             base = [i in (6, 8, 10, 12) for i in range(16)]
         return (base + [False] * n_channels)[:n_channels]
+
+    def default_picks(self, block, n_channels: int, n_samples: int) -> list:
+        """Initial marker positions: the record's own trigger time when it has
+        one (the waves arrive there), else the middle of the record."""
+        t_trig = waveform_trigger_time(block, self.get_run(), self.record_key)
+        if t_trig is not None:
+            idx = int(np.argmin(np.abs(waveform_time(block) - t_trig)))
+        else:
+            idx = n_samples // 2
+        return [idx] * n_channels
+
+    @staticmethod
+    def trace_amplitude(locations) -> float:
+        """Peak-to-peak height of a drawn trace in mm: the sensor spacing, so
+        neighbouring traces touch but do not cross; 12 mm when unknown."""
+        distinct = np.unique(np.asarray(locations, dtype=float))
+        if distinct.size < 2:
+            return DEFAULT_TRACE_AMPLITUDE_MM
+        spacing = float(np.median(np.diff(distinct)))
+        return spacing if spacing > 0 else DEFAULT_TRACE_AMPLITUDE_MM
 
     @staticmethod
     def default_locations(n_channels: int, exp_number: int) -> list:
@@ -251,7 +308,8 @@ class DynamicStrainArrivalPickerView(EventView):
 
     def plot(self):
         exp_number = self.exp_number()
-        strain = self.strain_block(self.event)
+        strain = self.current_block()
+        legacy = self.is_legacy_record()
         linestyle = ".-"
 
         self.figure.clear()
@@ -280,11 +338,12 @@ class DynamicStrainArrivalPickerView(EventView):
         n_channels = y.shape[0]
 
         if self.enabled_channels is None or len(self.enabled_channels) != n_channels:
-            self.enabled_channels = self.default_enabled_channels(n_channels, exp_number)
+            self.enabled_channels = self.default_enabled_channels(n_channels, exp_number, legacy)
         if self.fitting_channels is None or len(self.fitting_channels) != n_channels:
-            self.fitting_channels = self.default_fitting_channels(n_channels, exp_number)
-        if "locations" not in strain or len(strain["locations"]) != n_channels:
-            strain["locations"] = self.block_locations(strain, n_channels) or self.default_locations(n_channels, exp_number)
+            self.fitting_channels = self.default_fitting_channels(n_channels, exp_number, legacy)
+        if len(self.locations) != n_channels:
+            self.locations = self.block_locations(strain, n_channels) or self.default_locations(n_channels, exp_number)
+        amplitude = self.trace_amplitude(self.locations)
 
         if self.filtering:
             nf = self.filter_window()
@@ -299,27 +358,23 @@ class DynamicStrainArrivalPickerView(EventView):
         for i in range(n_channels):
             if not self.enabled_channels[i]:
                 continue
-            loc = strain["locations"][i]
+            loc = self.locations[i]
             self.axs[4].plot([tt[0], tt[-1]], [loc, loc], "k:", zorder=-101)
             span = y[i, :].max() - y[i, :].min()
-            ratio = -12 / span if span > 0 else 0.0
+            ratio = -amplitude / span if span > 0 else 0.0
             self.lines[i] = self.axs[4].plot(tt, y[i, :] * ratio + loc, color="C%d" % line_idx, zorder=-100)[0]
             line_idx += 1
         self.axs[4].set_ylabel("location along fault (mm)")
         self.axs[4].set_xlabel("time - %f (s)" % event_time)
-        if exp_number >= NEW_LAYOUT_EXP_NUMBER:
-            self.axs[4].set_ylim(160, -10)
-        else:
-            self.axs[4].set_ylim(105, 0)
+        self.axs[4].set_ylim(max(self.locations) + amplitude, min(self.locations) - amplitude)
         if self.xlim is None:
             self.axs[0].set_xlim(tt[0], tt[-1])
         else:
             self.axs[0].set_xlim(self.xlim)
-        self.figure.suptitle(self.figure_title())
+        self.figure.suptitle(f"{self.figure_title()}: {self.record_key}")
 
         if self.picked_idx is None or len(self.picked_idx) != n_channels:
-            middle_idx = y.shape[1] // 2
-            self.picked_idx = [middle_idx] * n_channels
+            self.picked_idx = self.default_picks(strain, n_channels, y.shape[1])
         self.draw_markers()
 
     def draw_markers(self):
@@ -446,7 +501,7 @@ class DynamicStrainArrivalPickerView(EventView):
             except ValueError:
                 pass
             self.fitted_line = None
-        locations = self.strain_block(self.event)["locations"]
+        locations = self.locations
         x = [marker.get_center()[0] for marker in self.fitting_markers]
         y = [locations[int(marker.get_label())] for marker in self.fitting_markers]
         self.rupture_speed = math.nan
@@ -476,25 +531,24 @@ class DynamicStrainArrivalPickerView(EventView):
 
     # ---------------------------------------------------------------- save
     def save(self):
-        strain = self.strain_block(self.event)
-        store = waveform_store(strain)
+        """Store the picks with the record they were made on."""
+        block = self.current_block()
         picked = [int(i) for i in self.picked_idx]
-        strain["enabled_channels"] = [bool(v) for v in self.enabled_channels]
-        strain["fitting_channels"] = [bool(v) for v in self.fitting_channels]
-        store["picked_idx"] = picked
-        store["rupture_arrival_time"] = waveform_time(strain)[picked]
-        if self.has_rupture_speed():
-            rupture_speed = float(self.rupture_speed)
-            self.data_manager.set_data(f"{self.event_path}/rupture_speed", rupture_speed, True)
-            self.event["rupture_speed"] = rupture_speed
-        else:
-            # A degenerate fit has no speed; do not leave a nan (or a stale value
-            # from an earlier save) for the CZM fitter to pick up as Cf.
-            self.event.pop("rupture_speed", None)
-            print(f"No rupture speed saved for runs[{self.run_idx}]/events[{self.event_idx}]: "
+        arrivals = {
+            "picked_idx": picked,
+            "arrival_time": waveform_time(block)[picked],
+            "enabled_channels": [bool(v) for v in self.enabled_channels],
+            "fitting_channels": [bool(v) for v in self.fitting_channels],
+            "locations": [float(v) for v in self.locations],
+            # a degenerate fit has no speed: no nan and no stale value for the CZM fitter to pick up as Cf
+            "rupture_speed": float(self.rupture_speed) if self.has_rupture_speed() else None,
+        }
+        write_arrivals(block, arrivals, self.event)
+        if not self.has_rupture_speed():
+            print(f"No rupture speed saved for runs[{self.run_idx}]/events[{self.event_idx}] ({self.record_key}): "
                   "the arrival picks do not define a line (Cf = n/a).")
         self.app.refresh_tree()
-        print(f"Saved runs[{self.run_idx}]/events[{self.event_idx}] to data.")
+        print(f"Saved runs[{self.run_idx}]/events[{self.event_idx}] ({self.record_key}) to data.")
 
     # --------------------------------------------------------------- menus
     @staticmethod

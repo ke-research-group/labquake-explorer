@@ -22,7 +22,7 @@ def _speed_from_picks(view):
     t = strain["original"]["time"]
     fit = [i for i, f in enumerate(view.fitting_channels) if f]
     x = np.array([t[view.picked_idx[i]] for i in fit])
-    y = np.array([strain["locations"][i] for i in fit], dtype=float)
+    y = np.array([view.locations[i] for i in fit], dtype=float)
     slope = np.polyfit(y, x, 1)[0]
     return -1e-3 / slope
 
@@ -44,7 +44,8 @@ def test_open_and_defaults(app_with_strain, view):
     assert view.enabled_channels == OLD_LAYOUT_ENABLED
     assert view.fitting_channels == OLD_LAYOUT_FITTING
     truth_locs = list(view.event["strain_truth"]["locations_mm"])
-    assert view.event["strain"]["locations"] == pytest.approx(truth_locs)
+    assert view.locations == pytest.approx(truth_locs)
+    assert view.record_key == "strain" and list(view.record_combobox["values"]) == ["strain"]
     assert len(view.picked_idx) == N_CHANNELS
     assert sum(line is not None for line in view.lines) == 8
     assert len(view.fitting_markers) == 4
@@ -216,7 +217,7 @@ def test_switch_to_event_without_strain_is_refused(app_with_strain, view, no_dia
     assert view.event_combobox.get() == "1"
     assert view.picked_idx == picks
     assert view.rupture_speed == pytest.approx(speed)
-    assert len(no_dialogs) == 1 and no_dialogs[0][0] == "No strain data"
+    assert len(no_dialogs) == 1 and no_dialogs[0][0] == "No waveform record"
 
     # the same through the combobox: it snaps back to the current event
     view.event_combobox.set("2")
@@ -238,7 +239,7 @@ def test_switch_to_event_without_strain_is_refused(app_with_strain, view, no_dia
 
 def test_open_on_event_without_strain_raises_and_unregisters(app_with_strain):
     app_with_strain.data_manager.get_data("runs/[0]/events/[0]").pop("strain")
-    with pytest.raises(ValueError, match="no strain data"):
+    with pytest.raises(ValueError, match="no full-rate record"):
         DynamicStrainArrivalPickerView(app_with_strain, 0, 0)
     assert not any(isinstance(w, DynamicStrainArrivalPickerView) for w in app_with_strain.child_windows)
 
@@ -279,7 +280,7 @@ def test_filter_window_is_used_as_typed(view):
     x, y = view.lines[channel].get_data()
     filtered = signal.savgol_filter(raw[channel], 50, 2)
     span = filtered.max() - filtered.min()
-    expected = filtered * (-12 / span) + view.event["strain"]["locations"][channel]
+    expected = filtered * (-12 / span) + view.locations[channel]
     np.testing.assert_allclose(y, expected)
 
     # a value savgol cannot use is clamped, and the widget shows what was applied
@@ -300,7 +301,7 @@ def test_filter_window_is_used_as_typed(view):
     assert view.filter_window_length.get() == "50"
     x, y = view.lines[channel].get_data()
     span = raw[channel].max() - raw[channel].min()
-    np.testing.assert_allclose(y, raw[channel] * (-12 / span) + view.event["strain"]["locations"][channel])
+    np.testing.assert_allclose(y, raw[channel] * (-12 / span) + view.locations[channel])
 
 
 class _FakeMouse:
@@ -352,3 +353,113 @@ def test_close_unregisters(app_with_strain):
     assert v in app_with_strain.child_windows
     v.on_close()
     assert v not in app_with_strain.child_windows
+
+
+# ---------------------------------------------------------- waveform records
+def add_pzt_record(event, positions_x, t_trig, fs=200e3, speed=1500.0, key="elsys"):
+    """A PZT-like record whose onsets propagate along x at ``speed`` m/s from the first sensor."""
+    from labquake_explorer.data.channels import channel_array, positions_table
+    n_ch = len(positions_x)
+    time = t_trig - 0.05 + np.arange(int(0.3 * fs)) / fs
+    raw = np.zeros((n_ch, time.size))
+    for i, x in enumerate(positions_x):
+        onset = t_trig + (x - positions_x[0]) * 1e-3 / speed
+        raw[i] = 0.5 * (1.0 + np.tanh((time - onset) / 2e-5))
+    names = [f"pzt_{i + 1}" for i in range(n_ch)]
+    pos = positions_table(names, {n: (x, 100.0, 50.0) for n, x in zip(names, positions_x)})
+    event.setdefault("waveform", {})[key] = channel_array(raw, names, unit="V", positions=pos, time=time,
+                                                          sample_rate=fs, block=3, trigger_time=t_trig,
+                                                          filename=f"{key}.tpc5")
+    return time
+
+
+def test_pzt_record_defaults_positions_and_per_record_save(app):
+    """A PZT record is picked on with all channels enabled, markers at the
+    trigger, traces at the sensor positions, and the picks saved under the
+    record's own 'arrivals' (no event-level rupture_speed)."""
+    event = app.data_manager.get_data("runs/[0]/events/[1]")
+    t_trig = float(event["event_time"]) - 0.02
+    xs = [100.0, 200.0, 300.0, 400.0]
+    time = add_pzt_record(event, xs, t_trig)
+    view = DynamicStrainArrivalPickerView(app, 0, 1)
+    try:
+        assert view.record_key == "waveform/elsys" and list(view.record_combobox["values"]) == ["waveform/elsys"]
+        assert view.enabled_channels == [True] * 4 and view.fitting_channels == [True] * 4
+        assert view.locations == xs
+        assert view.picked_idx == [int(np.argmin(np.abs(time - t_trig)))] * 4
+        assert view.trace_amplitude(xs) == 100.0
+        lo, hi = view.axs[4].get_ylim()
+        assert lo == pytest.approx(500.0) and hi == pytest.approx(0.0)
+        view.magic()
+        assert np.isfinite(view.rupture_speed) and abs(view.rupture_speed) == pytest.approx(1500.0, rel=0.05)
+        view.save()
+        rec = event["waveform"]["elsys"]["arrivals"]
+        assert rec["version"] == 1 and rec["picked_idx"] == view.picked_idx and rec["locations"] == xs
+        assert rec["rupture_speed"] == pytest.approx(view.rupture_speed)
+        np.testing.assert_allclose(rec["arrival_time"], time[view.picked_idx])
+        assert "rupture_speed" not in event and "picked_idx" not in event["waveform"]["elsys"]
+        # the PZT view's "picked arrival" trigger and the CZM fitter read the record's arrivals
+        from labquake_explorer.data.sources import read_arrivals
+        assert read_arrivals(event["waveform"]["elsys"])["rupture_speed"] == pytest.approx(view.rupture_speed)
+    finally:
+        view.on_close()
+    view = DynamicStrainArrivalPickerView(app, 0, 1)              # reopening restores the saved picks
+    try:
+        assert view.picked_idx == rec["picked_idx"] and view.rupture_speed == pytest.approx(rec["rupture_speed"])
+    finally:
+        view.on_close()
+
+
+def test_strain_and_pzt_picks_are_independent(app_with_strain):
+    app = app_with_strain
+    event = app.data_manager.get_data("runs/[0]/events/[1]")
+    t_trig = float(event["event_time"]) - 0.02
+    add_pzt_record(event, [100.0, 200.0, 300.0, 400.0], t_trig)
+    view = DynamicStrainArrivalPickerView(app, 0, 1)
+    try:
+        assert view.record_key == "strain" and list(view.record_combobox["values"]) == ["strain", "waveform/elsys"]
+        view.magic()
+        view.save()
+        strain_speed = app.data_manager.get_data("runs/[0]/events/[1]/rupture_speed")
+        strain_picks = list(event["strain"]["original"]["picked_idx"])
+        view.record_combobox.set("waveform/elsys")
+        view.on_record_selected()
+        assert view.record_key == "waveform/elsys" and len(view.picked_idx) == 4
+        view.magic()
+        view.save()
+        pzt = event["waveform"]["elsys"]["arrivals"]
+        assert abs(pzt["rupture_speed"]) == pytest.approx(1500.0, rel=0.05)
+        # the strain results were not touched by picking on the PZTs
+        assert app.data_manager.get_data("runs/[0]/events/[1]/rupture_speed") == pytest.approx(strain_speed)
+        assert list(event["strain"]["original"]["picked_idx"]) == strain_picks
+        view.record_combobox.set("strain")
+        view.on_record_selected()
+        assert view.picked_idx == strain_picks
+    finally:
+        view.on_close()
+
+
+def test_czm_and_pzt_view_read_the_record_arrivals(app):
+    from labquake_explorer.ui.views.czm_fitter_view import CZMFitterView
+    from labquake_explorer.ui.views.pzt_spectrum_view import PZTSpectrumView, TRIGGER_PICKED
+    event = app.data_manager.get_data("runs/[0]/events/[1]")
+    t_trig = float(event["event_time"]) - 0.02
+    time = add_pzt_record(event, [100.0, 200.0, 300.0, 400.0], t_trig)
+    view = DynamicStrainArrivalPickerView(app, 0, 1)
+    view.magic()
+    view.save()
+    view.on_close()
+    arrivals = event["waveform"]["elsys"]["arrivals"]
+    cz = CZMFitterView(app, 0, 1)
+    try:
+        assert cz.Cf.get() == pytest.approx(abs(arrivals["rupture_speed"]))
+    finally:
+        cz.on_close()
+    pv = PZTSpectrumView(app, 0, 1)
+    try:
+        pv.set_channel(2)
+        pv.trigger_combobox.set(TRIGGER_PICKED)
+        assert pv.compute(), pv.status_var.get()
+        assert pv.window.trigger_time == pytest.approx(time[arrivals["picked_idx"][2]])
+    finally:
+        pv.on_close()

@@ -49,8 +49,8 @@ from labquake_explorer.analysis import spectrum as sp
 from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import EVENT
 from labquake_explorer.ui.views.base import EventView
-from labquake_explorer.data.sources import (pick_waveform_block, waveform_block, waveform_blocks, waveform_channels,
-                                            waveform_data, waveform_store, waveform_time, waveform_trigger_time)
+from labquake_explorer.data.sources import (pick_waveform_block, read_arrivals, waveform_block, waveform_blocks,
+                                            waveform_channels, waveform_data, waveform_time, waveform_trigger_time)
 
 RESULT_VERSION = 1
 
@@ -715,12 +715,12 @@ class PZTSpectrumView(EventView):
             t = t_rec
         else:
             try:
-                store = waveform_store(waveform_block(self.event, self.record_key))
-                arrivals = np.asarray(store["rupture_arrival_time"], dtype=float).ravel()
+                picks = read_arrivals(waveform_block(self.event, self.record_key), self.event)
+                arrivals = np.asarray(picks["arrival_time"], dtype=float).ravel()
                 t = float(arrivals[p["channel"]])
             except (KeyError, TypeError, ValueError, IndexError):
                 raise ValueError(f"no picked arrival for channel {p['channel']} "
-                                 f"({self.record_key}: rupture_arrival_time)") from None
+                                 f"({self.record_key}: run Pick Arrivals on this record first)") from None
         if not math.isfinite(t):
             raise ValueError("trigger time is not finite")
         if not (self.strain_time[0] <= t <= self.strain_time[-1]):

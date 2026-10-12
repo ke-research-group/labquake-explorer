@@ -63,9 +63,7 @@ names. Cross-view reads go through the other view's key.
 
 Two older views predate the rule and are kept as they are so existing files
 stay readable: Pick Arrivals writes into the event's raw layout (see its
-schema below; the PZT view's "picked arrival" trigger reads
-`strain/original/rupture_arrival_time` and the CZM fitter reads
-`rupture_speed` directly), and `czm_parms` carries no `version`.
+schema below) and `czm_parms` carries no `version`.
 
 ## Run layout
 
@@ -136,16 +134,27 @@ them and `delta_x`/`-delta_y` from version 3. "Apply to All Events" turns
 the current picks into times relative to the event, places them on every
 event of the run and saves each result.
 
-### Pick Arrivals (DynamicStrainArrivalPickerView, no result key)
+### `arrivals` (Pick Arrivals, per record, version 1)
 
-Written into the event's existing layout, without a `version`:
+Pick Arrivals works on one full-rate record at a time (the Record selector:
+`waveform/elsys`, `waveform/ni`, ... or the PSU `strain`), and its results
+belong to that record, `event['waveform'][recorder]['arrivals']`, so strain
+and PZT picks never overwrite each other:
 
 | key | meaning |
 |---|---|
-| `rupture_speed` | fitted rupture speed `Cf` in m/s; present only when the picks define a line (a degenerate fit removes the key) |
-| `strain/enabled_channels`, `strain/fitting_channels` | one bool per strain channel: shown, and used in the `Cf` fit |
-| `strain/original/picked_idx` | picked arrival sample index per channel on `strain/original/time` |
-| `strain/original/rupture_arrival_time` | the picked arrival times (s), read by the PZT view's "picked arrival" trigger |
+| `picked_idx` | picked arrival sample index per channel on the record's `time` |
+| `arrival_time` | the picked arrival times (s, run clock), read by the PZT view's "picked arrival" trigger |
+| `enabled_channels`, `fitting_channels` | one bool per channel: shown, and used in the `Cf` fit |
+| `locations` | sensor position along the fault (mm) per channel, from the record's `positions` table |
+| `rupture_speed` | fitted `Cf` in m/s; absent when the picks define no line |
+
+The CZM fitter takes its default `Cf` from the strain record's `arrivals`.
+The PSU `strain` layout keeps its historical keys (`strain/original/picked_idx`,
+`strain/original/rupture_arrival_time`, `strain/enabled_channels`,
+`strain/fitting_channels`, `strain/locations`, and `rupture_speed` at the
+event level); `sources.read_arrivals(block, event)` and `write_arrivals`
+hide the difference from the views.
 
 ### `czm_parms` (CZMFitterView, no version)
 
