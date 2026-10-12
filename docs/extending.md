@@ -90,11 +90,10 @@ path (`slip/slip_3`, `elsys/raw_data/pzt_1`); `aligned_fields(container, n)`
 lists every 1-D series of length `n` this way and `get_field(container,
 path)` resolves one, so a field is the same whether it is a top-level array
 or a row. Event extraction slices channel arrays along the sample axis and
-keeps their metadata: `slip` is sliced, each recorder's `raw_data` slice stays
-under the recorder's key (`elsys/raw_data`, the same path as in the run), and
-the recorder's full-rate record becomes the channel array
-`waveform/<recorder>` (with `time`, `sample_rate`, `filename` and, for a
-recorder that writes separate records, `block`). Older files with
+keeps their metadata: `slip` is sliced, the recorders' blocks (file reference
+and `raw_data` volts) are not copied, and each recorder's full-rate record
+becomes the channel array `waveform/<recorder>` (with `time`, `sample_rate`,
+`filename` and, for a recorder that writes separate records, `block`). Older files with
 top-level 1-D channels keep working: a channel array is only an additional
 place a field can live.
 
@@ -245,9 +244,9 @@ any), decorate the class with `@register_source`, and write a synthetic-file
 test next to `tests/test_sources.py`.
 
 `EventProcessor.extract_events(run, indices, window, pre, post)` slices every
-1-D run field aligned with `time` around each pick, keeps each recorder's
-`raw_data` slice under the recorder's key (`elsys/raw_data`, as in the run; the
-file reference itself is not copied), and adds `waveform/<recorder>`, the
+1-D run field aligned with `time` around each pick (the processed channels;
+the recorders' blocks with their `raw_data` volts are not copied) and adds
+`waveform/<recorder>`, the
 full-rate record as a channel array (`data (n_channels, n)`, `channels`,
 `unit`, `positions`, `time` on the run clock, `sample_rate`, `filename`,
 `block`). Which samples make the record

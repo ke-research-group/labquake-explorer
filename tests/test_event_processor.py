@@ -41,12 +41,8 @@ def test_extract_from_tpc5_run(elsys, tmp_path):
     for f in ("normal_stress", "shear_stress"):
         assert e0[f].shape == e0["time"].shape, f
     assert "displacement" not in e0 and "displacement" not in run        # fault slip lives in slip/slip_1
-    for key in ("events", "calibration", "units", "sources"):
+    for key in ("events", "calibration", "units", "sources", "elsys"):    # processed channels only, no raw volts
         assert key not in e0, key
-    assert set(e0["elsys"]) == {"raw_data"}                 # the recorder's 2 kHz copy, no file reference
-    low = e0["elsys"]["raw_data"]
-    assert low["data"].shape == (4, 200) and low["channels"] == ["pzt_1", "pressure_1", "pressure_2", "eddy_1"]
-    assert low["unit"] == "V"
     assert e0["slip"]["data"].shape == (1, 200) and e0["slip"]["unit"] == "um"
     high = e0["waveform"]["elsys"]
     assert high["filename"] == elsys.name and high["block"] == 2 and high["sample_rate"] == 200_000.0
@@ -55,8 +51,8 @@ def test_extract_from_tpc5_run(elsys, tmp_path):
     # the whole trigger block (2 ms before, 8 ms after the trigger), not the +-50 ms window
     assert high["time"][0] == pytest.approx(0.498, abs=1e-5) and high["time"][-1] == pytest.approx(0.508, abs=1e-5)
     assert high["time"][np.argmax(high["data"][0])] == pytest.approx(0.5, abs=2e-5)
-    # the event at 1.0 s lies in no trigger block: low-rate slice only, plus a note
-    assert "waveform" not in events[1] and events[1]["elsys"]["raw_data"]["data"].shape == (4, 200)
+    # the event at 1.0 s lies in no trigger block: processed channels only, plus a note
+    assert "waveform" not in events[1] and "elsys" not in events[1] and events[1]["slip"]["data"].shape == (1, 200)
     assert events[1]["notes"] == ["elsys: no raw record covers 1.0000 s"]
     assert events[2]["waveform"]["elsys"]["block"] == 3
 
@@ -72,7 +68,7 @@ def test_source_event_settings_and_no_base_dir(elsys, tmp_path, capsys):
     assert e["time"].size > 0
     # without a saved experiment path the references are skipped with a warning, not an error
     e2 = EventProcessor().extract_events(run, [index_at(run, 0.5)], window=0.05)[0]
-    assert "waveform" not in e2 and e2["elsys"]["raw_data"]["channels"][0] == "pzt_1"
+    assert "waveform" not in e2 and "elsys" not in e2 and e2["time"].size > 0
     assert "raw-data references skipped" in capsys.readouterr().out
 
 
@@ -94,9 +90,7 @@ def test_extract_from_tpc5_ni_run(elsys, tmp_path):
     rrun = back.get_data("runs/[0]")
     e = back.event_processor.extract_events(rrun, [index_at(rrun, 1.2)], window=0.05)[0]
     assert e["event_time"] == pytest.approx(1.2, abs=1e-3)
-    assert set(e["elsys"]) == {"raw_data"} and set(e["ni"]) == {"raw_data"} and set(e["waveform"]) == {"elsys", "ni"}
-    low = e["ni"]["raw_data"]
-    assert low["channels"] == ["pressure_1", "pressure_2", "eddy_1"] and low["data"].shape[1] == e["time"].size
+    assert "elsys" not in e and "ni" not in e and set(e["waveform"]) == {"elsys", "ni"}
     # NI, a continuous recorder: its own (pre, post) window at the full 10 kHz rate, all NI fields, no block
     nib = e["waveform"]["ni"]
     assert nib["sample_rate"] == 10_000.0 and "block" not in nib and nib["filename"] == ni.name
@@ -116,7 +110,6 @@ def test_extract_from_tpc5_ni_run(elsys, tmp_path):
     again = DataManager(); again.load_file(tmp_path / "t0001_events.h5")
     e_again = again.get_data("runs/[0]/events/[0]")
     assert e_again["waveform"]["elsys"]["block"] == 2 and e_again["waveform"]["ni"]["data"].shape == nib["data"].shape
-    assert list(e_again["elsys"]["raw_data"]["channels"]) == ["pzt_1"]      # the NI feeds the mechanical channels
 
 
 def test_legacy_strain_layout(tmp_path):

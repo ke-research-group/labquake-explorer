@@ -19,7 +19,7 @@ array (sensor positions per channel), the calibrated scalars `normal_stress`, `s
 `LP_displacement`, the `slip` channel array (um, one row per eddy-current sensor,
 positions attached), `units`, a `calibration` record, and references to the
 raw files (`elsys`, `ni`) that **Pick Events → Extract Events** reads for each
-event's `waveform` records (`<recorder>/raw_data` holds the 2 kHz voltages of the window, as in the run). See `docs/extending.md`, "Run layout".
+event's `waveform` records; an event otherwise holds only the processed channels. See `docs/extending.md`, "Run layout".
 
 The notebooks expect the repository root on `sys.path` (they add it
 themselves) or `pip install -e .`, plus `pandas`, `ipympl` and `jupyter`.
