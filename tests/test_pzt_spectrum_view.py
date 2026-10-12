@@ -88,9 +88,10 @@ def test_open_defaults(brune_app, view):
     assert view.n_fixed_var.get() and view.snr_var.get() == "3"
     assert float(view.radiation_var.get()) == pytest.approx(src.PHASE_CONSTANTS["P"]["radiation_rms"])
     assert view.radiation_hint_var.get() == "RMS for P: 0.516"
-    assert view.record is None and view.fit is None
-    assert view.result_vars["omega0"].get() == "n/a"
-    assert "no saved record" in view.status_var.get()
+    # computed on opening: no Compute button to press
+    assert view.window is not None and view.spectrum is not None and view.record is not None
+    assert "fit" in view.status_var.get() and "Compute" not in view.status_var.get()
+    assert not hasattr(view, "compute_button")
 
 
 def test_compute_uncalibrated_brune_channel(view):
@@ -435,7 +436,7 @@ def test_save_merges_channels_and_is_json_like(brune_app, view):
 
     # a second channel is merged, the first kept
     view.set_channel(TANH_CH)
-    assert view.record is None and view.result_vars["fc"].get() == "n/a"
+    assert view.record is not None and view.record["channel"] == TANH_CH      # computed on selection
     view.remove_step_var.set(True)
     view.unit_combobox.set("V/V")
     view.calibration_path_var.set("")
@@ -446,8 +447,11 @@ def test_save_merges_channels_and_is_json_like(brune_app, view):
     assert saved["channels"]["ch3"]["source"]["valid"]
     assert saved["channels"]["ch0"]["source"] is None
     assert saved["channels"]["ch0"]["remove_step"] is True
-    # save without anything computed is refused
+    # save with nothing computable (a bad control) is refused
     view.set_channel(7)
+    view.pre_var.set("abc")
+    view.schedule_compute(now=True)
+    assert view.record is None and view.result_vars["fc"].get() == "n/a"
     assert not view.save()
     assert "nothing to save" in view.status_var.get()
 
@@ -478,7 +482,7 @@ def test_saved_record_without_channel_field_can_be_saved(brune_app, view):
     v2 = PZTSpectrumView(brune_app, 0, EVENT)
     try:
         assert v2.current_channel() == 2
-        assert "showing saved record" in v2.status_var.get()
+        assert "saved record" in v2.status_var.get()     # recomputed from the partial record's parameters
         assert v2.pre_var.get() == "1"
         assert v2.record["channel"] == 2
         assert v2.save()
@@ -507,10 +511,11 @@ def test_legacy_digit_keyed_channels_loaded_as_a_list_are_read(brune_app, view):
     try:
         assert set(v2.saved_channels()) == {0, 1}
         assert v2.current_channel() == 0
-        assert "showing saved record" in v2.status_var.get()
-        assert v2.result_vars["fc"].get() == f"{fit.fc:.4g} Hz"
+        # the record was computed on channel 3; recomputed on channel 0 it no longer matches
+        assert "differs from the saved record" in v2.status_var.get()
+        assert v2.result_vars["fc"].get() != f"{fit.fc:.4g} Hz"
         v2.set_channel(1)
-        assert "showing saved record" in v2.status_var.get()
+        assert "saved record" in v2.status_var.get()
         v2.set_channel(BRUNE_CH)
         v2.calibration_path_var.set(brune_app.calibration_csv)
         v2.unit_combobox.set("V/m")
@@ -541,13 +546,14 @@ def test_restore_accepts_array_valued_fields(brune_app, view):
     v2 = PZTSpectrumView(brune_app, 0, EVENT)
     try:
         assert v2.current_channel() == BRUNE_CH
-        assert "showing saved record" in v2.status_var.get()
+        # the array-valued record was applied and compared without raising; the recomputation agrees
+        assert "matches the saved record" in v2.status_var.get()
         assert v2.result_vars["fc"].get() == f"{fit_fc:.4g} Hz"
         assert v2.result_vars["band"].get().endswith("Hz")
-        assert "band_limited: synthetic" in v2.result_vars["flags"].get()
-        assert v2.source_vars["warnings"].get() == "kR synthetic warning"
-        assert v2.source_vars["m0"].get().endswith("N m")
         set_medium(v2, "P")
+        v2.schedule_compute(now=True)
+        assert "source parameters computed" in v2.status_var.get()
+        assert v2.source_vars["m0"].get().endswith("N m")
         assert v2.compute_source(), v2.status_var.get()   # band_used array -> f_plateau
     finally:
         v2.on_close()
@@ -567,10 +573,10 @@ def test_malformed_saved_record_does_not_block_the_window(brune_app, view, monke
     v2 = PZTSpectrumView(brune_app, 0, EVENT)
     try:
         assert v2.current_channel() == BRUNE_CH
-        assert v2.result_vars["fc"].get() == "n/a"
+        assert v2.result_vars["fc"].get() != "n/a"       # recomputed from the applied parameters
         assert v2.pre_var.get() == "0.5"                 # parameters were still applied
         v2.set_channel(4)
-        assert "saved record" in v2.status_var.get()
+        assert "saved record" in v2.status_var.get()     # unreadable: reported, nothing recomputed
         assert v2.result_vars["omega0"].get() == "n/a" and v2.result_vars["band"].get() == "n/a"
         assert v2.pre_var.get() == "abc"
         assert not v2.compute() and "pre window" in v2.status_var.get()
@@ -616,7 +622,7 @@ def test_reopen_restores_parameters_and_numbers(brune_app, view):
     v2 = PZTSpectrumView(brune_app, 0, EVENT)
     try:
         assert v2.current_channel() == BRUNE_CH          # opens on the saved channel
-        assert v2.fit is None and v2.window is None      # nothing recomputed
+        assert v2.fit is not None and v2.window is not None   # recomputed from the restored parameters
         assert v2.record is not None and v2.record["fit"]["fc"] == pytest.approx(fit_saved.fc)
         assert (v2.pre_var.get(), v2.post_var.get()) == ("0.4", "1.5")
         assert v2.taper_combobox.get() == "tukey"
@@ -633,9 +639,9 @@ def test_reopen_restores_parameters_and_numbers(brune_app, view):
         # every parameter the controls produce equals the saved record's
         p = v2.read_parameters()
         assert all(p[k] == rec_saved[k] for k in p), {k: (p[k], rec_saved[k]) for k in p if p[k] != rec_saved[k]}
-        # switching to an unsaved channel clears, switching back restores
+        # switching to an unsaved channel computes it with the same controls, switching back restores
         v2.set_channel(5)
-        assert v2.record is None and v2.result_vars["fc"].get() == "n/a"
+        assert v2.record is not None and v2.record["channel"] == 5 and "not saved" in v2.status_var.get()
         assert v2.pre_var.get() == "0.4"                 # parameters are left as they were
         v2.set_channel(BRUNE_CH)
         assert v2.record["fit"]["fc"] == pytest.approx(fit_saved.fc)
@@ -646,9 +652,10 @@ def test_reopen_restores_parameters_and_numbers(brune_app, view):
         assert v2.spectrum.t_star_s == 1e-6 and v2.fit.snr_min == 2.0
         assert v2.spectrum.meta["bins_per_decade"] == 25 and v2.spectrum.meta["fmin"] == 1500.0
         assert v2.spectrum.meta["taper"] == "tukey"
-        # switching event keeps the channel and clears (no record on event 2)
+        # switching event keeps the channel; event 2 has no saved record, so the fresh one is unsaved
         v2.set_event(2)
-        assert v2.current_channel() == BRUNE_CH and v2.record is None
+        assert v2.current_channel() == BRUNE_CH and v2.record is not None
+        assert "saved record" not in v2.status_var.get()   # event 2 has none
         assert v2.title() == "PZT Spectrum - Event 2"
     finally:
         v2.on_close()
@@ -727,3 +734,65 @@ def test_legacy_strain_keeps_event_time_as_default(view):
     assert view.trigger_combobox.get() == TRIGGER_EVENT_TIME
     view.trigger_combobox.set(TRIGGER_RECORD)
     assert not view.compute() and "no trigger time" in view.status_var.get()
+
+
+# ------------------------------------------------------------ live updates
+def test_controls_recompute_without_a_button(brune_app, view):
+    view.set_channel(BRUNE_CH)
+    assert view.record["post_ms"] == 2.0
+    # every entry recomputes on Return and on leaving the field, and after a pause while typing
+    for entry in view.entries.values():
+        assert {"<Key-Return>", "<FocusOut>", "<KeyRelease>"} <= set(entry.bind())
+    view.post_var.set("1.5")
+    view.schedule_compute(now=True)                      # what Return / FocusOut do
+    assert view.record["post_ms"] == 1.5 and view.window.n_post == int(round(1.5e-3 * brune_app.fs))
+    view.pre_var.set("0.6")
+    view.schedule_compute()                              # what a keystroke does: wait for the keys to settle
+    assert view.record["pre_ms"] == 0.5 and view._compute_after_id is not None
+    view.schedule_compute(now=True)                      # what the timer does
+    assert view.record["pre_ms"] == 0.6 and view._compute_after_id is None
+    # a combobox and a checkbox recompute at once
+    view.taper_combobox.set("bh4")
+    view.taper_combobox.event_generate("<<ComboboxSelected>>")
+    assert view.record["taper"] == "bh4"
+    view.n_fixed_var.set(False)
+    view.schedule_compute(now=True)
+    assert view.record["n_fixed"] is False
+    # a half-typed number is reported in the status (and the stale numbers cleared); the next valid value recovers
+    view.pre_var.set("0.a")
+    view.schedule_compute(now=True)
+    assert "pre" in view.status_var.get().lower() and view.record is None
+    view.pre_var.set("0.5")
+    view.schedule_compute(now=True)
+    assert view.record["pre_ms"] == 0.5
+
+
+def test_top_panel_shows_taper_and_tapered_signal(brune_app, view):
+    view.set_channel(BRUNE_CH)
+    labels = [line.get_label() for line in view.ax_time.lines]
+    assert "signal window" in labels and "noise window" in labels and "tapered (what is transformed)" in labels
+    taper_line = view.ax_taper.lines[0]
+    assert taper_line.get_ydata().max() == pytest.approx(1.0) and taper_line.get_ydata().min() == pytest.approx(0.0, abs=1e-9)
+    assert view.ax_taper.get_ylim() == (0.0, 1.05) and view.ax_taper.get_ylabel() == "taper"
+    sig = next(l for l in view.ax_time.lines if l.get_label() == "signal window").get_ydata()
+    tapered = next(l for l in view.ax_time.lines if l.get_label() == "tapered (what is transformed)").get_ydata()
+    np.testing.assert_allclose(tapered, sig * taper_line.get_ydata())
+
+
+def test_saved_record_comparison_in_status(brune_app, view):
+    calibrated_compute(view)
+    assert view.save()
+    view.set_channel(TANH_CH)
+    view.set_channel(BRUNE_CH)
+    assert "matches the saved record" in view.status_var.get()
+    view.post_var.set("1.5")
+    view.schedule_compute(now=True)
+    assert "differs from the saved record" in view.status_var.get()
+
+
+def test_source_parameters_follow_automatically(brune_app, view):
+    calibrated_compute(view)
+    set_medium(view)
+    view.schedule_compute(now=True)
+    assert "source parameters computed" in view.status_var.get()
+    assert view.record["source"] is not None and view.record["source"]["valid"]

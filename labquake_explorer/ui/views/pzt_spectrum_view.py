@@ -15,11 +15,13 @@ line, never in a dialog.  Results are stored under ``event['pzt_spectrum']``
 as ``{"version": 1, "channels": {"ch<channel>": record}}`` so that several
 channels of one event can be kept side by side (see :meth:`build_record`
 for the record keys).  The ``ch`` prefix keeps the channel map from looking
-like a list to loaders that turn all-digit keys into arrays.  Selecting a
-channel with a saved record restores its parameters and shows the saved
-numbers; nothing is recomputed until ``Compute`` is pressed.  A saved record
-that cannot be displayed never prevents the window from opening: the
-controls are left as they are and the status line says why.
+like a list to loaders that turn all-digit keys into arrays.  Everything
+recomputes as soon as a control changes (typing waits until the keys have
+been quiet for a moment); selecting a channel with a saved record restores
+its parameters, recomputes and says whether the result still matches what
+was saved.  A saved record that cannot be displayed never prevents the
+window from opening: the controls are left as they are and the status line
+says why.
 
 Caveats reported by the analysis (``SpectralFit.warnings``: transient not
 in the taper's flat region, band-limited corner, parameters at bounds, no
@@ -27,8 +29,8 @@ convergence) are shown in the ``flags`` row and in the status line; a fit
 with warnings is never labelled "fit OK".  Because the amplitude convention
 (``|rfft(w x)| dt`` without coherent-gain division) only holds when the
 transient sits in the flat part of the taper, a pre window shorter than the
-tukey ramp (``alpha/2`` of the whole window) is warned about at Compute
-and ``Compute source`` refuses a plateau the analysis flagged as attenuated.
+tukey ramp (``alpha/2`` of the whole window) is warned about, and the source
+parameters refuse a plateau the analysis flagged as attenuated.
 
 Typical medium values for the source section (granite-like rock):
 rho = 2700 kg/m^3, Vp = 6000 m/s, Vs = 3500 m/s.  They are NOT defaults:
@@ -54,6 +56,7 @@ from labquake_explorer.data.sources import (pick_waveform_block, read_arrivals, 
 
 RESULT_VERSION = 1
 
+LIVE_DELAY_MS = 400                    # recompute this long after the last keystroke
 TRIGGER_EVENT_TIME = "event_time"
 TRIGGER_RECORD = "record trigger"      # where the recorder fired (the PZT trigger of an Elsys block)
 TRIGGER_PICKED = "picked arrival"
@@ -237,6 +240,7 @@ class PZTSpectrumView(EventView):
                          row=0, column=0, sticky="nsew")
         gs = self.figure.add_gridspec(3, 1, height_ratios=[1.0, 2.0, 1.0])
         self.ax_time = self.figure.add_subplot(gs[0])
+        self.ax_taper = self.ax_time.twinx()               # the taper, 0..1, on the right axis
         self.ax_spec = self.figure.add_subplot(gs[1])
         self.ax_resid = self.figure.add_subplot(gs[2])   # x limits copied from ax_spec in plot()
         self.axes = (self.ax_time, self.ax_spec, self.ax_resid)
@@ -247,7 +251,21 @@ class PZTSpectrumView(EventView):
         ttk.Label(master, text=label).grid(row=row, column=column, padx=4, pady=2, sticky="e")
         entry = ttk.Entry(master, textvariable=var, width=width)
         entry.grid(row=row, column=column + 1, padx=4, pady=2, sticky="w")
+        self._live(entry)
+        if not hasattr(self, "entries"):
+            self.entries = {}
+        self.entries[label] = entry
         return entry
+
+    def _live(self, widget) -> None:
+        """Recompute when the widget's value changes: typing after a pause,
+        Return and leaving the field at once, a combobox choice at once."""
+        if isinstance(widget, ttk.Combobox):
+            widget.bind("<<ComboboxSelected>>", lambda e: self.schedule_compute(now=True), add="+")
+            return
+        widget.bind("<KeyRelease>", lambda e: self.schedule_compute(), add="+")
+        widget.bind("<Return>", lambda e: self.schedule_compute(now=True), add="+")
+        widget.bind("<FocusOut>", lambda e: self.schedule_compute(now=True), add="+")
 
     def _build_selection(self, master) -> None:
         frame = ttk.LabelFrame(master, text="Event / channel")
@@ -265,6 +283,7 @@ class PZTSpectrumView(EventView):
         self.trigger_combobox = ttk.Combobox(frame, width=14, state="readonly", values=list(TRIGGERS))
         self.trigger_combobox.set(TRIGGER_EVENT_TIME)
         self.trigger_combobox.grid(row=3, column=1, padx=4, pady=2, sticky="w")
+        self._live(self.trigger_combobox)
 
     def _build_window_frame(self, master) -> None:
         frame = ttk.LabelFrame(master, text="Window")
@@ -279,12 +298,15 @@ class PZTSpectrumView(EventView):
         self.taper_combobox = ttk.Combobox(frame, width=10, state="readonly", values=list(sp.TAPER_KINDS))
         self.taper_combobox.set(DEFAULTS["taper"])
         self.taper_combobox.grid(row=2, column=1, padx=4, pady=2, sticky="w")
+        self._live(self.taper_combobox)
         ttk.Label(frame, text="Baseline:").grid(row=3, column=0, padx=4, pady=2, sticky="e")
         self.baseline_combobox = ttk.Combobox(frame, width=10, state="readonly", values=list(sp.BASELINE_MODES))
         self.baseline_combobox.set(DEFAULTS["baseline"])
         self.baseline_combobox.grid(row=3, column=1, padx=4, pady=2, sticky="w")
+        self._live(self.baseline_combobox)
         self._entry(frame, "Highpass (Hz):", self.highpass_var, 4)
-        ttk.Checkbutton(frame, text="Remove coseismic step", variable=self.remove_step_var).grid(
+        ttk.Checkbutton(frame, text="Remove coseismic step", variable=self.remove_step_var,
+                        command=lambda: self.schedule_compute(now=True)).grid(
             row=5, column=0, columnspan=2, padx=4, pady=2, sticky="w")
         ttk.Label(frame, text=f"tukey ramp = {TUKEY_ALPHA / 2:.0%} of the window: keep\n"
                               f"pre >= post / {(2.0 / TUKEY_ALPHA) - 1.0:g} or Omega0 is attenuated",
@@ -299,13 +321,16 @@ class PZTSpectrumView(EventView):
         ttk.Label(frame, text="CSV:").grid(row=0, column=0, padx=4, pady=2, sticky="e")
         self.calibration_entry = ttk.Entry(frame, textvariable=self.calibration_path_var, width=18)
         self.calibration_entry.grid(row=0, column=1, padx=4, pady=2, sticky="w")
+        self._live(self.calibration_entry)
         self.browse_button = ttk.Button(frame, text="Browse", width=7, command=self.browse_calibration)
         self.browse_button.grid(row=0, column=2, padx=2, pady=2, sticky="w")
         ttk.Label(frame, text="Unit:").grid(row=1, column=0, padx=4, pady=2, sticky="e")
         self.unit_combobox = ttk.Combobox(frame, width=10, state="readonly", values=list(CALIBRATION_UNITS))
         self.unit_combobox.set(DEFAULTS["calibration_unit"])
         self.unit_combobox.grid(row=1, column=1, padx=4, pady=2, sticky="w")
-        ttk.Checkbutton(frame, text="gain in dB", variable=self.calibration_db_var).grid(
+        self._live(self.unit_combobox)
+        ttk.Checkbutton(frame, text="gain in dB", variable=self.calibration_db_var,
+                        command=lambda: self.schedule_compute(now=True)).grid(
             row=1, column=2, padx=2, pady=2, sticky="w")
         self._entry(frame, "t* (s, blank = off):", self.t_star_var, 2)
 
@@ -321,20 +346,22 @@ class PZTSpectrumView(EventView):
         self._entry(frame, "fmax (Hz):", self.fmax_var, 1)
         self._entry(frame, "bins / decade:", self.bins_var, 2)
         self._entry(frame, "SNR min (blank = off):", self.snr_var, 3)
-        ttk.Checkbutton(frame, text="n fixed at 2", variable=self.n_fixed_var).grid(
+        ttk.Checkbutton(frame, text="n fixed at 2", variable=self.n_fixed_var,
+                        command=lambda: self.schedule_compute(now=True)).grid(
             row=4, column=0, columnspan=2, padx=4, pady=2, sticky="w")
         ttk.Label(frame, text="Loss:").grid(row=5, column=0, padx=4, pady=2, sticky="e")
         self.loss_combobox = ttk.Combobox(frame, width=10, state="readonly", values=list(sp.LOSSES))
         self.loss_combobox.set(DEFAULTS["loss"])
         self.loss_combobox.grid(row=5, column=1, padx=4, pady=2, sticky="w")
+        self._live(self.loss_combobox)
 
     def _build_buttons(self, master) -> None:
         frame = ttk.Frame(master)
         frame.pack(fill="x", pady=4)
-        self.compute_button = ttk.Button(frame, text="Compute", command=self.compute)
-        self.compute_button.grid(row=0, column=0, padx=4, pady=2, sticky="ew")
         self.save_button = ttk.Button(frame, text="Save", command=self.save)
-        self.save_button.grid(row=0, column=1, padx=4, pady=2, sticky="ew")
+        self.save_button.grid(row=0, column=0, padx=4, pady=2, sticky="ew")
+        ttk.Label(frame, text="recomputes as the controls change", foreground="#606060").grid(
+            row=0, column=1, padx=8, pady=2, sticky="w")
         self.status_var = tk.StringVar(master=self, value="")
         ttk.Label(master, textvariable=self.status_var, wraplength=260, foreground="#a03030").pack(
             fill="x", pady=2)
@@ -443,12 +470,16 @@ class PZTSpectrumView(EventView):
             # arrive at the recorder's own trigger, often tens of ms earlier
             self.trigger_combobox.set(TRIGGER_RECORD)
         self._first_load = False
-        if self.fmax_var.get().strip() == "":
+        self._default_fmax()
+        self.restore_channel()
+
+    def _default_fmax(self) -> None:
+        """Fill a blank fmax with a fraction of the record's sampling rate."""
+        if self.fmax_var.get().strip() == "" and self.strain_time is not None:
             try:
                 self.fmax_var.set(_text(FMAX_FRACTION_OF_FS * sp.sampling_rate(self.strain_time)))
             except ValueError:
                 pass
-        self.restore_channel()
 
     def _channel_label(self, channel) -> str:
         """Combobox text of a channel: ``'3: pzt_4'`` when the record names its fields, else ``'3'``."""
@@ -520,6 +551,7 @@ class PZTSpectrumView(EventView):
         if phase in src.PHASES and self.radiation_is_default():
             self.radiation_var.set(_text(src.PHASE_CONSTANTS[phase]["radiation_rms"]))
         self._update_radiation_hint()
+        self.schedule_compute(now=True)
 
     # ----------------------------------------------------------- records
     def saved_channels(self) -> dict:
@@ -558,10 +590,11 @@ class PZTSpectrumView(EventView):
         that cannot be displayed is reported in the status line and dropped
         (the controls keep whatever was applied), never raised."""
         self._clear_channel_state()
+        self._saved_for_compare = None
         channel = self.current_channel()
         rec = self.saved_channels().get(channel) if channel is not None else None
         if not isinstance(rec, dict):
-            self.status_var.set(f"channel {channel}: no saved record - click Compute")
+            self.live_compute()
             return
         try:
             self.record = copy.deepcopy(rec)
@@ -569,6 +602,7 @@ class PZTSpectrumView(EventView):
             # without the field is filed under the channel it was found at
             self.record.setdefault("channel", int(channel))
             self.apply_record(self.record)
+            self._default_fmax()                         # a partial record may not carry a band
             self.show_record(self.record)
             self.show_source(self.record.get("source"))
             self.plot()
@@ -581,9 +615,78 @@ class PZTSpectrumView(EventView):
             except _RECORD_ERRORS:
                 pass
             self.status_var.set(f"channel {channel}: saved record unreadable "
-                                f"({type(e).__name__}: {e}) - click Compute")
+                                f"({type(e).__name__}: {e}) - change a control to recompute")
             return
-        self.status_var.set(f"channel {channel}: showing saved record (click Compute to recompute)")
+        self._saved_for_compare = self.record
+        self.live_compute()
+
+    # ------------------------------------------------------- live updates
+    def schedule_compute(self, now: bool = False) -> None:
+        """Recompute at once, or once the controls have been quiet for
+        ``LIVE_DELAY_MS`` (so a half-typed number is not reported as an error)."""
+        pending = getattr(self, "_compute_after_id", None)
+        if pending is not None:
+            try:
+                self.after_cancel(pending)
+            except tk.TclError:
+                pass
+            self._compute_after_id = None
+        if now:
+            self.live_compute()
+        else:
+            self._compute_after_id = self.after(LIVE_DELAY_MS, self.live_compute)
+
+    def live_compute(self) -> None:
+        """Window, spectrum and fit for the current controls, then the source
+        parameters when the medium is given; the status says whether the
+        result still matches the channel's saved record."""
+        self._compute_after_id = None
+        if self.strain_raw is None or not self.winfo_exists():
+            return
+        saved = getattr(self, "_saved_for_compare", None)
+        if not self.compute():
+            # stale numbers must not survive a failed recompute; the status keeps the reason
+            reason = self.status_var.get()
+            self.window = self.spectrum = self.fit = None
+            self.record = None
+            self.show_fit(None)
+            self.show_source(None)
+            self.plot()
+            self.status_var.set(reason)
+            return
+        if isinstance(saved, dict):
+            self.status_var.set(self.status_var.get().replace("- not saved", "- " + self.compare_with_saved(saved)))
+        self.auto_source()
+
+    def compare_with_saved(self, saved: dict) -> str:
+        """'matches the saved record' when the fresh fit has the saved
+        trigger time, Omega0 and fc, else a hint to save."""
+        fresh = self.record or {}
+        try:
+            same = math.isclose(float(fresh["trigger_time_s"]), float(saved["trigger_time_s"]), rel_tol=1e-9, abs_tol=1e-9)
+            for key in ("omega0", "fc"):
+                a, b = float(fresh["fit"][key]), float(saved["fit"][key])
+                same = same and (math.isclose(a, b, rel_tol=1e-6) or (math.isnan(a) and math.isnan(b)))
+        except (KeyError, TypeError, ValueError):
+            same = False
+        return "matches the saved record" if same else "differs from the saved record (Save to update)"
+
+    def auto_source(self) -> None:
+        """Source parameters without a button: computed when the fit is valid,
+        the spectrum calibrated and the medium entries filled in; otherwise the
+        source section simply stays empty."""
+        fitd = self.record.get("fit") if isinstance(self.record, dict) else None
+        if not (isinstance(fitd, dict) and fitd.get("valid") and fitd.get("amp_units") == "m*s"):
+            return
+        try:
+            self.read_source_inputs()
+        except ValueError:
+            return
+        status = self.status_var.get()
+        if self.compute_source():
+            self.status_var.set(f"{status}; source parameters computed")
+        else:
+            self.status_var.set(f"{status}; source: {self.status_var.get()}")
 
     def apply_record(self, rec: dict) -> None:
         """Put a record's parameters into the controls."""
@@ -908,7 +1011,7 @@ class PZTSpectrumView(EventView):
         """Merge the current channel's record into event['pzt_spectrum']
         (keys ``'ch<k>'``; legacy digit keys of other channels are renamed)."""
         if not isinstance(self.record, dict):
-            self.status_var.set("nothing to save - click Compute first")
+            self.status_var.set("nothing to save - the current controls give no spectrum")
             return False
         channel = self.record.get("channel")
         if channel is None:
@@ -1000,19 +1103,30 @@ class PZTSpectrumView(EventView):
         and the current record's binned spectrum and fit."""
         for ax in self.axes:
             ax.clear()
+        self.ax_taper.clear()
         self._decorate_axes()
         w, s, rec = self.window, self.spectrum, self.record
 
         if w is not None:
-            self.ax_time.plot(w.t_rel * 1e3, w.signal, color="#1f77b4", lw=1.0, label="signal window")
+            kind = rec.get("taper") if isinstance(rec, dict) else None
+            kind = kind if kind in sp.TAPER_KINDS else self.taper_combobox.get()
+            taper = sp.taper_window(w.signal.size, kind if kind in sp.TAPER_KINDS else DEFAULTS["taper"], TUKEY_ALPHA)
+            t_ms = w.t_rel * 1e3
             if w.noise_available:
                 t_noise = (np.arange(-w.noise.size, 0) - w.n_pre) / w.fs * 1e3
                 self.ax_time.plot(t_noise, w.noise, color="#7f7f7f", lw=0.8, label="noise window")
+            self.ax_time.plot(t_ms, w.signal, color="#1f77b4", lw=1.0, label="signal window")
+            self.ax_time.plot(t_ms, w.signal * taper, color="#d62728", lw=1.0, label="tapered (what is transformed)")
             self.ax_time.axvline(0.0, color="k", lw=0.8, ls=":")
-            self.ax_time.legend(loc="upper right", fontsize=8)
-        elif rec is not None:
-            self.ax_time.text(0.5, 0.5, "saved record - click Compute to show the window",
-                              ha="center", va="center", transform=self.ax_time.transAxes, fontsize=9)
+            self.ax_taper.plot(t_ms, taper, color="k", lw=0.8, ls="--", label=f"{kind} taper")
+            self.ax_taper.set_ylim(0.0, 1.05)
+            self.ax_taper.set_ylabel("taper")
+            h1, l1 = self.ax_time.get_legend_handles_labels()
+            h2, l2 = self.ax_taper.get_legend_handles_labels()
+            self.ax_time.legend(h1 + h2, l1 + l2, loc="upper right", fontsize=8)
+        else:
+            self.ax_taper.set_yticks([])
+            self.ax_taper.set_ylabel("")
 
         if s is not None:
             pos = s.f > 0
@@ -1086,3 +1200,4 @@ class PZTSpectrumView(EventView):
                                           filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
         if path:
             self.calibration_path_var.set(path)
+            self.schedule_compute(now=True)
