@@ -298,3 +298,17 @@ first 1 % removed as baseline).
 
 The notebooks in `examples/preprocessing/` are thin scripts over this package:
 paths, channel maps, the calibration, the builders, plots, save.
+
+## Upgrading files saved by an older explorer
+
+`labquake_explorer/data/migrate.py` brings an experiment file up to the
+layouts above: run keys that were dropped, picks moved into
+`event_extraction`, events reduced to the processed channels plus
+`waveform/<recorder>` records (with `trigger_time` and `positions`), arrival
+picks under `arrivals`, `event_analysis` records at version 3. The PSU
+`strain` layout is left as it is. A copy of the original is kept next to the
+file unless `--no-backup` is given:
+
+```bash
+python -m labquake_explorer.data.migrate experiment.h5
+```
