@@ -46,6 +46,7 @@ def test_extract_from_tpc5_run(elsys, tmp_path):
     assert e0["slip"]["data"].shape == (1, 200) and e0["slip"]["unit"] == "um"
     high = e0["waveform"]["elsys"]
     assert high["filename"] == elsys.name and high["block"] == 2 and high["sample_rate"] == 200_000.0
+    assert high["trigger_time"] == pytest.approx(0.5)                    # where the recorder fired, run clock
     assert high["channels"] == ["pzt_1", "pressure_1", "pressure_2", "eddy_1"] and high["unit"] == "V"
     assert high["data"].shape == (4, high["time"].size) and high["data"].dtype == np.float32
     # the whole trigger block (2 ms before, 8 ms after the trigger), not the +-50 ms window
@@ -93,7 +94,7 @@ def test_extract_from_tpc5_ni_run(elsys, tmp_path):
     assert "elsys" not in e and "ni" not in e and set(e["waveform"]) == {"elsys", "ni"}
     # NI, a continuous recorder: its own (pre, post) window at the full 10 kHz rate, all NI fields, no block
     nib = e["waveform"]["ni"]
-    assert nib["sample_rate"] == 10_000.0 and "block" not in nib and nib["filename"] == ni.name
+    assert nib["sample_rate"] == 10_000.0 and "block" not in nib and "trigger_time" not in nib and nib["filename"] == ni.name
     assert nib["channels"] == ["pressure_1", "pressure_2", "eddy_1"]
     assert nib["time"][0] == pytest.approx(1.19, abs=1e-3) and nib["time"][-1] == pytest.approx(1.30, abs=1e-3)
     eddy = nib["data"][2]
@@ -102,6 +103,7 @@ def test_extract_from_tpc5_ni_run(elsys, tmp_path):
     # Elsys, a recorder with trigger blocks: block 2 shifted onto the run clock, PZT only
     st = e["waveform"]["elsys"]
     assert st["block"] == 2 and st["channels"] == ["pzt_1"] and st["filename"] == elsys.name
+    assert st["trigger_time"] == pytest.approx(1.2, abs=1e-3)           # the Elsys trigger on the NI clock
     assert st["time"][np.argmax(st["data"][0])] == pytest.approx(1.2, abs=2e-5)
     # the new events survive a save/reload
     rrun["events"] = [e]

@@ -93,7 +93,8 @@ or a row. Event extraction slices channel arrays along the sample axis and
 keeps their metadata: `slip` is sliced, the recorders' blocks (file reference
 and `raw_data` volts) are not copied, and each recorder's full-rate record
 becomes the channel array `waveform/<recorder>` (with `time`, `sample_rate`,
-`filename` and, for a recorder that writes separate records, `block`). Older files with
+`filename` and, for a recorder that writes separate records, `block` and
+`trigger_time`, where the recorder fired, on the run clock). Older files with
 top-level 1-D channels keep working: a channel array is only an additional
 place a field can live.
 
@@ -249,7 +250,7 @@ the recorders' blocks with their `raw_data` volts are not copied) and adds
 `waveform/<recorder>`, the
 full-rate record as a channel array (`data (n_channels, n)`, `channels`,
 `unit`, `positions`, `time` on the run clock, `sample_rate`, `filename`,
-`block`). Which samples make the record
+`block`, `trigger_time`). Which samples make the record
 is the source's decision, `Source.waveform(event_time, pre, post)`: a
 recorder that writes separate records around triggers (tpc5 ECR mode) copies
 the whole record that contains the event time and overlaps the most of the

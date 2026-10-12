@@ -8,7 +8,7 @@ import pytest
 from labquake_explorer.analysis import source as src
 from labquake_explorer.analysis import spectrum as sp
 from labquake_explorer.ui.views.pzt_spectrum_view import (
-    PZTSpectrumView, RESULT_VERSION, TRIGGER_PICKED, TRIGGER_EVENT_TIME, TUKEY_ALPHA,
+    PZTSpectrumView, RESULT_VERSION, TRIGGER_PICKED, TRIGGER_EVENT_TIME, TRIGGER_RECORD, TUKEY_ALPHA,
     channel_key, parse_channel_key,
 )
 
@@ -687,3 +687,43 @@ def test_db_calibration_flag_reaches_the_loader(view, tmp_path):
     view.calibration_db_var.set(False)
     assert view.compute()
     assert view.fit.omega0 == pytest.approx(OMEGA0_V / db, rel=0.05)
+
+
+def test_record_trigger_is_the_default_for_a_waveform_record(app):
+    """A waveform record extracted from an Elsys trigger block carries the
+    recorder's own trigger time; the view triggers on it by default because the
+    event_time is a pick on the slow mechanical channels, tens of ms later."""
+    from labquake_explorer.data.channels import channel_array
+    run = app.data_manager.get_data("runs/[0]")
+    event = app.data_manager.get_data("runs/[0]/events/[1]")
+    fs = 200e3
+    t_trig = float(event["event_time"]) - 0.02                      # the PZT trigger, 20 ms before the pick
+    time = t_trig - 0.1 + np.arange(int(0.6 * fs)) / fs
+    rng = np.random.default_rng(3)
+    raw = rng.normal(0.0, 1e-4, (2, time.size))
+    burst = np.exp(-((time - t_trig - 2e-4) / 1e-4) ** 2) * np.sin(2 * np.pi * 50e3 * (time - t_trig))
+    raw[0] += 0.5 * burst
+    event["waveform"] = {"elsys": channel_array(raw, ["pzt_1", "pzt_2"], unit="V", time=time, sample_rate=fs,
+                                                block=4, trigger_time=t_trig, filename="run.tpc5")}
+    v = PZTSpectrumView(app, 0, 1)
+    try:
+        assert v.record_key == "waveform/elsys" and v.trigger_combobox.get() == TRIGGER_RECORD
+        assert v.record_trigger_time() == pytest.approx(t_trig)
+        assert v.compute(), v.status_var.get()
+        assert v.window.trigger_time == pytest.approx(t_trig)
+        assert v.record["trigger"] == TRIGGER_RECORD and v.record["trigger_time_s"] == pytest.approx(t_trig)
+        # an older record without the stored time is looked up in the run's block table
+        del event["waveform"]["elsys"]["trigger_time"]
+        run["elsys"] = {"format": "tpc5", "blocks": {"block": [2, 3, 4], "trigger_time_run": [1.0, 2.0, t_trig]}}
+        assert v.record_trigger_time() == pytest.approx(t_trig)
+        # a record with no trigger of its own reports it instead of failing silently
+        del event["waveform"]["elsys"]["block"]
+        assert not v.compute() and "no trigger time" in v.status_var.get()
+    finally:
+        v.on_close()
+
+
+def test_legacy_strain_keeps_event_time_as_default(view):
+    assert view.trigger_combobox.get() == TRIGGER_EVENT_TIME
+    view.trigger_combobox.set(TRIGGER_RECORD)
+    assert not view.compute() and "no trigger time" in view.status_var.get()

@@ -4,7 +4,8 @@ The view is a thin Tk shell around :mod:`labquake_explorer.analysis.spectrum`
 and :mod:`labquake_explorer.analysis.source`: it reads
 a full-rate record of the event (``event['waveform'][<recorder>]`` with ``time``
 and ``data``, or the PSU-era ``strain`` block) and ``event['event_time']``
-(or a picked per-channel arrival), collects and validates the user's
+(or the record's own trigger time, where the recorder fired, or a picked
+per-channel arrival), collects and validates the user's
 parameters, and calls
 
     extract_window -> compute_spectrum -> fit_omega_n -> source_parameters
@@ -49,13 +50,14 @@ from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import EVENT
 from labquake_explorer.ui.views.base import EventView
 from labquake_explorer.data.sources import (pick_waveform_block, waveform_block, waveform_blocks, waveform_channels,
-                                            waveform_data, waveform_store, waveform_time)
+                                            waveform_data, waveform_store, waveform_time, waveform_trigger_time)
 
 RESULT_VERSION = 1
 
 TRIGGER_EVENT_TIME = "event_time"
+TRIGGER_RECORD = "record trigger"      # where the recorder fired (the PZT trigger of an Elsys block)
 TRIGGER_PICKED = "picked arrival"
-TRIGGERS = (TRIGGER_EVENT_TIME, TRIGGER_PICKED)
+TRIGGERS = (TRIGGER_EVENT_TIME, TRIGGER_RECORD, TRIGGER_PICKED)
 CALIBRATION_UNITS = ("V/V", "V/m", "V/(m/s)", "V/(m/s^2)")
 
 #: Tukey taper shape passed to ``compute_spectrum``; the first and last
@@ -436,6 +438,10 @@ class PZTSpectrumView(EventView):
         if current is None or not (0 <= current < n_channels):
             current = 0
         self.channel_combobox.set(self._channel_label(current))
+        if self._first_load and not saved and self.record_trigger_time() is not None:
+            # the event time is a pick on the slow mechanical channels; the waves
+            # arrive at the recorder's own trigger, often tens of ms earlier
+            self.trigger_combobox.set(TRIGGER_RECORD)
         self._first_load = False
         if self.fmax_var.get().strip() == "":
             try:
@@ -685,6 +691,15 @@ class PZTSpectrumView(EventView):
                            f"post / {(2.0 / TUKEY_ALPHA) - 1.0:g}")
         return out
 
+    def record_trigger_time(self) -> Optional[float]:
+        """The selected record's own trigger time on the run clock, or None."""
+        block = waveform_block(self.event, self.record_key) if (self.record_key and isinstance(self.event, dict)) else None
+        try:
+            run = self.get_run()
+        except Exception:
+            run = None
+        return waveform_trigger_time(block, run, self.record_key)
+
     def trigger_time(self, p: dict) -> float:
         """Absolute trigger time for the parameters ``p`` (ValueError if unavailable)."""
         if p["trigger"] == TRIGGER_EVENT_TIME:
@@ -692,6 +707,12 @@ class PZTSpectrumView(EventView):
                 t = float(self.event["event_time"])
             except (KeyError, TypeError, ValueError):
                 raise ValueError("event has no event_time") from None
+        elif p["trigger"] == TRIGGER_RECORD:
+            t_rec = self.record_trigger_time()
+            if t_rec is None:
+                raise ValueError(f"{self.record_key} has no trigger time of its own (continuous recorder or "
+                                 "older event): use event_time or a picked arrival")
+            t = t_rec
         else:
             try:
                 store = waveform_store(waveform_block(self.event, self.record_key))
