@@ -716,7 +716,7 @@ def test_pzt_view_records_feed_the_scaling_view(app_with_strain, tmp_path):
             assert pv.save()
         finally:
             pv.on_close()
-    assert set(events[0]["pzt_spectrum"]["channels"]) == {"ch3"}
+    assert set(events[0]["strain"]["spectrum"]["channels"]) == {"ch3"}      # saved with the record
 
     v = SourceScalingView(app, 0)
     try:
@@ -758,3 +758,20 @@ def test_mechanical_values_read_version_3_records():
     v2 = {"event_analysis": {"version": 2, "stress_drop": 0.4, "displacement": 30.0,
                              "stress_drop_trend": 0.5, "displacement_trend": 60.0}}
     assert mechanical_values(v2, trend=True) == {"mech_stress_drop": 0.5, "mech_slip": 60.0}
+
+
+def test_records_under_the_waveform_records_are_gathered(app):
+    from labquake_explorer.data.channels import channel_array
+    from labquake_explorer.ui.views.source_scaling_view import available_channels, pzt_channel_records
+    run = app.data_manager.get_data("runs/[0]")
+    event = run["events"][1]
+    t = np.linspace(0, 1, 11)
+    event["waveform"] = {"elsys": channel_array(np.zeros((2, 11)), ["pzt_1", "pzt_2"], time=t, sample_rate=10.0,
+                                                spectrum={"version": 1, "channels": {"ch1": dict(source_record(2.0), channel=1)}})}
+    event["strain"] = {"filename": "x", "time_offset": 0.0, "time": t, "raw": np.zeros((1, 11)),
+                       "original": {"time": t, "raw": np.zeros((1, 11))},
+                       "spectrum": {"version": 1, "channels": {"ch0": dict(source_record(1.0), channel=0)}}}
+    per_channel = pzt_channel_records(event)
+    assert set(per_channel) == {"ch0", "ch1"}
+    assert per_channel["ch1"]["seismic_moment_nm"] == pytest.approx(2.0)
+    assert "ch1" in available_channels(run) and "ch0" in available_channels(run)

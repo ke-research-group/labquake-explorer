@@ -1,7 +1,9 @@
 """Scaling of PZT source parameters across the events of one run.
 
 For every event of a run the view collects the source parameters saved by
-the PZT spectrum view (``event['pzt_spectrum']['channels'][ch]['source']``:
+the PZT spectrum view (``spectrum['channels'][ch]['source']`` of each
+waveform record, or of the strain block; the older event-level
+``event['pzt_spectrum']`` map is read too:
 seismic moment, Mw, source radius, stress drop; the corner frequency and its
 quality flags come from the same channel record's ``fit``) together with the
 mechanical results of the event analyser (``event['event_analysis']``:
@@ -69,10 +71,12 @@ from labquake_explorer.analysis.source import moment_magnitude, stress_drop_eshe
 from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import RUN
 from labquake_explorer.ui.views.base import RunView, event_list
+from labquake_explorer.data.sources import waveform_blocks
 from labquake_explorer.ui.views.pzt_spectrum_view import parse_channel_key
 
 RESULT_VERSION = 2
-PZT_KEY = "pzt_spectrum"
+PZT_KEY = "pzt_spectrum"               # the older event-level map
+SPECTRUM_KEY = "spectrum"              # per waveform record (or the strain block)
 MECH_KEY = "event_analysis"
 ALL_CHANNELS = "all"
 REFERENCE_EXPONENT = -1.0 / 3.0
@@ -280,10 +284,13 @@ def pzt_channel_records(event: dict, exclude_near_field: bool = False) -> dict[s
     ``constants`` (the ``CONSTANT_KEYS`` subset).
     """
     out: dict[str, dict] = {}
-    pzt = event.get(PZT_KEY) if isinstance(event, dict) else None
-    if not isinstance(pzt, dict):
+    if not isinstance(event, dict):
         return out
-    for name, record in _channel_items(pzt.get("channels")):
+    stores = [block.get(SPECTRUM_KEY) for block in waveform_blocks(event).values() if isinstance(block, dict)]
+    stores.append(event.get(PZT_KEY))
+    for name, record in [item for store in stores if isinstance(store, dict) for item in _channel_items(store.get("channels"))]:
+        if name in out:
+            continue
         source = record.get("source")
         if not isinstance(source, dict) or _is_false(source.get("valid", True)):
             continue

@@ -91,7 +91,9 @@ def test_upgrade_brings_runs_and_events_up_to_date():
     assert arrivals["picked_idx"] == [100, 200] and arrivals["fitting_channels"] == [True, False]
     assert arrivals["rupture_speed"] == 1500.0 and "rupture_speed" not in e0
     assert "picked_idx" not in e0["waveform"]["elsys"] and e0["waveform"]["elsys"]["arrivals"]["version"] == 1
-    assert e0["pzt_spectrum"]["channels"]["ch0"]["record"] == "waveform/elsys"
+    assert "pzt_spectrum" not in e0
+    moved = e0["waveform"]["elsys"]["spectrum"]
+    assert moved["version"] == 1 and moved["channels"]["ch0"]["record"] == "waveform/elsys"
     assert e1["waveform"]["ni"]["data"].shape == (1, 50) and "trigger_time" not in e1["waveform"]["ni"]
     # a second pass changes nothing
     assert M.upgrade_experiment(data) == []

@@ -11,10 +11,13 @@ parameters, and calls
     extract_window -> compute_spectrum -> fit_omega_n -> source_parameters
 
 Nothing numerical happens here.  Invalid entries are reported in the status
-line, never in a dialog.  Results are stored under ``event['pzt_spectrum']``
-as ``{"version": 1, "channels": {"ch<channel>": record}}`` so that several
-channels of one event can be kept side by side (see :meth:`build_record`
-for the record keys).  The ``ch`` prefix keeps the channel map from looking
+line, never in a dialog.  Results are stored with the record they were
+computed on, ``event['waveform'][recorder]['spectrum']`` (or
+``event['strain']['spectrum']`` for the PSU layout), as
+``{"version": 1, "channels": {"ch<channel>": record}}`` so that several
+channels of one record can be kept side by side (see :meth:`build_record`
+for the record keys); the older event-level ``event['pzt_spectrum']`` map is
+still read and is moved into the record on the next save.  The ``ch`` prefix keeps the channel map from looking
 like a list to loaders that turn all-digit keys into arrays.  Everything
 recomputes as soon as a control changes (typing waits until the keys have
 been quiet for a moment); selecting a channel with a saved record restores
@@ -70,7 +73,9 @@ CALIBRATION_UNITS = ("V/V", "V/m", "V/(m/s)", "V/(m/s^2)")
 #: after it) must lie beyond that fraction for the plateau to be unattenuated.
 TUKEY_ALPHA = 0.25
 
-#: Prefix of the per-channel keys in ``event['pzt_spectrum']['channels']``.
+SPECTRUM_KEY = "spectrum"              # under the waveform record (or the PSU strain block)
+LEGACY_SPECTRUM_KEY = "pzt_spectrum"   # the event-level map written before 2026-10-12, read only
+#: Prefix of the per-channel keys in a ``spectrum['channels']`` map.
 CHANNEL_KEY_PREFIX = "ch"
 
 #: Start of the analysis warning that flags an attenuated plateau.
@@ -185,7 +190,7 @@ def _warning_texts(value) -> list[str]:
 
 
 def channel_key(channel: int) -> str:
-    """Key of ``channel`` in ``event['pzt_spectrum']['channels']``."""
+    """Key of ``channel`` in a ``spectrum['channels']`` map."""
     return f"{CHANNEL_KEY_PREFIX}{int(channel)}"
 
 
@@ -202,7 +207,7 @@ class PZTSpectrumView(EventView):
     """Window, spectrum, omega-n fit and source parameters for one channel."""
 
     window_title = "PZT Spectrum"
-    result_key = "pzt_spectrum"
+    result_key = LEGACY_SPECTRUM_KEY       # the event-level map of older files; saves go under the record
 
     def __init__(self, app, run_idx, event_idx):
         self.strain_time: Optional[np.ndarray] = None
@@ -570,27 +575,45 @@ class PZTSpectrumView(EventView):
         self.schedule_compute(now=True)
 
     # ----------------------------------------------------------- records
-    def saved_channels(self) -> dict:
-        """``{channel: record}`` parsed from ``event['pzt_spectrum']['channels']``
-        (keys ``'ch<k>'``; legacy all-digit keys are accepted too).
+    def current_block(self):
+        """The selected record (a waveform record or the PSU strain block), or None."""
+        return waveform_block(self.event, self.record_key) if (self.record_key and isinstance(self.event, dict)) else None
 
-        A legacy map keyed ``'0'..'n-1'`` comes back from an HDF5 file as a
-        LIST (the loader turns contiguous digit keys into one); its entries
-        are channels 0..n-1.  Only dict records count.
-        """
-        saved = self.load_results()
-        channels = saved.get("channels") if saved else None
-        out = {}
+    @staticmethod
+    def _channel_entries(store) -> list:
+        """``[(channel, record)]`` of a ``{"channels": ...}`` map; keys ``'ch<k>'``
+        or legacy digits, or a LIST (an HDF5 loader turns contiguous digit keys
+        into one, its entries being channels 0..n-1).  Only dict records count."""
+        channels = store.get("channels") if isinstance(store, dict) else None
         if isinstance(channels, dict):
             items = list(channels.items())
         elif isinstance(channels, (list, tuple)):
             items = list(enumerate(channels))
         else:
             items = []
+        out = []
         for key, rec in items:
             k = parse_channel_key(key)
-            if k is not None and isinstance(rec, dict) and rec.get("record", self.record_key) == self.record_key:
+            if k is not None and isinstance(rec, dict):
+                out.append((k, rec))
+        return out
+
+    def legacy_channels(self) -> dict:
+        """Records of this view's record still kept in the event-level map of older files."""
+        out = {}
+        for k, rec in self._channel_entries(self.load_results()):
+            if rec.get("record", self.record_key) == self.record_key:
                 out[k] = rec
+        return out
+
+    def saved_channels(self) -> dict:
+        """``{channel: record}`` saved with the selected record (``spectrum``
+        under the waveform record or the strain block), plus any channel of
+        it still in the older event-level map."""
+        block = self.current_block()
+        out = dict(self._channel_entries(block.get(SPECTRUM_KEY) if isinstance(block, dict) else None))
+        for k, rec in self.legacy_channels().items():
+            out.setdefault(k, rec)
         return out
 
     def _clear_channel_state(self) -> None:
@@ -823,7 +846,7 @@ class PZTSpectrumView(EventView):
 
     def record_trigger_time(self) -> Optional[float]:
         """The selected record's own trigger time on the run clock, or None."""
-        block = waveform_block(self.event, self.record_key) if (self.record_key and isinstance(self.event, dict)) else None
+        block = self.current_block()
         try:
             run = self.get_run()
         except Exception:
@@ -1040,10 +1063,15 @@ class PZTSpectrumView(EventView):
 
     # ---------------------------------------------------------------- save
     def save(self) -> bool:
-        """Merge the current channel's record into event['pzt_spectrum']
-        (keys ``'ch<k>'``; legacy digit keys of other channels are renamed)."""
+        """Merge the current channel's record into the selected record's
+        ``spectrum`` map (keys ``'ch<k>'``).  Channels of this record still in
+        the older event-level map move here too, legacy digit keys renamed."""
         if not isinstance(self.record, dict):
             self.status_var.set("nothing to save - the current controls give no spectrum")
+            return False
+        block = self.current_block()
+        if not isinstance(block, dict):
+            self.status_var.set("nothing saved - no record is selected")
             return False
         channel = self.record.get("channel")
         if channel is None:
@@ -1059,9 +1087,30 @@ class PZTSpectrumView(EventView):
         self.record.setdefault("record", self.record_key)
         channels = {channel_key(k): rec for k, rec in sorted(self.saved_channels().items())}
         channels[channel_key(channel)] = copy.deepcopy(self.record)
-        self.save_results({"version": RESULT_VERSION, "channels": channels})
-        self.status_var.set(f"channel {channel} saved ({len(channels)} channel(s) stored)")
+        block[SPECTRUM_KEY] = {"version": RESULT_VERSION, "channels": channels}
+        self._drop_legacy_channels()
+        self.app.refresh_tree()
+        self.status_var.set(f"channel {channel} saved under {self.record_key} ({len(channels)} channel(s) stored)")
         return True
+
+    def _drop_legacy_channels(self) -> None:
+        """Remove this record's channels from the older event-level map (they
+        now live with the record); an emptied map goes away."""
+        legacy = self.event.get(LEGACY_SPECTRUM_KEY) if isinstance(self.event, dict) else None
+        channels = legacy.get("channels") if isinstance(legacy, dict) else None
+        if isinstance(channels, dict):
+            for key in list(channels):
+                rec = channels[key]
+                if isinstance(rec, dict) and rec.get("record", self.record_key) == self.record_key:
+                    del channels[key]
+            if not channels:
+                del self.event[LEGACY_SPECTRUM_KEY]
+        elif isinstance(channels, (list, tuple)):
+            keep = [rec for rec in channels if isinstance(rec, dict) and rec.get("record", self.record_key) != self.record_key]
+            if keep:
+                legacy["channels"] = keep
+            else:
+                del self.event[LEGACY_SPECTRUM_KEY]
 
     # ------------------------------------------------------------- display
     def show_record(self, rec: Optional[dict]) -> None:

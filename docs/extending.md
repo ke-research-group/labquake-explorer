@@ -56,7 +56,7 @@ def do_something(app, ctx): ...       # ctx.path, ctx.run_idx, ctx.event_idx, ct
 ## Data rule
 
 Raw extracted data lives at the top level of an event. Each analysis view
-(`event_analysis`, `interevent`, `pzt_spectrum`, `source_scaling`) writes only
+(`event_analysis`, `interevent`, `spectrum`, `source_scaling`) writes only
 under its own key, and every saved dict carries a `version` integer, the
 inputs needed to reproduce the numbers, and outputs with units in the key
 names. Cross-view reads go through the other view's key.
@@ -173,11 +173,15 @@ sampled by a mean over `width_s` starting `delay_s` after its `event_time`;
 per-cycle values are differences between consecutive events; the first event
 and any window outside the run are NaN.
 
-### `pzt_spectrum` (PZTSpectrumView, version 1)
+### `spectrum` (PZTSpectrumView, per record, version 1)
 
+Kept with the record it was computed on, `event['waveform'][recorder]['spectrum']`
+(or `event['strain']['spectrum']` in PSU files), as
 `{"version": 1, "channels": {"ch<k>": record}}`, one record per analysed
-channel. A record stores every control (trigger source and time, pre/post
-window in ms, taper, baseline mode, step removal, calibration path/unit/dB,
+channel. The event-level `pzt_spectrum` map of older files is still read
+and moves into the record on the next save or with the migration tool.
+A record stores every control (trigger source and time, pre/post window and
+noise window in ms, taper, baseline mode, step removal, calibration path/unit/dB,
 t*, fit band, bins per decade, SNR threshold, n fixed, loss), the binned
 spectrum (`spectrum`: binned frequencies, amplitudes, noise, SNR, counts and
 the window/taper/calibration metadata), the fit (`fit`: `omega0` in the

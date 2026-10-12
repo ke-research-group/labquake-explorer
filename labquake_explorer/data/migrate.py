@@ -18,7 +18,9 @@ What is brought up to date (see ``docs/extending.md`` for the layouts):
   and an ``event_window`` record merge into ``event_extraction``; a
   ``displacement`` field next to a ``slip`` channel array goes (it duplicated
   the first slip channel).
-* events: the recorders' ``raw_data`` slices go (processed channels only);
+* events: the event-level ``pzt_spectrum`` map moves into the records it was
+  computed on (``waveform/<recorder>/spectrum``); the recorders' ``raw_data``
+  slices go (processed channels only);
   ``high_rate``/``low_rate`` and the older per-recorder blocks with
   ``original`` become ``waveform/<recorder>`` records; every record gets its
   ``trigger_time`` and sensor ``positions``; arrival picks kept among a
@@ -232,11 +234,48 @@ def upgrade_event(event: dict, run: Mapping, where: str = "event") -> list:
     spectrum = event.get("pzt_spectrum")
     channels = spectrum.get("channels") if isinstance(spectrum, Mapping) else None
     if isinstance(channels, Mapping):
-        for rec in channels.values():
-            if isinstance(rec, dict) and rec.get("record") in recorders:
-                rec["record"] = f"{WAVEFORM}/{rec['record']}"
-                notes.append(f"{where}: pzt_spectrum record renamed to {rec['record']}")
+        items = list(channels.items())
+    elif isinstance(channels, (list, tuple)):
+        items = list(enumerate(channels))
+    else:
+        items = []
+    for _, rec in items:
+        if isinstance(rec, dict) and rec.get("record") in recorders:
+            rec["record"] = f"{WAVEFORM}/{rec['record']}"
+            notes.append(f"{where}: pzt_spectrum record renamed to {rec['record']}")
+    # the event-level map moves under the record each channel was computed on
+    records = {k: b for k, b in _waveform_entries(event).items()}
+    if items and records:
+        left = []
+        for key, rec in items:
+            m = re.fullmatch(r"(?:ch)?(\d+)", str(key), re.I)
+            if not isinstance(rec, dict) or m is None:
+                left.append((key, rec))
+                continue
+            target = rec.get("record") if rec.get("record") in records else next(iter(records))
+            store = records[target].setdefault("spectrum", {"version": 1, "channels": {}})
+            if not isinstance(store.get("channels"), dict):
+                store["channels"] = {}
+            store["channels"][f"ch{int(m.group(1))}"] = rec
+            notes.append(f"{where}: pzt_spectrum channel {key} moved under {target}/spectrum")
+        if left:
+            spectrum["channels"] = dict(left) if isinstance(channels, Mapping) else [r for _, r in left]
+        else:
+            del event["pzt_spectrum"]
     return notes
+
+
+def _waveform_entries(event: Mapping) -> dict:
+    """``{key: block}`` of the event's records: ``'strain'`` and ``'waveform/<recorder>'``."""
+    out = {}
+    if is_waveform_block(event.get("strain")):
+        out["strain"] = event["strain"]
+    waveforms = event.get(WAVEFORM)
+    if isinstance(waveforms, Mapping):
+        for recorder, block in waveforms.items():
+            if is_waveform_block(block):
+                out[f"{WAVEFORM}/{recorder}"] = block
+    return out
 
 
 # ------------------------------------------------------------ experiment

@@ -1,4 +1,5 @@
 """Headless-Tk tests for PZTSpectrumView on synthetic strain data."""
+import copy
 import json
 import math
 
@@ -419,8 +420,8 @@ def test_save_merges_channels_and_is_json_like(brune_app, view):
     set_medium(view, "P")
     assert view.compute_source()
     assert view.save()
-    saved = brune_app.data_manager.get_data(f"runs/[0]/events/[{EVENT}]/pzt_spectrum")
-    assert saved is view.event["pzt_spectrum"]
+    saved = brune_app.data_manager.get_data(f"runs/[0]/events/[{EVENT}]/strain/spectrum")
+    assert saved is view.event["strain"]["spectrum"]
     assert saved["version"] == RESULT_VERSION
     assert set(saved["channels"]) == {channel_key(BRUNE_CH)} == {"ch3"}
     rec = saved["channels"]["ch3"]
@@ -442,7 +443,7 @@ def test_save_merges_channels_and_is_json_like(brune_app, view):
     view.calibration_path_var.set("")
     assert view.compute()
     assert view.save()
-    saved = view.event["pzt_spectrum"]
+    saved = view.event["strain"]["spectrum"]
     assert set(saved["channels"]) == {"ch3", "ch0"}
     assert saved["channels"]["ch3"]["source"]["valid"]
     assert saved["channels"]["ch0"]["source"] is None
@@ -469,7 +470,7 @@ def test_channel_keys_are_not_digit_strings_and_legacy_keys_are_read(brune_app, 
     assert view.record is not None and "saved record" in view.status_var.get()
     view.set_channel(BRUNE_CH)
     assert view.compute() and view.save()
-    channels = view.event["pzt_spectrum"]["channels"]
+    channels = view.event["strain"]["spectrum"]["channels"]
     assert set(channels) == {"ch3", "ch5"}
     assert not any(k.isdigit() for k in channels)
 
@@ -486,7 +487,7 @@ def test_saved_record_without_channel_field_can_be_saved(brune_app, view):
         assert v2.pre_var.get() == "1"
         assert v2.record["channel"] == 2
         assert v2.save()
-        channels = v2.event["pzt_spectrum"]["channels"]
+        channels = v2.event["strain"]["spectrum"]["channels"]
         assert set(channels) == {"ch2"} and channels["ch2"]["channel"] == 2
         assert "channel 2 saved" in v2.status_var.get()
         # a record with no channel and no selection is refused with a status line
@@ -520,7 +521,7 @@ def test_legacy_digit_keyed_channels_loaded_as_a_list_are_read(brune_app, view):
         v2.calibration_path_var.set(brune_app.calibration_csv)
         v2.unit_combobox.set("V/m")
         assert v2.compute() and v2.save()
-        channels = v2.event["pzt_spectrum"]["channels"]
+        channels = v2.event["strain"]["spectrum"]["channels"]
         assert isinstance(channels, dict)
         assert set(channels) == {"ch0", "ch1", "ch3"}          # the legacy records are kept and renamed
         assert channels["ch1"]["channel"] == 1
@@ -535,7 +536,7 @@ def test_restore_accepts_array_valued_fields(brune_app, view):
     set_medium(view, "P")
     assert view.compute_source() and view.save()
     fit_fc = view.fit.fc
-    rec = view.event["pzt_spectrum"]["channels"]["ch3"]
+    rec = view.event["strain"]["spectrum"]["channels"]["ch3"]
     rec["fit"]["band_used"] = np.asarray(rec["fit"]["band_used"])
     rec["fit"]["warnings"] = np.asarray(["band_limited: synthetic"])
     for key in ("f_binned", "amp_binned", "noise_binned", "snr", "counts"):
@@ -563,7 +564,7 @@ def test_malformed_saved_record_does_not_block_the_window(brune_app, view, monke
     calibrated_compute(view)
     assert view.save()
     view.on_close()
-    channels = brune_app.data_manager.get_data(f"runs/[0]/events/[{EVENT}]/pzt_spectrum")["channels"]
+    channels = brune_app.data_manager.get_data(f"runs/[0]/events/[{EVENT}]/strain/spectrum")["channels"]
     good = channels["ch3"]
     # fit stored as a string, at_bounds not a dict, band garbage, source constants odd
     channels["ch3"] = dict(good, fit="garbage", source={"valid": True, "constants": "x", "warnings": 3})
@@ -616,7 +617,7 @@ def test_reopen_restores_parameters_and_numbers(brune_app, view):
     set_medium(view, "P", 0.6)
     assert view.compute_source()
     assert view.save()
-    rec_saved = view.event["pzt_spectrum"]["channels"]["ch3"]
+    rec_saved = view.event["strain"]["spectrum"]["channels"]["ch3"]
     view.on_close()
 
     v2 = PZTSpectrumView(brune_app, 0, EVENT)
@@ -905,3 +906,18 @@ def test_mouse_events_grab_edges_and_bodies(brune_app, view):
     view.on_press(MouseEvent("button_press_event", view.canvas, px, py, button=1))
     assert view._drag is None
     view.toolbar.zoom()
+
+
+def test_legacy_event_level_map_is_read_and_moved_on_save(brune_app, view):
+    """Files written before 2026-10-12 keep their records at event['pzt_spectrum'];
+    they are read for the matching record and move under it on the next save."""
+    calibrated_compute(view)
+    rec = copy.deepcopy(view.record)
+    view.event["pzt_spectrum"] = {"version": 1, "channels": {"ch3": dict(rec, channel=3), "ch7": dict(rec, channel=7)}}
+    assert set(view.saved_channels()) == {3, 7}
+    view.set_channel(7)
+    assert "saved record" in view.status_var.get()
+    assert view.save()
+    store = view.event["strain"]["spectrum"]["channels"]
+    assert set(store) == {"ch3", "ch7"} and "pzt_spectrum" not in view.event
+    assert "under strain" in view.status_var.get()
