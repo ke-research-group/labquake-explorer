@@ -112,12 +112,12 @@ def test_views_reopen_after_hdf5_reload(populated, app_from_file, tmp_path):
     events = app2.data_manager.get_data("runs/[0]/events")
     n_events = len(events)
 
-    # PZT spectrum: channel, numbers and the free-surface factor restored, no recompute
+    # PZT spectrum: channel, numbers and the free-surface factor restored, recomputed to the same result
     pv = PZTSpectrumView(app2, 0, 2)
     try:
         assert pv.current_channel() == PZT_CH
-        assert "showing saved record" in pv.status_var.get()
-        assert pv.fit is None
+        assert "matches the saved record" in pv.status_var.get()
+        assert pv.fit is not None
         fc, m0 = expected[("pzt", 2)]
         assert pv.record["fit"]["fc"] == pytest.approx(fc)
         assert pv.result_vars["fc"].get() == f"{fc:.4g} Hz"
@@ -128,7 +128,7 @@ def test_views_reopen_after_hdf5_reload(populated, app_from_file, tmp_path):
         # recompute + save on the reloaded data works and keeps the channel map
         pv.rho_var.set("2700")
         assert pv.compute() and pv.compute_source() and pv.save()
-        assert set(events[2]["pzt_spectrum"]["channels"]) == {"ch3"}
+        assert set(events[2]["strain"]["spectrum"]["channels"]) == {"ch3"} and "pzt_spectrum" not in events[2]
     finally:
         pv.on_close()
 
@@ -190,6 +190,6 @@ def test_views_reopen_after_hdf5_reload(populated, app_from_file, tmp_path):
         sv3.on_close()
     pv3 = PZTSpectrumView(app3, 0, 2)
     try:
-        assert "showing saved record" in pv3.status_var.get()
+        assert "saved record" in pv3.status_var.get()
     finally:
         pv3.on_close()

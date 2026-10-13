@@ -61,6 +61,7 @@ class Window:
     fields: list
     sample_rate: float
     block: Optional[int] = None  # tpc5 block number, when applicable
+    trigger_time: Optional[float] = None  # the record's own trigger on the run clock (recorders with trigger blocks)
 
     def as_dict(self, dtype=np.float32) -> dict:
         return {"time": np.asarray(self.time, dtype=np.float64), "raw": np.asarray(self.data, dtype=dtype),
@@ -73,6 +74,8 @@ class Window:
         extra = {"time": np.asarray(self.time, dtype=np.float64), "sample_rate": float(self.sample_rate)}
         if self.block is not None:
             extra["block"] = int(self.block)
+        if self.trigger_time is not None:
+            extra["trigger_time"] = float(self.trigger_time)
         extra.update(meta)
         return channel_array(self.data, self.fields, unit=unit, positions=positions, dtype=dtype, **extra)
 
@@ -266,7 +269,7 @@ class Tpc5Source(Source):
         with h5py.File(self.path, "r") as f:
             t, data = tpc5.read_block(f, block.block, [self.channel_numbers[i] for i in idx], dtype=np.float64)
         return Window(self.to_run_time(t), np.asarray(data, dtype=dtype), [self.fields[i] for i in idx],
-                      block.sample_rate, block.block)
+                      block.sample_rate, block.block, trigger_time=block.trigger_time + self.time_offset)
 
     def read_window(self, t_from, t_to, fields=None, dtype=np.float32) -> Optional[Window]:
         block = self.record_for(0.5 * (float(t_from) + float(t_to)))
@@ -544,6 +547,106 @@ def waveform_store(block) -> dict:
     return block["original"] if _is_legacy_block(block) else block
 
 
+def waveform_trigger_time(block, run: Optional[Mapping] = None, key: Optional[str] = None) -> Optional[float]:
+    """The record's own trigger time on the run clock (where the recorder fired,
+    the PZT trigger for an Elsys block): stored with the record, else looked up
+    by block number in the run's reference for the recorder (``key`` is the
+    :func:`waveform_blocks` key, ``'waveform/elsys'``); None for a continuous
+    record or when nothing is known."""
+    if not isinstance(block, Mapping):
+        return None
+    stored = block.get("trigger_time")
+    if stored is not None:
+        try:
+            return float(np.asarray(stored).ravel()[0])
+        except (TypeError, ValueError, IndexError):
+            return None
+    number = block.get("block")
+    if number is None or run is None or not key:
+        return None
+    ref = run.get(str(key).split("/")[-1]) if isinstance(run, Mapping) else None
+    table = ref.get("blocks") if isinstance(ref, Mapping) else None
+    if not isinstance(table, Mapping) or "block" not in table or "trigger_time_run" not in table:
+        return None
+    try:
+        numbers = [int(b) for b in np.asarray(table["block"]).ravel()]
+        times = np.asarray(table["trigger_time_run"], dtype=float).ravel()
+        return float(times[numbers.index(int(number))])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+ARRIVALS_KEY = "arrivals"
+ARRIVALS_VERSION = 1
+_ARRIVAL_FLAGS = ("enabled_channels", "fitting_channels", "locations")
+
+
+def read_arrivals(block, event: Optional[Mapping] = None) -> dict:
+    """Pick Arrivals' results for a record, normalised to ``picked_idx``,
+    ``arrival_time`` (s, per channel), ``enabled_channels``, ``fitting_channels``,
+    ``locations`` (mm) and ``rupture_speed`` (m/s); only the keys that exist.
+
+    A waveform record keeps them under ``block['arrivals']``.  The PSU strain
+    layout keeps them spread over ``strain/original`` (``picked_idx``,
+    ``rupture_arrival_time``), ``strain`` (the flags and locations) and
+    ``event['rupture_speed']``, which is why ``event`` can be passed.
+    """
+    out: dict = {}
+    if not isinstance(block, Mapping):
+        return out
+    if _is_legacy_block(block):
+        original = block["original"]
+        if "picked_idx" in original:
+            out["picked_idx"] = original["picked_idx"]
+        if "rupture_arrival_time" in original:
+            out["arrival_time"] = original["rupture_arrival_time"]
+        for key in _ARRIVAL_FLAGS:
+            if key in block:
+                out[key] = block[key]
+        if isinstance(event, Mapping) and event.get("rupture_speed") is not None:
+            out["rupture_speed"] = event["rupture_speed"]
+        return out
+    stored = block.get(ARRIVALS_KEY)
+    if isinstance(stored, Mapping):
+        out.update({k: v for k, v in stored.items() if k != "version"})
+        return out
+    for key in ("picked_idx",) + _ARRIVAL_FLAGS:          # records written before 'arrivals' existed
+        if key in block:
+            out[key] = block[key]
+    if "rupture_arrival_time" in block:
+        out["arrival_time"] = block["rupture_arrival_time"]
+    return out
+
+
+def write_arrivals(block, arrivals: Mapping, event=None) -> None:
+    """Store Pick Arrivals' results with the record (the inverse of
+    :func:`read_arrivals`).  A missing or None ``rupture_speed`` means the
+    picks define no line and removes any stored speed."""
+    speed = arrivals.get("rupture_speed")
+    if _is_legacy_block(block):
+        original = block["original"]
+        if "picked_idx" in arrivals:
+            original["picked_idx"] = arrivals["picked_idx"]
+        if "arrival_time" in arrivals:
+            original["rupture_arrival_time"] = arrivals["arrival_time"]
+        for key in _ARRIVAL_FLAGS:
+            if key in arrivals:
+                block[key] = arrivals[key]
+        if isinstance(event, dict):
+            if speed is None:
+                event.pop("rupture_speed", None)
+            else:
+                event["rupture_speed"] = float(speed)
+        return
+    record = {"version": ARRIVALS_VERSION}
+    record.update({k: v for k, v in arrivals.items() if k != "rupture_speed" and v is not None})
+    if speed is not None:
+        record["rupture_speed"] = float(speed)
+    block[ARRIVALS_KEY] = record
+    for key in ("picked_idx", "rupture_arrival_time") + _ARRIVAL_FLAGS:   # the layout before 'arrivals'
+        block.pop(key, None)
+
+
 def pick_waveform_block(event: Mapping, prefer_fields: Sequence[str] = (),
                         prefer_keys: Sequence[str] = ("strain",)) -> Optional[str]:
     """The key of the record a view should open first: the first block that has
@@ -569,4 +672,5 @@ def block_channel_labels(block: Mapping) -> list:
 __all__ = ["SOURCE_FORMATS", "WAVEFORM", "register_source", "Source", "Window", "Tpc5Source",
            "NINpzSource", "LegacyTpc5Source", "short_label", "block_mean", "is_legacy_strain", "reference_format",
            "run_sources", "open_source", "is_waveform_block", "waveform_blocks", "waveform_block", "waveform_time",
-           "waveform_data", "waveform_channels", "waveform_store", "pick_waveform_block", "block_channel_labels"]
+           "waveform_data", "waveform_channels", "waveform_store", "waveform_trigger_time", "pick_waveform_block",
+           "block_channel_labels", "ARRIVALS_KEY", "read_arrivals", "write_arrivals"]

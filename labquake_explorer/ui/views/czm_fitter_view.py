@@ -18,7 +18,8 @@ from labquake_explorer.data.data_processor import DataProcessor
 from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import EVENT
 from labquake_explorer.ui.views.base import EventView
-from labquake_explorer.data.sources import pick_waveform_block, waveform_block, waveform_data, waveform_time
+from labquake_explorer.data.sources import (pick_waveform_block, read_arrivals, waveform_block, waveform_data,
+                                            waveform_time)
 from labquake_explorer.utils.cohesive_crack import CohesiveCrack
 
 
@@ -233,7 +234,8 @@ class CZMFitterView(EventView):
     def _set_default_parameters(self):
         self.x_lim_min, self.x_lim_max = -0.1, 0.1
         try:
-            self.Cf.set(float(np.abs(self.event["rupture_speed"])))
+            speed = read_arrivals(self.strain_block(self.event), self.event)["rupture_speed"]
+            self.Cf.set(float(np.abs(speed)))
         except (KeyError, TypeError, ValueError):
             self.Cf.set(10)
         self.y.set(8e-3)

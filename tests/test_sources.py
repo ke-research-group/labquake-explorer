@@ -150,14 +150,17 @@ def test_tpc5_waveform_picks_the_block_overlapping_the_window_most(tmp_path):
     assert win.block == 3 and win.fields == ["pzt_1"] and win.data.shape == (1, win.time.size)
     assert win.time[0] == pytest.approx(0.503, abs=1e-5) and win.time[-1] == pytest.approx(0.513, abs=1e-5)
     assert src.waveform(0.6, 0.1, 0.1) is None
+    assert win.trigger_time == pytest.approx(0.505)
     block = win.as_channel_array(unit="V", filename="overlap.tpc5")
     assert block["channels"] == ["pzt_1"] and block["block"] == 3 and block["sample_rate"] == 200_000.0
+    assert block["trigger_time"] == pytest.approx(0.505)
     assert block["filename"] == "overlap.tpc5" and block["time"].dtype == np.float64 and block["data"].dtype == np.float32
     # a file without trigger blocks answers with the window itself (and event_window_s wins when set)
     single = tmp_path / "single.tpc5"
     write_tpc5(single, ELSYS_SIGNALS, trigger_times=(), volt_range=12.0)
     win = S.Tpc5Source.open(single, ELSYS_MAP).waveform(1.0, 0.1, 0.2)
     assert win.block == 1 and win.time[0] == pytest.approx(0.9, abs=1e-3) and win.time[-1] == pytest.approx(1.2, abs=1e-3)
+    assert win.trigger_time is None and "trigger_time" not in win.as_channel_array()
     assert "block" not in S.NINpzSource.__dict__ or True
     win = S.Tpc5Source.open(single, ELSYS_MAP, event_window_s=(0.01, 0.02)).waveform(1.0, 0.1, 0.2)
     assert win.time[0] == pytest.approx(0.99, abs=1e-3) and win.time[-1] == pytest.approx(1.02, abs=1e-3)
@@ -184,3 +187,18 @@ def test_waveform_helpers_cover_both_layouts():
     assert S.pick_waveform_block(event, prefer_keys=("strain",)) == "strain"
     assert S.pick_waveform_block({"time": t}) is None
     assert S.block_channel_labels(new) == ["pzt_1", "pzt_2"]
+
+
+def test_waveform_trigger_time_stored_or_looked_up():
+    from labquake_explorer.data.channels import channel_array
+    t = np.linspace(0, 1, 11)
+    stored = channel_array(np.zeros((1, 11)), ["pzt_1"], time=t, sample_rate=10.0, block=3, trigger_time=12.5)
+    assert S.waveform_trigger_time(stored) == 12.5
+    older = channel_array(np.zeros((1, 11)), ["pzt_1"], time=t, sample_rate=10.0, block=3)   # extracted before trigger_time was stored
+    run = {"elsys": {"format": "tpc5", "blocks": {"block": [2, 3, 4], "trigger_time_run": [10.0, 12.5, 15.0]}}}
+    assert S.waveform_trigger_time(older) is None
+    assert S.waveform_trigger_time(older, run, "waveform/elsys") == 12.5
+    assert S.waveform_trigger_time(older, run, "waveform/ni") is None            # no such reference
+    continuous = channel_array(np.zeros((1, 11)), ["eddy_1"], time=t, sample_rate=10.0)
+    assert S.waveform_trigger_time(continuous, run, "waveform/ni") is None
+    assert S.waveform_trigger_time({"original": {"time": t, "raw": np.zeros((1, 11))}}, run, "strain") is None

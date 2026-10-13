@@ -56,16 +56,14 @@ def do_something(app, ctx): ...       # ctx.path, ctx.run_idx, ctx.event_idx, ct
 ## Data rule
 
 Raw extracted data lives at the top level of an event. Each analysis view
-(`event_analysis`, `interevent`, `pzt_spectrum`, `source_scaling`) writes only
+(`event_analysis`, `interevent`, `spectrum`, `source_scaling`) writes only
 under its own key, and every saved dict carries a `version` integer, the
 inputs needed to reproduce the numbers, and outputs with units in the key
 names. Cross-view reads go through the other view's key.
 
 Two older views predate the rule and are kept as they are so existing files
 stay readable: Pick Arrivals writes into the event's raw layout (see its
-schema below; the PZT view's "picked arrival" trigger reads
-`strain/original/rupture_arrival_time` and the CZM fitter reads
-`rupture_speed` directly), and `czm_parms` carries no `version`.
+schema below) and `czm_parms` carries no `version`.
 
 ## Run layout
 
@@ -90,11 +88,11 @@ path (`slip/slip_3`, `elsys/raw_data/pzt_1`); `aligned_fields(container, n)`
 lists every 1-D series of length `n` this way and `get_field(container,
 path)` resolves one, so a field is the same whether it is a top-level array
 or a row. Event extraction slices channel arrays along the sample axis and
-keeps their metadata: `slip` is sliced, each recorder's `raw_data` slice stays
-under the recorder's key (`elsys/raw_data`, the same path as in the run), and
-the recorder's full-rate record becomes the channel array
-`waveform/<recorder>` (with `time`, `sample_rate`, `filename` and, for a
-recorder that writes separate records, `block`). Older files with
+keeps their metadata: `slip` is sliced, the recorders' blocks (file reference
+and `raw_data` volts) are not copied, and each recorder's full-rate record
+becomes the channel array `waveform/<recorder>` (with `time`, `sample_rate`,
+`filename` and, for a recorder that writes separate records, `block` and
+`trigger_time`, where the recorder fired, on the run clock). Older files with
 top-level 1-D channels keep working: a channel array is only an additional
 place a field can live.
 
@@ -136,16 +134,27 @@ them and `delta_x`/`-delta_y` from version 3. "Apply to All Events" turns
 the current picks into times relative to the event, places them on every
 event of the run and saves each result.
 
-### Pick Arrivals (DynamicStrainArrivalPickerView, no result key)
+### `arrivals` (Pick Arrivals, per record, version 1)
 
-Written into the event's existing layout, without a `version`:
+Pick Arrivals works on one full-rate record at a time (the Record selector:
+`waveform/elsys`, `waveform/ni`, ... or the PSU `strain`), and its results
+belong to that record, `event['waveform'][recorder]['arrivals']`, so strain
+and PZT picks never overwrite each other:
 
 | key | meaning |
 |---|---|
-| `rupture_speed` | fitted rupture speed `Cf` in m/s; present only when the picks define a line (a degenerate fit removes the key) |
-| `strain/enabled_channels`, `strain/fitting_channels` | one bool per strain channel: shown, and used in the `Cf` fit |
-| `strain/original/picked_idx` | picked arrival sample index per channel on `strain/original/time` |
-| `strain/original/rupture_arrival_time` | the picked arrival times (s), read by the PZT view's "picked arrival" trigger |
+| `picked_idx` | picked arrival sample index per channel on the record's `time` |
+| `arrival_time` | the picked arrival times (s, run clock), read by the PZT view's "picked arrival" trigger |
+| `enabled_channels`, `fitting_channels` | one bool per channel: shown, and used in the `Cf` fit |
+| `locations` | sensor position along the fault (mm) per channel, from the record's `positions` table |
+| `rupture_speed` | fitted `Cf` in m/s; absent when the picks define no line |
+
+The CZM fitter takes its default `Cf` from the strain record's `arrivals`.
+The PSU `strain` layout keeps its historical keys (`strain/original/picked_idx`,
+`strain/original/rupture_arrival_time`, `strain/enabled_channels`,
+`strain/fitting_channels`, `strain/locations`, and `rupture_speed` at the
+event level); `sources.read_arrivals(block, event)` and `write_arrivals`
+hide the difference from the views.
 
 ### `czm_parms` (CZMFitterView, no version)
 
@@ -164,11 +173,15 @@ sampled by a mean over `width_s` starting `delay_s` after its `event_time`;
 per-cycle values are differences between consecutive events; the first event
 and any window outside the run are NaN.
 
-### `pzt_spectrum` (PZTSpectrumView, version 1)
+### `spectrum` (PZTSpectrumView, per record, version 1)
 
+Kept with the record it was computed on, `event['waveform'][recorder]['spectrum']`
+(or `event['strain']['spectrum']` in PSU files), as
 `{"version": 1, "channels": {"ch<k>": record}}`, one record per analysed
-channel. A record stores every control (trigger source and time, pre/post
-window in ms, taper, baseline mode, step removal, calibration path/unit/dB,
+channel. The event-level `pzt_spectrum` map of older files is still read
+and moves into the record on the next save or with the migration tool.
+A record stores every control (trigger source and time, pre/post window and
+noise window in ms, taper, baseline mode, step removal, calibration path/unit/dB,
 t*, fit band, bins per decade, SNR threshold, n fixed, loss), the binned
 spectrum (`spectrum`: binned frequencies, amplitudes, noise, SNR, counts and
 the window/taper/calibration metadata), the fit (`fit`: `omega0` in the
@@ -245,12 +258,12 @@ any), decorate the class with `@register_source`, and write a synthetic-file
 test next to `tests/test_sources.py`.
 
 `EventProcessor.extract_events(run, indices, window, pre, post)` slices every
-1-D run field aligned with `time` around each pick, keeps each recorder's
-`raw_data` slice under the recorder's key (`elsys/raw_data`, as in the run; the
-file reference itself is not copied), and adds `waveform/<recorder>`, the
+1-D run field aligned with `time` around each pick (the processed channels;
+the recorders' blocks with their `raw_data` volts are not copied) and adds
+`waveform/<recorder>`, the
 full-rate record as a channel array (`data (n_channels, n)`, `channels`,
 `unit`, `positions`, `time` on the run clock, `sample_rate`, `filename`,
-`block`). Which samples make the record
+`block`, `trigger_time`). Which samples make the record
 is the source's decision, `Source.waveform(event_time, pre, post)`: a
 recorder that writes separate records around triggers (tpc5 ECR mode) copies
 the whole record that contains the event time and overlaps the most of the
@@ -289,3 +302,17 @@ first 1 % removed as baseline).
 
 The notebooks in `examples/preprocessing/` are thin scripts over this package:
 paths, channel maps, the calibration, the builders, plots, save.
+
+## Upgrading files saved by an older explorer
+
+`labquake_explorer/data/migrate.py` brings an experiment file up to the
+layouts above: run keys that were dropped, picks moved into
+`event_extraction`, events reduced to the processed channels plus
+`waveform/<recorder>` records (with `trigger_time` and `positions`), arrival
+picks under `arrivals`, `event_analysis` records at version 3. The PSU
+`strain` layout is left as it is. A copy of the original is kept next to the
+file unless `--no-backup` is given:
+
+```bash
+python -m labquake_explorer.data.migrate experiment.h5
+```

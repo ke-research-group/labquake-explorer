@@ -7,12 +7,12 @@ result is one dict per event::
 
     event_time, time, <every run field aligned with time>,
     <channel array>: {'data': (n_channels, n_window), 'channels', 'unit', ...},   # e.g. 'slip'
-    <recorder>: {'raw_data': <its channel array, sliced>},                        # e.g. 'elsys', 'ni', as in the run
     waveform: {<recorder>: {'data', 'channels', 'unit', 'positions',              # the full-rate record:
                             'time', 'sample_rate', 'filename', 'block'}}          # whole trigger block or window
     notes: [...]                                                                   # recorders with no record
 
-The recorders' file references themselves are not copied.  ``waveform`` comes
+The recorders' blocks (file reference and ``raw_data`` volts) are not copied:
+an event carries the processed channels only, plus ``waveform``.  ``waveform`` comes
 from ``Source.waveform`` so the rule (the whole record that contains the
 event time and overlaps the chosen window most, or the window for a
 continuous recorder) does not depend on the file format.  The PSU-era
@@ -102,12 +102,6 @@ class EventProcessor:
                 event[key] = value[beg:end]
         notes = []
         refs = run_sources(run_data)
-        # the time-history voltages each recorder contributed, sliced, under the recorder's key as in the run
-        for key, ref in refs.items():
-            arrays = {sub: slice_channel_array(item, slice(beg, end)) for sub, item in ref.items()
-                      if is_channel_array(item) and item["data"].shape[1] == n}
-            if arrays:
-                event[key] = arrays
         # waveform: the full-rate record of each recorder around the event
         high: Dict[str, Any] = {}
         for key, source in sources.items():
