@@ -16,6 +16,14 @@ own event time ``t_i``, chosen by one of two methods:
   ``event_time +- reference_halfwidth_s`` (narrow enough to keep the
   neighbouring events out); each sensor is then searched within
   ``t_ref +- search_halfwidth_s``.
+* ``onset``: the slip-rate onset, where the filtered rate, followed back from
+  the max-rate pick, last rose through ``onset_fraction`` of that peak
+  (interpolated between samples).
+* ``step``: where the slip crosses ``step_fraction`` of the way from the
+  before-window line to the after-window line, between the two windows and
+  nearest the max-rate pick (interpolated between samples).
+* ``shared``: one time for every sensor, ``event_time + shared_shift_s``, or
+  ``t_ref`` when ``shared_shift_s`` is NaN.
 * ``manual``: a time set by the user, stored as ``t_shift_s`` relative to the
   event time (``t_i = event_time + t_shift_s``).
 
@@ -57,7 +65,13 @@ from scipy.signal import bessel, butter, savgol_filter, sosfiltfilt
 RESULT_VERSION = 2                    # 2: fit windows relative to the event time (1: to t_i)
 METHOD_MAX_RATE = "max_rate"
 METHOD_MANUAL = "manual"
-METHODS = (METHOD_MAX_RATE, METHOD_MANUAL)
+METHOD_ONSET = "onset"
+METHOD_STEP = "step"
+METHOD_SHARED = "shared"
+PICK_METHODS = (METHOD_MAX_RATE, METHOD_ONSET, METHOD_STEP)    # each sensor from its own record
+METHODS = PICK_METHODS + (METHOD_SHARED, METHOD_MANUAL)
+DEFAULT_ONSET_FRACTION = 0.2          # onset: the rate rises through this fraction of its peak
+DEFAULT_STEP_FRACTION = 0.5           # step: the slip crosses this fraction of the step
 
 RATE_FILTERS = ("lowpass", "savgol", "boxcar")
 DEFAULT_RATE_FILTER = "lowpass"
@@ -79,6 +93,7 @@ EDGE_TOLERANCE = 1e-6                 # of a sample: a window edge on a sample i
 FLAG_EDGE = "pick at search edge"
 FLAG_WEAK = "weak rate peak"
 FLAG_NO_PEAK = "no rate peak"
+FLAG_NO_CROSSING = "no crossing found"
 FLAG_BEFORE_CLIPPED = "before window clipped"
 FLAG_AFTER_CLIPPED = "after window clipped"
 FLAG_BEFORE_INVALID = "before fit invalid"
@@ -264,6 +279,56 @@ def pick_max_rate(time, rate_row, t_ref: float, halfwidth_s: float) -> Optional[
     return RatePick(float(t[idx[j]]), bool(at_edge), float(values[j]))
 
 
+def _crossing(t, g, i: int, j: int) -> float:
+    """The time between samples ``i`` and ``j`` where ``g`` crosses zero, linearly."""
+    if g[j] == g[i]:
+        return float(t[i])
+    return float(t[i] + (t[j] - t[i]) * g[i] / (g[i] - g[j]))
+
+
+def onset_time(time, rate_row, pick: RatePick, t_ref: float, halfwidth_s: float,
+               fraction: float = DEFAULT_ONSET_FRACTION) -> Optional[float]:
+    """Where the rate, followed back from the max-rate ``pick``, last rose through
+    ``fraction`` of the peak, between samples; None when it stays above it back to
+    the start of the search window ``t_ref +- halfwidth_s``."""
+    t = np.asarray(time, dtype=float).ravel()
+    r = np.asarray(rate_row, dtype=float).ravel()
+    k = int(np.argmin(np.abs(t - pick.time)))
+    first = int(np.searchsorted(t, float(t_ref) - float(halfwidth_s), side="left"))
+    g = r - float(fraction) * pick.peak_rate
+    below = np.flatnonzero((g[first:k] < 0) | ~np.isfinite(g[first:k]))
+    if below.size == 0:
+        return None
+    j = first + int(below[-1])
+    if not np.isfinite(g[j]):
+        return float(t[j + 1])
+    return _crossing(t, g, j, j + 1)
+
+
+def step_time(time, values, before, after, t_i0: float, lo: float, hi: float,
+              fraction: float = DEFAULT_STEP_FRACTION) -> Optional[float]:
+    """Where the slip crosses ``fraction`` of the way from the ``before`` line to the
+    ``after`` line (:class:`LineFit`, both about ``t_i0``), the crossing nearest
+    ``t_i0`` within ``[lo, hi]`` (the gap between the fit windows, where the step
+    is), between samples; None without one."""
+    if not (before.valid and after.valid):
+        return None
+    t = np.asarray(time, dtype=float).ravel()
+    y = np.asarray(values, dtype=float).ravel()
+    sel = np.flatnonzero((t >= float(lo)) & (t <= float(hi)))
+    if sel.size < 2:
+        return None
+    tt = t[sel]
+    level = before.at(tt - t_i0) + float(fraction) * (after.at(tt - t_i0) - before.at(tt - t_i0))
+    g = y[sel] - level
+    ok = np.isfinite(g[:-1]) & np.isfinite(g[1:]) & (np.sign(g[:-1]) != np.sign(g[1:]))
+    idx = np.flatnonzero(ok)
+    if idx.size == 0:
+        return None
+    times = np.array([_crossing(tt, g, i, i + 1) for i in idx])
+    return float(times[int(np.argmin(np.abs(times - t_i0)))])
+
+
 @dataclass(frozen=True)
 class LineFit:
     """``y = slope * (t - t_i) + value`` over one window.  ``window`` and ``used``
@@ -367,6 +432,9 @@ class SlipAnalysis:
     rate_lowpass_order: int = DEFAULT_LOWPASS_ORDER
     rate_lowpass_type: str = DEFAULT_LOWPASS_TYPE
     rate_savgol_order: int = DEFAULT_SAVGOL_ORDER
+    onset_fraction: float = DEFAULT_ONSET_FRACTION
+    step_fraction: float = DEFAULT_STEP_FRACTION
+    shared_shift_s: float = float("nan")      # NaN: the shared t_i is t_ref
 
     @property
     def t_i(self) -> np.ndarray:
@@ -391,6 +459,9 @@ class SlipAnalysis:
             "search_halfwidth_s": float(self.search_halfwidth_s),
             "rate_snr": float(self.rate_snr),
             "reference_halfwidth_s": float(self.reference_halfwidth_s),
+            "onset_fraction": float(self.onset_fraction),
+            "step_fraction": float(self.step_fraction),
+            "shared_shift_s": float(self.shared_shift_s),
             "t_ref_shift_s": float(self.t_ref - self.event_time),
             "rate_noise_um_s": [float(x.rate_noise) for x in s],
             "time_method": [x.method for x in s],
@@ -440,13 +511,18 @@ def analyze_slip(time, data, event_time: float, start_s: float, end_s: float, *,
                  rate_smoothing_s: float = DEFAULT_RATE_SMOOTHING_S,
                  search_halfwidth_s: float = DEFAULT_SEARCH_HALFWIDTH_S,
                  rate_snr: float = DEFAULT_RATE_SNR,
-                 reference_halfwidth_s: float = DEFAULT_REFERENCE_HALFWIDTH_S) -> SlipAnalysis:
+                 reference_halfwidth_s: float = DEFAULT_REFERENCE_HALFWIDTH_S,
+                 onset_fraction: float = DEFAULT_ONSET_FRACTION,
+                 step_fraction: float = DEFAULT_STEP_FRACTION,
+                 shared_shift_s: float = float("nan")) -> SlipAnalysis:
     """Event time, line fits and coseismic slip of every sensor.
 
     ``data`` is ``(n_sensors, n)`` on ``time``.  ``methods`` (one per sensor or
-    one for all, default ``max_rate``) chooses how each ``t_i`` is found; a
-    ``manual`` sensor takes ``t_shift_s`` (relative to ``event_time``) and
-    falls back to ``max_rate`` when that shift is missing or not finite.
+    one for all, default ``max_rate``; see :data:`METHODS`) chooses how each
+    ``t_i`` is found; a ``manual`` sensor takes ``t_shift_s`` (relative to
+    ``event_time``) and falls back to ``max_rate`` when that shift is missing or
+    not finite; an ``onset`` or ``step`` sensor without a crossing keeps its
+    max-rate pick and is flagged.
     ``fit_before_s`` / ``fit_after_s`` are one pair for every sensor or one
     pair per sensor, relative to ``event_time``; by default they follow from
     ``[start_s, end_s]`` (:func:`default_fit_windows`).  ``t_ref`` is searched
@@ -477,6 +553,13 @@ def analyze_slip(time, data, event_time: float, start_s: float, end_s: float, *,
         raise ValueError("the search half-width must be > 0")
     if not math.isfinite(rate_snr) or rate_snr < 0:
         raise ValueError("the rate SNR threshold must be >= 0")
+    onset_fraction, step_fraction, shared_shift_s = float(onset_fraction), float(step_fraction), float(shared_shift_s)
+    if not 0.0 < onset_fraction < 1.0:
+        raise ValueError("the onset threshold must be between 0 and 100 % of the peak rate")
+    if not 0.0 < step_fraction < 1.0:
+        raise ValueError("the step level must be between 0 and 100 % of the step")
+    if math.isinf(shared_shift_s):
+        raise ValueError("the shared t_i must be finite")
     default_before, default_after = default_fit_windows(start_s, end_s)
     channels = list(channels) if channels is not None else [str(i) for i in range(n_ch)]
     x_mm = [float(v) for v in x_mm] if x_mm is not None else [float("nan")] * n_ch
@@ -501,11 +584,14 @@ def analyze_slip(time, data, event_time: float, start_s: float, end_s: float, *,
             shift = float(shifts[i])
         except (TypeError, ValueError):
             shift = float("nan")
+        pick = None
         if method == METHOD_MANUAL and math.isfinite(shift):
             t_i = event_time + shift
-            pick = None
+        elif method == METHOD_SHARED:
+            t_i = event_time + shared_shift_s if math.isfinite(shared_shift_s) else t_ref
         else:
-            method = METHOD_MAX_RATE
+            if method == METHOD_MANUAL:
+                method = METHOD_MAX_RATE
             pick = pick_max_rate(t, rate[i], t_ref, search_halfwidth_s)
             if pick is None:
                 t_i = t_ref
@@ -514,6 +600,17 @@ def analyze_slip(time, data, event_time: float, start_s: float, end_s: float, *,
                 t_i = pick.time
                 if pick.at_edge:
                     flags.append(FLAG_EDGE)
+                crossing = None
+                if method == METHOD_ONSET:
+                    crossing = onset_time(t, rate[i], pick, t_ref, search_halfwidth_s, onset_fraction)
+                elif method == METHOD_STEP:
+                    crossing = step_time(t, d[i], fit_line(t, d[i], t_i, befores[i], event_time),
+                                         fit_line(t, d[i], t_i, afters[i], event_time), t_i,
+                                         event_time + befores[i][1], event_time + afters[i][0], step_fraction)
+                if crossing is not None:
+                    t_i = crossing
+                elif method != METHOD_MAX_RATE:
+                    flags.append(FLAG_NO_CROSSING)
         before = fit_line(t, d[i], t_i, befores[i], event_time)
         after = fit_line(t, d[i], t_i, afters[i], event_time)
         in_before = window_mask(t, event_time, befores[i]) & np.isfinite(rate[i])
@@ -544,7 +641,8 @@ def analyze_slip(time, data, event_time: float, start_s: float, end_s: float, *,
                         rate_snr, reference_halfwidth_s, float(t_ref), sensors, time=t, rate=rate,
                         rate_filter=rate_filter, rate_cutoff_hz=rate_cutoff_hz,
                         rate_lowpass_order=int(rate_lowpass_order), rate_lowpass_type=str(rate_lowpass_type),
-                        rate_savgol_order=int(rate_savgol_order))
+                        rate_savgol_order=int(rate_savgol_order), onset_fraction=onset_fraction,
+                        step_fraction=step_fraction, shared_shift_s=shared_shift_s)
 
 
 # --------------------------------------------------------------- saved records
@@ -596,6 +694,9 @@ def restore_inputs(record, channels: Sequence[str]) -> Optional[dict]:
             "search_halfwidth_s": float(record.get("search_halfwidth_s", DEFAULT_SEARCH_HALFWIDTH_S)),
             "rate_snr": float(record.get("rate_snr", DEFAULT_RATE_SNR)),
             "reference_halfwidth_s": float(record.get("reference_halfwidth_s", DEFAULT_REFERENCE_HALFWIDTH_S)),
+            "onset_fraction": float(record.get("onset_fraction", DEFAULT_ONSET_FRACTION)),
+            "step_fraction": float(record.get("step_fraction", DEFAULT_STEP_FRACTION)),
+            "shared_shift_s": float(record.get("shared_shift_s", float("nan"))),
         }
         for w in out["fit_before_s"] + out["fit_after_s"]:
             check_window(w)
@@ -607,7 +708,8 @@ def restore_inputs(record, channels: Sequence[str]) -> Optional[dict]:
 
 
 __all__ = [
-    "RESULT_VERSION", "METHODS", "METHOD_MAX_RATE", "METHOD_MANUAL",
+    "RESULT_VERSION", "METHODS", "PICK_METHODS", "METHOD_MAX_RATE", "METHOD_ONSET", "METHOD_STEP", "METHOD_SHARED",
+    "METHOD_MANUAL", "DEFAULT_ONSET_FRACTION", "DEFAULT_STEP_FRACTION", "onset_time", "step_time",
     "RATE_FILTERS", "DEFAULT_RATE_FILTER", "DEFAULT_RATE_CUTOFF_HZ", "LOWPASS_TYPES", "DEFAULT_LOWPASS_TYPE",
     "DEFAULT_LOWPASS_ORDER", "DEFAULT_SAVGOL_ORDER", "MAX_FILTER_ORDER",
     "DEFAULT_RATE_SMOOTHING_S", "DEFAULT_SEARCH_HALFWIDTH_S", "DEFAULT_RATE_SNR", "DEFAULT_REFERENCE_HALFWIDTH_S",

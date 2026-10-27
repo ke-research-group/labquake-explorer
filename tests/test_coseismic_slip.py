@@ -316,3 +316,23 @@ def test_moving_average_ends_are_as_quiet_as_the_rest():
     spread = np.max(np.abs(interior - 5.0))
     # the end samples average fewer samples, so allow some more scatter, but not the one-sample difference
     assert np.max(np.abs(rate[:20] - 5.0)) < 2.0 * spread and np.max(np.abs(rate[-20:] - 5.0)) < 2.0 * spread
+
+
+def test_onset_step_and_shared_event_times():
+    event, truth = make_event(noise_um=0.05, rise_s=0.005)
+    peak = run(event)
+    onset = run(event, methods="onset", onset_fraction=0.2)
+    step = run(event, methods="step", step_fraction=0.5)
+    moving = np.array(truth["slips_um"]) > 5.0
+    t_true = np.asarray(truth["t_i"])[moving]
+    # a tanh step: its rate peaks at the midpoint, which the step crossing finds too; the onset comes earlier
+    np.testing.assert_allclose(step.t_i[moving], t_true, atol=0.002)
+    assert np.all(onset.t_i[moving] < peak.t_i[moving]) and np.all(onset.t_i[moving] > t_true - 0.01)
+    shared = run(event, methods="shared")
+    assert np.all(shared.t_i == shared.t_ref)
+    fixed = run(event, methods="shared", shared_shift_s=0.03)
+    assert np.allclose(fixed.t_i, EVENT_TIME + 0.03) and not any(s.flags for s in fixed.sensors if s.coseismic_slip > 5)
+    rec = fixed.as_dict()
+    assert cs.restore_inputs(rec, rec["channels"])["shared_shift_s"] == pytest.approx(0.03)
+    with pytest.raises(ValueError, match="onset threshold"):
+        run(event, methods="onset", onset_fraction=1.5)

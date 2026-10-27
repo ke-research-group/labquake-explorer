@@ -1121,3 +1121,44 @@ def test_filter_tab_options(slip_app, view):
     view.savgol_window_var.set("1")                       # 1 ms is 1 sample at 1 kHz: too short for order 2
     view.schedule(view.on_settings_edited, now=True)
     assert "Savitzky-Golay window must span" in view.status_var.get()
+
+
+def test_event_time_tabs(slip_app, view):
+    truth = slip_app.slip_truth[EVENT]
+    assert view.t_i_method() == "max_rate"
+    view.set_event_time(2, 0.05)                          # a sensor set by hand stays so on another pick tab
+    view.select_t_i_method("onset")
+    assert view.methods[2] == "manual" and all(m == "onset" for i, m in enumerate(view.methods) if i != 2)
+    onset = np.array([s.t_shift_s for s in view.result.sensors])
+    picks = np.asarray(truth["t_i"]) - view.t_event
+    moving = np.array(truth["slips_um"]) > 5.0
+    moving[2] = False
+    assert np.all(onset[moving] <= picks[moving] + 0.002)  # the onset comes before the rate peak
+    view.onset_var.set("50")
+    view.schedule(view.on_settings_edited, now=True)
+    assert view.result.onset_fraction == 0.5
+    view.select_t_i_method("step")
+    assert view.result.sensors[0].method == "step" and view.method_combobox.get() == "slip step"
+    view.select_t_i_method("shared")                      # every sensor at the peak of the mean rate
+    ts = {s.t_shift_s for s in view.result.sensors}
+    assert len(ts) == 1 and ts.pop() == pytest.approx(view.result.t_ref - view.t_event)
+    assert str(view.method_combobox.cget("state")) == "disabled"
+    assert view.front_fit.segments and all(math.isinf(seg.velocity_m_s) for seg in view.front_fit.segments)
+    view.begin_drag("t_i", view.result.sensors[0].t_shift_s)  # dragging moves the one t_i of every sensor
+    view.drag_to(0.08)
+    view.end_drag()
+    assert view.shared_source_var.get() == "set" and all(s.t_shift_s == pytest.approx(0.08)
+                                                         for s in view.result.sensors)
+    assert "at one t_i, +80.0 ms (set)" in view.status_var.get()
+    assert view.save()
+    rec = view.event["slip_analysis"]
+    assert rec["shared_shift_s"] == pytest.approx(0.08) and set(rec["time_method"]) == {"shared"}
+    view.repick_all()                                     # back to the peak of the mean rate
+    assert view.shared_source_var.get() == "reference" and math.isnan(view.result.shared_shift_s)
+    view.on_close()
+    v2 = SlipDistributionView(slip_app, 0, EVENT)
+    try:
+        assert v2.t_i_method() == "shared" and v2.shared_source_var.get() == "set" and v2.shared_shift_var.get() == "80"
+        assert v2.onset_var.get() == "50" and "matches the saved record" in v2.status_var.get()
+    finally:
+        v2.on_close()

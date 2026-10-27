@@ -2,16 +2,19 @@
 
 Opened from an event that carries a slip channel array (``event['slip']``: one
 row per eddy-current sensor, in micrometres, with sensor ``positions``).  Each
-sensor ``i`` gets its own event time ``t_i``, found at its largest smoothed
-slip rate or set by hand, and its coseismic slip is the difference at ``t_i``
-of two lines fitted before and after it (see
-:mod:`labquake_explorer.analysis.coseismic_slip`).
+sensor ``i`` gets an event time ``t_i``, and its coseismic slip is the
+difference at ``t_i`` of two lines fitted before and after it (see
+:mod:`labquake_explorer.analysis.coseismic_slip`).  The event-time tab shown
+sets every ``t_i``: the largest filtered slip rate, the slip-rate onset, the
+crossing of a level of the slip step, or one shared time (the peak of the mean
+slip rate, or a time typed or dragged).  On the first three a drag or a typed
+``t_i`` sets that sensor by hand; on Shared it moves the shared time.
 
 The trace panel shows the selected sensor: its slip, the two fit windows, the
 lines extrapolated to ``t_i`` and, on the right axis, the filtered slip rate
 used for the automatic pick.  ``t_i`` and the four window edges can be dragged
 (or a window by its body); dragging ``t_i`` moves it alone, between the
-windows, and makes that sensor manual.  The windows are times relative to the
+windows.  The windows are times relative to the
 event time, so they stay put when ``t_i`` moves.  The same values can be typed
 in the entries.  With "same windows for all sensors" a window edit applies to
 every sensor.
@@ -88,7 +91,11 @@ from labquake_explorer.ui.views.base import EventView
 LIVE_DELAY_MS = 400                    # recompute this long after the last keystroke
 HANDLE_PICK_PX = 6                     # a press this close (pixels) to t_i or a window edge grabs it
 ZOOM_HALF_S = 0.2                      # "Zoom to t_i" shows t_i +- this
-METHOD_LABELS = {cs.METHOD_MAX_RATE: "max slip rate", cs.METHOD_MANUAL: "manual"}
+METHOD_LABELS = {cs.METHOD_MAX_RATE: "max slip rate", cs.METHOD_ONSET: "slip-rate onset", cs.METHOD_STEP: "slip step",
+                 cs.METHOD_SHARED: "shared", cs.METHOD_MANUAL: "manual"}
+T_I_TABS = cs.PICK_METHODS + (cs.METHOD_SHARED,)   # the event-time tabs
+T_I_TAB_LABELS = {cs.METHOD_MAX_RATE: "Max slip rate", cs.METHOD_ONSET: "Rate onset", cs.METHOD_STEP: "Slip step",
+                  cs.METHOD_SHARED: "Shared"}
 RATE_FILTER_LABELS = {"lowpass": "Low-pass", "savgol": "Savitzky-Golay", "boxcar": "Moving average"}   # the tabs
 LOWPASS_LABELS = {"butterworth": "Butterworth", "bessel": "Bessel"}
 DEFAULT_SAVGOL_WINDOW_S = 0.020        # the Savitzky-Golay tab's window (the moving average's: cs default)
@@ -404,7 +411,7 @@ class SlipDistributionView(EventView):
         ttk.Button(buttons, text="Zoom to t_i", command=self.zoom_to_event_time).pack(side="left", padx=2)
         ttk.Button(buttons, text="Whole window", command=self.show_whole_window).pack(side="left", padx=2)
 
-        frame = ttk.LabelFrame(left, text="Max-rate picks")
+        frame = ttk.LabelFrame(left, text="Slip rate")
         frame.pack(fill="x", pady=4)
         self.reference_var = tk.StringVar(master=self,
                                           value=_text(cs.DEFAULT_REFERENCE_HALFWIDTH_S * 1e3))
@@ -415,9 +422,15 @@ class SlipDistributionView(EventView):
         self.lowpass_order_var = tk.StringVar(master=self, value=str(cs.DEFAULT_LOWPASS_ORDER))
         self.search_var = tk.StringVar(master=self, value=_text(cs.DEFAULT_SEARCH_HALFWIDTH_S * 1e3))
         self.snr_var = tk.StringVar(master=self, value=_text(cs.DEFAULT_RATE_SNR))
+        self.onset_var = tk.StringVar(master=self, value=_text(cs.DEFAULT_ONSET_FRACTION * 100))
+        self.step_var = tk.StringVar(master=self, value=_text(cs.DEFAULT_STEP_FRACTION * 100))
+        self.shared_shift_var = tk.StringVar(master=self, value="")
+        self.shared_source_var = tk.StringVar(master=self, value="reference")
+        for var in (self.onset_var, self.step_var, self.shared_shift_var):
+            self._shown[str(var)] = var.get()
         for var in self.settings_vars():
             self._shown[str(var)] = var.get()
-        ttk.Label(frame, text="Slip-rate filter (the tab shown is used):", foreground="#606060").grid(
+        ttk.Label(frame, text="filter (the tab shown is used):", foreground="#606060").grid(
             row=0, column=0, columnspan=2, padx=4, sticky="w")
         self.rate_filter_notebook = ttk.Notebook(frame)
         self.rate_filter_notebook.grid(row=1, column=0, columnspan=2, padx=4, pady=2, sticky="ew")
@@ -447,12 +460,42 @@ class SlipDistributionView(EventView):
             self.rate_filter_notebook.add(tabs[key], text=RATE_FILTER_LABELS[key])
         self.rate_filter_notebook.select(cs.RATE_FILTERS.index(cs.DEFAULT_RATE_FILTER))
         self.rate_filter_notebook.bind("<<NotebookTabChanged>>", lambda e: self.on_filter_choice())
+        frame = ttk.LabelFrame(left, text="Event times t_i")
+        frame.pack(fill="x", pady=4)
+        ttk.Label(frame, text="the tab shown sets every sensor's t_i;\na drag or a typed t_i overrides one sensor",
+                  foreground="#606060", justify="left").grid(row=0, column=0, columnspan=2, padx=4, sticky="w")
+        self.t_i_notebook = ttk.Notebook(frame)
+        self.t_i_notebook.grid(row=1, column=0, columnspan=2, padx=4, pady=2, sticky="ew")
+        tabs = {key: ttk.Frame(self.t_i_notebook) for key in T_I_TABS}
+        ttk.Label(tabs[cs.METHOD_MAX_RATE], text="each sensor at its largest filtered\nslip rate",
+                  foreground="#606060", justify="left").grid(row=0, column=0, columnspan=2, padx=4, sticky="w")
+        tab = tabs[cs.METHOD_ONSET]
+        self._entry(tab, "Threshold (% of peak):", self.onset_var, 0, self.on_settings_edited, name="onset")
+        ttk.Label(tab, text="where the rate, followed back from its\npeak, last rose through the threshold",
+                  foreground="#606060", justify="left").grid(row=1, column=0, columnspan=2, padx=4, sticky="w")
+        tab = tabs[cs.METHOD_STEP]
+        self._entry(tab, "Level (% of the step):", self.step_var, 0, self.on_settings_edited, name="step")
+        ttk.Label(tab, text="where the slip crosses that share of the\nway from the before to the after line",
+                  foreground="#606060", justify="left").grid(row=1, column=0, columnspan=2, padx=4, sticky="w")
+        tab = tabs[cs.METHOD_SHARED]
+        ttk.Label(tab, text="one t_i for every sensor:", foreground="#606060").grid(
+            row=0, column=0, columnspan=3, padx=4, sticky="w")
+        ttk.Radiobutton(tab, text="peak of the mean slip rate", value="reference", variable=self.shared_source_var,
+                        command=self.on_shared_source).grid(row=1, column=0, columnspan=3, padx=4, sticky="w")
+        ttk.Radiobutton(tab, text="set (ms after the event):", value="set", variable=self.shared_source_var,
+                        command=self.on_shared_source).grid(row=2, column=0, columnspan=2, padx=4, sticky="w")
+        self._entry_only(tab, self.shared_shift_var, 2, 2, "shared t_i", self.on_shared_shift_edited, width=8)
+        ttk.Label(tab, text="dragging the red line moves it", foreground="#606060").grid(
+            row=3, column=0, columnspan=3, padx=4, sticky="w")
+        for key in T_I_TABS:
+            self.t_i_notebook.add(tabs[key], text=T_I_TAB_LABELS[key])
+        self.t_i_notebook.bind("<<NotebookTabChanged>>", lambda e: self.on_t_i_tab_changed())
         self._entry(frame, "Reference +- (ms):", self.reference_var, 2, self.on_settings_edited)
         self._entry(frame, "Search +- (ms):", self.search_var, 3, self.on_settings_edited)
         self._entry(frame, "Flag below (x rate noise):", self.snr_var, 4, self.on_settings_edited)
         ttk.Label(frame, text="reference: peak of the mean slip rate of\nall sensors near the event time; each\n"
-                              "sensor is searched around it", foreground="#606060", justify="left").grid(
-            row=5, column=0, columnspan=2, padx=4, sticky="w")
+                              "sensor's peak is searched around it.\nflag below: a weaker peak is flagged",
+                  foreground="#606060", justify="left").grid(row=5, column=0, columnspan=2, padx=4, sticky="w")
         ttk.Button(frame, text="Re-pick all sensors", command=self.repick_all).grid(
             row=6, column=0, columnspan=2, padx=4, pady=2, sticky="w")
 
@@ -713,11 +756,12 @@ class SlipDistributionView(EventView):
             self.restore_filter_tabs(inputs, record)
             self._show(self.search_var, _text(inputs["search_halfwidth_s"] * 1e3))
             self._show(self.snr_var, _text(inputs["rate_snr"]))
+            self.restore_t_i_tab(inputs, record)
             self.same_windows_var.set(bool(np.asarray(record.get("same_windows", True)).ravel()[0]))
             self.saved = record
         else:
             before, after = cs.default_fit_windows(self.start_s, self.end_s)
-            self.methods = [cs.METHOD_MAX_RATE] * n
+            self.methods = self.methods_for(self.t_i_method(), [self.t_i_method()] * n)
             self.t_shift = [float("nan")] * n
             self.fit_before = [before] * n
             self.fit_after = [after] * n
@@ -797,6 +841,24 @@ class SlipDistributionView(EventView):
                                     "min": _text_float(v["min"].get()), "max": _text_float(v["max"].get())}
         return out
 
+    def restore_t_i_tab(self, inputs: dict, record: dict) -> None:
+        """The event-time tab and its values from a record: the tab of the shared or
+        the pick method the sensors use (max slip rate when all are set by hand)."""
+        self._show(self.onset_var, _text(inputs["onset_fraction"] * 100))
+        self._show(self.step_var, _text(inputs["step_fraction"] * 100))
+        shared = inputs["shared_shift_s"]
+        typed = _float_or_nan(record.get("shared_set_s"))
+        self.shared_source_var.set("reference" if math.isnan(shared) else "set")
+        value = shared if math.isfinite(shared) else typed
+        self._show(self.shared_shift_var, _text(round(value * 1e3, 6)) if math.isfinite(value) else "")
+        methods = inputs["methods"]
+        if cs.METHOD_SHARED in methods:
+            tab = cs.METHOD_SHARED
+        else:
+            picks = [m for m in methods if m in cs.PICK_METHODS]
+            tab = max(cs.PICK_METHODS, key=picks.count) if picks else cs.METHOD_MAX_RATE
+        self.t_i_notebook.select(T_I_TABS.index(tab))
+
     def restore_filter_tabs(self, inputs: dict, record: dict) -> None:
         """Every filter tab's values from a record: the analysis keys give the filter
         used, ``rate_filter_tabs`` the window of the other windowed filter."""
@@ -849,7 +911,7 @@ class SlipDistributionView(EventView):
     # ----------------------------------------------------------- settings
     def settings_vars(self) -> tuple:
         return (self.reference_var, self.smoothing_var, self.savgol_window_var, self.savgol_order_var,
-                self.cutoff_var, self.lowpass_order_var, self.search_var, self.snr_var)
+                self.cutoff_var, self.lowpass_order_var, self.search_var, self.snr_var, self.onset_var, self.step_var)
 
     def rate_filter(self) -> str:
         """The filter of the tab shown."""
@@ -900,11 +962,20 @@ class SlipDistributionView(EventView):
             raise ValueError("the search half-width must be > 0")
         if snr < 0:
             raise ValueError("the flag threshold must be >= 0")
+        onset = _parse(self.onset_var.get(), "onset threshold (%)") / 100.0
+        step = _parse(self.step_var.get(), "step level (%)") / 100.0
+        for value, name in ((onset, "onset threshold"), (step, "step level")):
+            if not 0.0 < value < 1.0:
+                raise ValueError(f"the {name} must be between 0 and 100 %")
+        shared = float("nan")
+        if self.shared_source_var.get() == "set":
+            shared = _parse(self.shared_shift_var.get(), "shared t_i (ms)", 1e-3)
         rate_filter = self.rate_filter()
         return {"rate_filter": rate_filter, "rate_cutoff_hz": cutoff, "rate_lowpass_order": lowpass_order,
                 "rate_lowpass_type": self.lowpass_type(), "rate_savgol_order": savgol_order,
                 "rate_smoothing_s": savgol if rate_filter == "savgol" else boxcar,
-                "search_halfwidth_s": search, "rate_snr": snr, "reference_halfwidth_s": reference}
+                "search_halfwidth_s": search, "rate_snr": snr, "reference_halfwidth_s": reference,
+                "onset_fraction": onset, "step_fraction": step, "shared_shift_s": shared}
 
     def filter_windows(self) -> dict:
         """The windows of the two windowed filters, whichever tab is shown (s)."""
@@ -986,6 +1057,12 @@ class SlipDistributionView(EventView):
         self._syncing = True
         try:
             self.sensor_combobox.set(self.sensor_label(self.sensor))
+            tab = self.t_i_method()
+            if tab == cs.METHOD_SHARED:
+                self.method_combobox.config(values=[METHOD_LABELS[cs.METHOD_SHARED]], state="disabled")
+            else:
+                self.method_combobox.config(values=[METHOD_LABELS[tab], METHOD_LABELS[cs.METHOD_MANUAL]],
+                                            state="readonly")
             self.method_combobox.set(METHOD_LABELS[s.method])
             self._show(self.t_shift_var, _text(round(s.t_shift_s * 1e3, 6)))
             self._show(self.before_start_var, _text(s.fit_before_s[0]))
@@ -1044,7 +1121,7 @@ class SlipDistributionView(EventView):
     # --------------------------------------------------------------- edits
     def on_method_selected(self, event=None) -> None:
         self.flush_pending()
-        if self.result is None:
+        if self.result is None or self.t_i_method() == cs.METHOD_SHARED:
             return
         label = self.method_combobox.get()
         method = next((k for k, v in METHOD_LABELS.items() if v == label), None)
@@ -1067,10 +1144,62 @@ class SlipDistributionView(EventView):
         self.set_event_time(self.sensor, shift)
 
     def set_event_time(self, i: int, shift_s: float) -> None:
-        """Make sensor ``i`` manual at ``event_time + shift_s`` and recompute."""
+        """Make sensor ``i`` manual at ``event_time + shift_s`` and recompute; on the
+        Shared tab, set the one t_i of every sensor there instead."""
+        if self.t_i_method() == cs.METHOD_SHARED:
+            self.shared_source_var.set("set")
+            self._show(self.shared_shift_var, _text(round(float(shift_s) * 1e3, 6)))
+            self.recompute()
+            return
         self.methods[i] = cs.METHOD_MANUAL
         self.t_shift[i] = float(shift_s)
         self.recompute()
+
+    # ------------------------------------------------------------ t_i tabs
+    def t_i_method(self) -> str:
+        """The event-time method of the tab shown."""
+        try:
+            return T_I_TABS[self.t_i_notebook.index("current")]
+        except (tk.TclError, IndexError):
+            return cs.METHOD_MAX_RATE
+
+    def select_t_i_method(self, method: str) -> None:
+        """Show ``method``'s tab and apply it."""
+        self.t_i_notebook.select(T_I_TABS.index(method))
+        self.on_t_i_tab_changed()
+
+    def methods_for(self, tab: str, methods) -> list:
+        """The sensors' methods under ``tab``: all shared, or the tab's pick except
+        for the sensors set by hand."""
+        if tab == cs.METHOD_SHARED:
+            return [cs.METHOD_SHARED] * len(methods)
+        return [m if m == cs.METHOD_MANUAL else tab for m in methods]
+
+    def on_t_i_tab_changed(self) -> None:
+        self.flush_pending()
+        methods = self.methods_for(self.t_i_method(), self.methods)
+        if methods == self.methods and self.result is not None and not self._stale:
+            return                                       # a tab shown while a record was restored
+        self.methods = methods
+        if self.result is not None or self._stale:
+            self.recompute()
+
+    def on_shared_source(self) -> None:
+        self.flush_pending()
+        if self.shared_source_var.get() == "set" and not self.shared_shift_var.get().strip():
+            ref = self.result.t_ref - self.t_event if self.result is not None else 0.0
+            self._show(self.shared_shift_var, _text(round(ref * 1e3, 6)))   # start from the reference
+        if self.t_i_method() == cs.METHOD_SHARED:
+            self.recompute()
+
+    def on_shared_shift_edited(self) -> None:
+        if self._syncing or not self._edited(self.shared_shift_var):
+            return
+        self.shared_source_var.set("set")
+        if self.t_i_method() == cs.METHOD_SHARED:
+            self.recompute()
+        else:
+            self.update_status()
 
     def read_windows(self) -> tuple[tuple, tuple]:
         """The windows typed in the entries (ValueError when unusable)."""
@@ -1123,9 +1252,13 @@ class SlipDistributionView(EventView):
             self.update_status()
 
     def repick_all(self) -> None:
-        """Every sensor back to the automatic max-rate pick."""
+        """Every sensor back to the tab's pick (on the Shared tab: the one t_i back
+        to the peak of the mean slip rate)."""
         self.flush_pending()
-        self.methods = [cs.METHOD_MAX_RATE] * len(self.channels)
+        tab = self.t_i_method()
+        if tab == cs.METHOD_SHARED:
+            self.shared_source_var.set("reference")
+        self.methods = [tab] * len(self.channels)
         self.recompute()
 
     # ------------------------------------------------------- profile and front
@@ -1874,10 +2007,22 @@ class SlipDistributionView(EventView):
                     label=f"slip {s.coseismic_slip:.3g} {self.unit}")
         rate = self.result.rate[self.sensor]
         ax_rate.plot(t_rel, rate, color="#9a9a9a", lw=0.6, label="slip rate (filtered)", zorder=1)
-        if s.method == cs.METHOD_MAX_RATE:
+        if s.method in cs.PICK_METHODS:
             t_ref = self.result.t_ref - self.t_event
             hw = self.result.search_halfwidth_s
             ax_rate.axvspan(t_ref - hw, t_ref + hw, color="#cccccc", alpha=0.25, zorder=0)
+        if s.method == cs.METHOD_ONSET and math.isfinite(s.peak_rate):
+            # the threshold the rate rose through: a share of the peak of the max-rate pick
+            seg = rate[np.abs(t_rel - (self.result.t_ref - self.t_event)) <= self.result.search_halfwidth_s]
+            peak = float(np.nanmax(seg)) if seg.size and np.any(np.isfinite(seg)) else float("nan")
+            if math.isfinite(peak):
+                ax_rate.axhline(self.result.onset_fraction * peak, color=TI_COLOR, lw=0.8, ls=":", zorder=1,
+                                label=f"onset threshold ({self.result.onset_fraction:.0%} of the peak)")
+        if s.method == cs.METHOD_STEP and s.before.valid and s.after.valid:
+            ts = np.linspace(b1, a0, 50)
+            level = s.before.at(ts - ti) + self.result.step_fraction * (s.after.at(ts - ti) - s.before.at(ts - ti))
+            ax.plot(ts, level, ":", color=TI_COLOR, lw=1.0, zorder=3,
+                    label=f"step level ({self.result.step_fraction:.0%})")
         ax_rate.set_ylabel(f"slip rate ({self.unit}/s)")
         ax.set_xlabel(f"time - event time {self.t_event:.4f} s (s)")
         ax.set_ylabel(f"{self.field} ({self.unit})")
@@ -2078,6 +2223,7 @@ class SlipDistributionView(EventView):
         rec.update({"field": self.field, "unit": self.unit, "same_windows": bool(self.same_windows_var.get())})
         try:
             rec["rate_filter_tabs"] = self.filter_windows()
+            rec["shared_set_s"] = _parse_blank(self.shared_shift_var.get(), "shared t_i (ms)") * 1e-3
         except ValueError:
             pass
         rec[PATCH_KEY] = [float(v) for v in self.patch_x_mm] if self.patch_x_mm else [float("nan")] * 2
@@ -2146,6 +2292,10 @@ class SlipDistributionView(EventView):
                 and math.isclose(inputs["search_halfwidth_s"], rec["search_halfwidth_s"])
                 and math.isclose(inputs["rate_snr"], rec["rate_snr"])
                 and math.isclose(inputs["reference_halfwidth_s"], rec["reference_halfwidth_s"])
+                and math.isclose(inputs["onset_fraction"], rec["onset_fraction"])
+                and math.isclose(inputs["step_fraction"], rec["step_fraction"])
+                and (math.isnan(inputs["shared_shift_s"]) == math.isnan(rec["shared_shift_s"]))
+                and (math.isnan(rec["shared_shift_s"]) or math.isclose(inputs["shared_shift_s"], rec["shared_shift_s"]))
                 and bool(np.asarray(self.saved.get("same_windows", True)).ravel()[0]) == rec["same_windows"])
         manual = [i for i, m in enumerate(rec["time_method"]) if m == cs.METHOD_MANUAL]
         same = same and all(math.isclose(inputs["t_shift_s"][i], rec["t_shift_s"][i], abs_tol=1e-12) for i in manual)
@@ -2206,8 +2356,14 @@ class SlipDistributionView(EventView):
             return
         flagged = [s for s in self.result.sensors if s.flags]
         manual = sum(1 for s in self.result.sensors if s.method == cs.METHOD_MANUAL)
-        parts = [f"{len(self.result.sensors)} sensors, {manual} manual; "
-                 f"reference at {1e3 * (self.result.t_ref - self.t_event):+.1f} ms"]
+        reference = f"reference at {1e3 * (self.result.t_ref - self.t_event):+.1f} ms"
+        shared = [s for s in self.result.sensors if s.method == cs.METHOD_SHARED]
+        if shared:
+            how = "the reference" if math.isnan(self.result.shared_shift_s) else "set"
+            parts = [f"{len(self.result.sensors)} sensors at one t_i, {1e3 * shared[0].t_shift_s:+.1f} ms ({how}); "
+                     + reference]
+        else:
+            parts = [f"{len(self.result.sensors)} sensors, {manual} manual; " + reference]
         if flagged:
             parts.append("check: " + ", ".join(f"{s.channel} ({'; '.join(s.flags)})" for s in flagged))
         error = self.entry_error()
