@@ -275,7 +275,12 @@ explorer knows the trigger times without opening the file; an `NINpzSource`
 stores the record's metadata. `open_source(ref, base_dir, run)` rebuilds the
 reader; `source.read_window(t_from, t_to, fields)` returns samples on the run
 clock, or None when no record covers the time (a tpc5 with trigger blocks only
-answers inside a trigger block).
+answers inside a trigger block). `Tpc5Source` reads the first measurement
+group only, with one block table for every channel, so `Tpc5Source.open`
+raises `ValueError` listing what it cannot read (`tpc5.layout_problems`): more
+than one measurement group, selected channels whose block numbers differ, or
+blocks whose sample rate, sample count, `triggerSample` or
+`triggerTimeSeconds` differ between the channels.
 
 **Adding a recorder**: subclass `Source`, implement `time_history`,
 `read_window`, `to_reference`/`from_reference` (and `trigger_times` if it has
@@ -291,8 +296,14 @@ full-rate record as a channel array (`data (n_channels, n)`, `channels`,
 `block`, `trigger_time`). Which samples make the record
 is the source's decision, `Source.waveform(event_time, pre, post)`: a
 recorder that writes separate records around triggers (tpc5 ECR mode) copies
-the whole record that contains the event time and overlaps the most of the
-chosen window; a continuous recorder (NI npz, single-block tpc5) copies the
+one whole record per event, every sample from its first pre-trigger sample
+to its last (never trimmed to the window), chosen by
+`sources.select_trigger_block`: among the records containing the event time,
+the one overlapping the chosen window most (the lower block number on a tie);
+when none contains it, the record in the window nearest to the event time
+(the gap between the event time and the record's span, then the nearer
+trigger, then the lower block number); nothing when no record overlaps the
+window. A continuous recorder (NI npz, single-block tpc5) copies the
 window itself, its own `event_window_s` taking precedence. The references are
 not copied into the event. Views find the records with
 `sources.waveform_blocks(event)` (keys `waveform/<recorder>`, or `strain`)
@@ -302,9 +313,36 @@ and `waveform_store` (where per-record picks such as `picked_idx` and
 same to them; the PZT Spectrum view offers every record and opens the one
 with `pzt` channels, the strain-gauge views (arrival picker, CZM) open
 `strain` when present, else the first record. Recorders with no record
-covering the event are listed in `notes`. The legacy layout keeps its
+overlapping the event window are listed in `notes`. The legacy layout keeps its
 historical output (`time`/`raw` downsampled copies plus `original` with the
 first 1 % removed as baseline).
+
+**Checking the records of an experiment file** against its tpc5 files:
+
+```bash
+python -m labquake_explorer.data.check_blocks experiment.h5 [--base-dir DIR] [--csv rows.csv] [--fill] [--no-backup]
+```
+
+For every run with events and a `tpc5` reference it lists the raw file's
+trigger blocks itself (every measurement group and channel, attributes and
+shapes only), takes the window from `event_extraction` (`start_s`, `end_s`),
+or from the event's own time axis when the run has no extraction window,
+and prints one row per event: the blocks overlapping the window, the block
+the event holds and the block the rule above expects, a status (`OK`,
+`NOT LOADED`, `WRONG BLOCK`, `NO BLOCK` when no block overlaps the window),
+the overlapping blocks not loaded (marked `(one-block rule)` when the rule
+leaves them out) and flags (blocks crossing the window start or end,
+`pre-trigger truncated` (a record that is not its whole block), trigger blocks
+overlapping each other), then notes on each raw file (extra measurement
+groups, channels whose blocks differ, other `.tpc5` files starting with the
+same name, as TranAX split files would) and a summary. It exits with 1 when an
+event is not loaded, holds another block or a truncated one, else with 2 when
+a raw or experiment file cannot be read. `--fill` adds the expected record to
+every event that has none, built by the event processor as an extraction
+would, and saves the file, keeping a copy `<name>.before-fill.h5` unless
+`--no-backup` (an existing copy is not overwritten); a record already in an
+event is never replaced. An `.h5` file is read with h5py, only the values
+needed, so a large file is checked in seconds.
 
 ## Preprocessing package
 
