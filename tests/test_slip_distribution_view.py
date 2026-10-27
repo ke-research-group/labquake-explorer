@@ -5,9 +5,10 @@ import numpy as np
 import pytest
 
 from labquake_explorer.analysis import coseismic_slip as cs
+from labquake_explorer.analysis import slip_profile as sprof
 from labquake_explorer.ui.actions import actions_for
 from labquake_explorer.ui.views import SlipDistributionView
-from labquake_explorer.ui.views.slip_distribution_view import slip_fields
+from labquake_explorer.ui.views.slip_distribution_view import T_I_FLAGS, slip_fields
 from tests.synthetic import add_slip_array
 
 EVENT = 1
@@ -364,3 +365,608 @@ def test_zoom_buttons(slip_app, view):
     lo, hi = view.ax_trace.get_xlim()
     assert lo == pytest.approx(-5.0, abs=0.01) and hi > 4.9
     assert math.isfinite(view.ax_rate.get_ylim()[1])
+
+
+# ------------------------------------------------- slip profile and front (item 3)
+def test_profile_and_front_defaults(slip_app, view):
+    truth = slip_app.slip_truth[EVENT]
+    assert view.profile_model_combobox.get() == "EAZ" and view.weighted_var.get() is False
+    assert view.profile_use == [True] * 8 and view.front_mode_combobox.get() == "bilateral"
+    assert view.front_use_auto is True and view.front_use == [True] * 8
+    fit = view.profile_fit
+    assert fit.model == "eaz" and fit.valid and fit.r2 > 0.99 and fit.n == 8
+    front = view.front_fit
+    # the hinge's apex lands within a sensor spacing of where the synthetic front starts (279 mm)
+    assert front.valid and len(front.segments) == 2 and abs(front.split_x_mm - 279.0) < 62.0
+    left, right = front.segments
+    assert left.x_to == right.x_from == front.split_x_mm
+    assert left.velocity_m_s == pytest.approx(-50.0, rel=0.25) and right.velocity_m_s == pytest.approx(50.0, rel=0.25)
+    assert "fronts start at x = " in view.front_text_var.get()
+    # the profile panel shows the slip with sigma error bars and the model curve; the front panel the t_i
+    xs, ys = view.point_artists["profile"].get_data()
+    np.testing.assert_allclose(xs, truth["x_mm"])
+    np.testing.assert_allclose(ys, [s.coseismic_slip for s in view.result.sensors])
+    assert view.profile_errorbar is not None
+    segs = view.profile_errorbar.lines[2][0].get_segments()
+    np.testing.assert_allclose([s[1][1] - s[0][1] for s in segs], 2 * np.array([s.noise for s in view.result.sensors]))
+    assert view.profile_curve is not None
+    _, ts = view.point_artists["front"].get_data()
+    np.testing.assert_allclose(ts, [1e3 * s.t_shift_s for s in view.result.sensors])
+    assert "EAZ" in view.profile_text_var.get() and "m/s" in view.front_text_var.get()
+
+
+def test_profile_model_switch_and_weighting(slip_app, view):
+    view.profile_model_combobox.set("quadratic")
+    view.on_profile_settings()
+    fit = view.profile_fit
+    assert fit.model == "quadratic" and set(fit.params) == {"c0", "c1", "c2"} and fit.r2 > 0.999
+    assert fit.peak_x_mm == pytest.approx(279.0, abs=5.0)
+    view.profile_model_combobox.set("EAZ-asymmetric")
+    view.on_profile_settings()
+    assert view.profile_fit.model == "eaz_asymmetric" and len(view.profile_fit.params) == 6
+    view.weighted_var.set(True)
+    view.on_profile_settings()
+    assert view.profile_fit.weighted is True
+    view.set_profile_use(0, False)
+    view.set_profile_use(7, False)
+    assert view.profile_fit.n == 6 and view.profile_use[0] is False
+    assert "differs" in view.status_var.get() or "not saved" in view.status_var.get()
+
+
+def test_front_use_auto_follows_flags_until_edited(slip_app):
+    run = slip_app.data_manager.get_data("runs/[0]")
+    add_slip_array(run["events"][2], slips_um=[0.0, 40.0, 70.0, 90.0, 100.0, 90.0, 70.0, 0.0], noise_um=0.05)
+    v = SlipDistributionView(slip_app, 0, 2)
+    try:
+        doubtful = [any(f in T_I_FLAGS for f in s.flags) for s in v.result.sensors]
+        assert doubtful[0] and doubtful[7]
+        assert v.front_use == [not d for d in doubtful] and v.front_use_auto is True
+        assert v.front_text_var.get().endswith(f"sensors: all but {sum(doubtful)} with a doubtful t_i")
+        v.set_front_use(3, False)
+        assert v.front_use_auto is False and v.front_use[3] is False
+        v.front_mode_combobox.set("single")
+        v.on_front_settings()
+        assert v.front_fit.mode == "single" and v.front_fit.segments[0].n == sum(v.front_use)
+    finally:
+        v.on_close()
+
+
+def test_clicking_a_point_selects_its_sensor(slip_app, view):
+    from matplotlib.backend_bases import MouseEvent
+    view.canvas.draw()
+    for panel, ax, k in (("profile", view.ax_profile, 5), ("front", view.ax_front, 2)):
+        xs, ys = view.point_artists[panel].get_data()
+        px, py = ax.transData.transform((xs[k], ys[k]))
+        mouse = MouseEvent("button_press_event", view.canvas, px, py, button=1)
+        view.canvas.callbacks.process("button_press_event", mouse)     # matplotlib's own pick dispatch
+        assert view.sensor == k and view._drag is None
+        assert view.ax_trace.get_title().find(view.channels[k]) >= 0
+
+
+def point_xy(view, panel, k):
+    """Display coordinates of point ``k`` of the profile or front panel."""
+    ax = view.ax_profile if panel == "profile" else view.ax_front
+    xs, ys = view.point_artists[panel].get_data()
+    return ax.transData.transform((xs[k], ys[k]))
+
+
+def test_only_a_left_click_on_a_point_selects_it(slip_app, view):
+    from matplotlib.backend_bases import MouseEvent
+    view.canvas.draw()
+    assert view.sensor == 0
+    scroll = MouseEvent("scroll_event", view.canvas, *point_xy(view, "profile", 5), step=1)
+    view.canvas.callbacks.process("scroll_event", scroll)                 # matplotlib picks on a scroll too
+    for button in (2, 3):
+        press = MouseEvent("button_press_event", view.canvas, *point_xy(view, "front", 3), button=button)
+        view.canvas.callbacks.process("button_press_event", press)
+    assert view.sensor == 0
+    press = MouseEvent("button_press_event", view.canvas, *point_xy(view, "front", 3), button=1)
+    view.canvas.callbacks.process("button_press_event", press)
+    assert view.sensor == 3
+
+
+def test_patch_edges_are_saved_at_the_experiment_level(slip_app, view):
+    assert (view.patch_lo_var.get(), view.patch_hi_var.get()) == ("", "")
+    view.patch_lo_var.set("150")
+    view.patch_hi_var.set("400")
+    view.schedule(view.on_patch_edited, now=True)
+    assert view.patch_x_mm == (150.0, 400.0) and len(view.patch_artists) == 6      # span and edges on both panels
+    assert "not saved to the experiment" in view.patch_note_var.get()
+    assert view.save_patch()
+    assert slip_app.data_manager.get_data("fault/patch_x_mm") == [150.0, 400.0]
+    assert view.patch_note_var.get() == "saved in the experiment"
+    view.patch_hi_var.set("100")
+    view.schedule(view.on_patch_edited, now=True)
+    assert "patch" in view.status_var.get() and view.patch_x_mm == (150.0, 400.0)
+    assert not view.save_patch()
+    view.on_close()
+    v2 = SlipDistributionView(slip_app, 0, 0 if EVENT != 0 else 1)
+    try:
+        assert (v2.patch_lo_var.get(), v2.patch_hi_var.get()) == ("150", "400")   # every event of the experiment
+    finally:
+        v2.on_close()
+
+
+def test_fit_settings_are_saved_and_restored(slip_app, view, tmp_path, app_from_file):
+    view.profile_model_combobox.set("quadratic")
+    view.on_profile_settings()
+    view.set_profile_use(1, False)
+    view.set_front_use(6, False)
+    view.front_mode_combobox.set("single")
+    view.on_front_settings()
+    view.patch_lo_var.set("120")
+    view.patch_hi_var.set("380")
+    view.schedule(view.on_patch_edited, now=True)
+    assert view.save()
+    rec = view.event["slip_analysis"]
+    assert rec["patch_x_mm"] == [120.0, 380.0]
+    assert rec["profile"]["model"] == "quadratic" and rec["profile"]["use"][1] is False
+    assert rec["front"]["mode"] == "single" and rec["front"]["use"][6] is False and rec["front"]["use_auto"] is False
+    assert set(rec["profile"]["params"]) == {"c0", "c1", "c2"} and rec["front"]["segments"]
+    assert "matches the saved record" in view.status_var.get()
+    path = tmp_path / "exp.h5"
+    slip_app.data_manager.save_file(path)
+    app2 = app_from_file(path)
+    v2 = SlipDistributionView(app2, 0, EVENT)
+    try:
+        assert v2.profile_model_combobox.get() == "quadratic" and v2.profile_use[1] is False
+        assert v2.front_mode_combobox.get() == "single" and v2.front_use[6] is False and v2.front_use_auto is False
+        assert v2.patch_x_mm == (120.0, 380.0)                 # from the record: the experiment has none
+        assert "matches the saved record" in v2.status_var.get()
+        v2.profile_model_combobox.set("EAZ")
+        v2.on_profile_settings()
+        assert "differs from the saved record" in v2.status_var.get()
+    finally:
+        v2.on_close()
+
+
+def test_fit_choices_carry_to_an_event_without_a_record(slip_app, view):
+    view.profile_model_combobox.set("quadratic")
+    view.on_profile_settings()
+    view.front_mode_combobox.set("single")
+    view.on_front_settings()
+    view.set_profile_use(0, False)
+    view.patch_lo_var.set("150")
+    view.patch_hi_var.set("400")
+    view.schedule(view.on_patch_edited, now=True)
+    view.set_event(2)                                     # nothing saved for event 2
+    assert view.profile_fit.model == "quadratic" and view.front_fit.mode == "single"
+    assert view.profile_use == [True] * 8 and view.front_use_auto is True
+    assert view.patch_x_mm == (150.0, 400.0) and view.patch_note_var.get() == "not saved to the experiment"
+
+
+def test_a_failed_switch_clears_the_fit_panels(slip_app, view):
+    assert view.ax_profile.lines and view.profile_text_var.get()
+    view.search_var.set("0")
+    view.set_event(2)
+    assert view.result is None and view.profile_fit is None and view.front_fit is None
+    assert not view.ax_profile.lines and not view.ax_front.lines and view.profile_text_var.get() == ""
+    assert view.record() is None
+
+
+def test_save_refuses_an_unusable_patch_entry(slip_app, view):
+    view.patch_lo_var.set("400")
+    view.patch_hi_var.set("150")                          # typed, not applied
+    assert not view.save() and "patch" in view.status_var.get()
+    assert "slip_analysis" not in view.event
+
+
+def test_typed_patch_edges_stay_across_events_until_saved(slip_app, view):
+    dm = slip_app.data_manager
+    dm.data["fault"] = {"patch_x_mm": [150.0, 400.0]}
+    view.set_event(2)
+    assert view.patch_x_mm == (150.0, 400.0) and view.patch_note_var.get() == "saved in the experiment"
+    view.patch_lo_var.set("120")                          # typed, still waiting for the keys to settle
+    view.schedule(view.on_patch_edited)
+    view.set_event(EVENT)                                 # applied, then kept over the experiment's edges
+    assert view.patch_x_mm == (120.0, 400.0) and view.patch_lo_var.get() == "120"
+    assert view.patch_note_var.get() == "not saved to the experiment"
+    view.set_event(2)
+    assert view.patch_x_mm == (120.0, 400.0)
+    assert view.save_patch() and dm.get_data("fault/patch_x_mm") == [120.0, 400.0]
+    dm.data["fault"]["patch_x_mm"] = [130.0, 390.0]       # changed elsewhere: no typed edges hold it back now
+    view.set_event(EVENT)
+    assert view.patch_x_mm == (130.0, 390.0) and view.patch_note_var.get() == "saved in the experiment"
+
+
+def test_each_event_shows_its_record_edges_while_the_experiment_has_none(slip_app):
+    for event_idx, (lo, hi) in ((1, ("120", "380")), (2, ("130", "390"))):
+        v = SlipDistributionView(slip_app, 0, event_idx)
+        try:
+            v.patch_lo_var.set(lo)
+            v.patch_hi_var.set(hi)
+            v.schedule(v.on_patch_edited, now=True)
+            assert v.save()
+        finally:
+            v.on_close()
+    v = SlipDistributionView(slip_app, 0, 1)
+    try:
+        assert v.patch_x_mm == (120.0, 380.0) and "matches the saved record" in v.status_var.get()
+        v.set_event(2)
+        assert v.patch_x_mm == (130.0, 390.0) and "matches the saved record" in v.status_var.get()
+        v.set_event(1)
+        assert v.patch_x_mm == (120.0, 380.0)
+    finally:
+        v.on_close()
+
+
+def test_save_to_experiment_keeps_the_edges_at_full_precision(slip_app):
+    dm = slip_app.data_manager
+    dm.data["fault"] = {"patch_x_mm": [25.4 * 6, 400.0]}     # 6 in as a notebook converts it: 152.39999999999998
+    v = SlipDistributionView(slip_app, 0, 2)
+    try:
+        assert v.patch_lo_var.get() == "152.4"
+        assert v.save_patch()                                # nothing typed: the edges stay as they were
+        assert dm.get_data("fault/patch_x_mm") == [25.4 * 6, 400.0]
+        v.patch_hi_var.set("450")                            # one edge typed: the other keeps all its digits
+        v.schedule(v.on_patch_edited, now=True)
+        assert v.patch_x_mm == (25.4 * 6, 450.0)
+        assert v.save_patch() and dm.get_data("fault/patch_x_mm") == [25.4 * 6, 450.0]
+    finally:
+        v.on_close()
+
+
+def test_experiment_edges_win_over_a_record_and_do_not_make_it_differ(slip_app):
+    v = SlipDistributionView(slip_app, 0, EVENT)
+    try:
+        v.patch_lo_var.set("120")
+        v.patch_hi_var.set("380")
+        v.schedule(v.on_patch_edited, now=True)
+        assert v.save()                                      # this record holds its own edges
+    finally:
+        v.on_close()
+    v = SlipDistributionView(slip_app, 0, 2)
+    try:
+        assert v.save()                                      # and this one none
+    finally:
+        v.on_close()
+    slip_app.data_manager.data["fault"] = {"patch_x_mm": [150.0, 400.0]}     # e.g. set later by a notebook
+    for event_idx, record_patch in ((EVENT, [120.0, 380.0]), (2, [math.nan, math.nan])):
+        v = SlipDistributionView(slip_app, 0, event_idx)
+        try:
+            np.testing.assert_array_equal(v.event["slip_analysis"]["patch_x_mm"], record_patch)
+            assert v.patch_x_mm == (150.0, 400.0) and v.patch_note_var.get() == "saved in the experiment"
+            assert "matches the saved record" in v.status_var.get()
+        finally:
+            v.on_close()
+    v = SlipDistributionView(slip_app, 0, EVENT)
+    try:
+        v.profile_model_combobox.set("quadratic")            # the fit settings still count
+        v.on_profile_settings()
+        assert "differs from the saved record" in v.status_var.get()
+    finally:
+        v.on_close()
+
+
+def test_patch_saved_in_one_window_reaches_the_others(slip_app):
+    views = [SlipDistributionView(slip_app, 0, e) for e in (1, 2, 3, 0)]
+    v1, v2, v3, v4 = views
+
+    def type_patch(v, lo, hi):
+        v.patch_lo_var.set(lo)
+        v.patch_hi_var.set(hi)
+        v.schedule(v.on_patch_edited, now=True)
+
+    try:
+        type_patch(v3, "100", "300")                         # edges of its own, not saved
+        type_patch(v4, "150", "400")                         # the same edges as are about to be saved
+        type_patch(v1, "150", "400")
+        assert v1.save_patch()
+        assert v2.patch_x_mm == (150.0, 400.0) and (v2.patch_lo_var.get(), v2.patch_hi_var.get()) == ("150", "400")
+        assert v2.patch_note_var.get() == "saved in the experiment" and len(v2.patch_artists) == 6
+        assert v3.patch_x_mm == (100.0, 300.0) and v3.patch_note_var.get() == "not saved to the experiment"
+        assert v4.patch_note_var.get() == "saved in the experiment"
+        assert v3.save_patch()                               # the windows showing the old edges follow
+        assert v1.patch_x_mm == v2.patch_x_mm == v4.patch_x_mm == (100.0, 300.0)
+        assert {v.patch_note_var.get() for v in views} == {"saved in the experiment"}
+        assert v2.save() and v2.event["slip_analysis"]["patch_x_mm"] == [100.0, 300.0]
+    finally:
+        for v in views:
+            v.on_close()
+
+
+@pytest.mark.parametrize("value, patch, note", [
+    ([400.0, 150.0], (150.0, 400.0), "saved in the experiment"),
+    ([150.0, float("nan")], None, "experiment patch edges unusable: [150.0, nan]"),
+    ([150.0], None, "experiment patch edges unusable: [150.0]"),
+    ([150.0, 150.0], None, "experiment patch edges unusable: [150.0, 150.0]"),
+])
+def test_experiment_patch_in_either_order_or_unusable(slip_app, value, patch, note):
+    slip_app.data_manager.data["fault"] = {"patch_x_mm": value}
+    v = SlipDistributionView(slip_app, 0, EVENT)
+    try:
+        assert v.patch_x_mm == patch and v.patch_note_var.get() == note
+        assert len(v.patch_artists) == (6 if patch else 0)
+        v.patch_lo_var.set("120")
+        v.patch_hi_var.set("380")
+        v.schedule(v.on_patch_edited, now=True)
+        assert v.patch_note_var.get() == "not saved to the experiment" + ("" if patch else f"; {note}")
+        assert v.save_patch() and v.patch_note_var.get() == "saved in the experiment"
+    finally:
+        v.on_close()
+
+
+@pytest.mark.parametrize("suffix", [".h5", ".npz"])
+def test_experiment_patch_from_preprocessing_survives_a_file_round_trip(slip_app, tmp_path, app_from_file, suffix):
+    from labquake_explorer.data.data_manager import DataManager
+    from labquake_explorer.preprocessing.build import experiment
+    data = slip_app.data_manager.data
+    dm = DataManager()
+    dm.data = experiment(data["name"], data["runs"], fault={"patch_x_mm": [150.0, 400.0]})
+    path = tmp_path / f"exp{suffix}"
+    dm.save_file(path)
+    v = SlipDistributionView(app_from_file(path), 0, EVENT)
+    try:
+        assert v.patch_x_mm == (150.0, 400.0) and v.patch_note_var.get() == "saved in the experiment"
+        for ax in (v.ax_profile, v.ax_front):
+            span, *edges = [a for a in v.patch_artists if a.axes is ax]
+            assert (span.get_x(), span.get_x() + span.get_width()) == (150.0, 400.0)
+            assert [tuple(e.get_xdata()) for e in edges] == [(150.0, 150.0), (400.0, 400.0)]
+    finally:
+        v.on_close()
+
+
+# ------------------------------------------------------------ fault panels
+def test_fault_panel_zoom_is_kept_until_another_event(slip_app, view):
+    from matplotlib.backend_bases import MouseEvent
+    view.canvas.draw()
+    ax = view.ax_front
+
+    def mouse(name, xd, yd):
+        return MouseEvent(name, view.canvas, *ax.transData.transform((xd, yd)), button=1)
+
+    view.toolbar.zoom()                                   # the toolbar's zoom to a rectangle on the front panel
+    for name, xd, yd in (("button_press_event", 200.0, 25.0), ("motion_notify_event", 360.0, 20.0),
+                         ("button_release_event", 360.0, 20.0)):
+        view.canvas.callbacks.process(name, mouse(name, xd, yd))
+    view.toolbar.zoom()
+    zoom = (ax.get_xlim(), ax.get_ylim())                 # to within a pixel: mouse events carry whole pixels
+    assert zoom == ((pytest.approx(200.0, abs=3.0), pytest.approx(360.0, abs=3.0)),
+                    (pytest.approx(20.0, abs=0.03), pytest.approx(25.0, abs=0.03)))
+    xs, ts = view.point_artists["front"].get_data()
+    view.canvas.callbacks.process("button_press_event", mouse("button_press_event", xs[4], ts[4]))
+    assert view.sensor == 4 and (ax.get_xlim(), ax.get_ylim()) == zoom
+    assert view.ax_profile.get_xlim() == zoom[0]          # the two panels share x
+    view.step_sensor(+1)
+    assert (ax.get_xlim(), ax.get_ylim()) == zoom
+    view.before_start_var.set("-3")                       # a recompute
+    view.schedule(view.on_window_edited, now=True)
+    assert (ax.get_xlim(), ax.get_ylim()) == zoom
+    view.ax_profile.set_ylim(50.0, 110.0)                 # set by hand on the other panel
+    view.refit()
+    assert view.ax_profile.get_ylim() == (50.0, 110.0) and (ax.get_xlim(), ax.get_ylim()) == zoom
+    view.set_event(2)                                     # another event: both panels fit their data again
+    assert ax.get_xlim() != zoom[0] and ax.get_ylim() != zoom[1] and view.ax_profile.get_ylim() != (50.0, 110.0)
+
+
+def test_fault_panels_fit_each_event_with_a_patch_drawn(slip_app, view):
+    slip_app.data_manager.data["fault"] = {"patch_x_mm": [150.0, 400.0]}
+    run = slip_app.data_manager.get_data("runs/[0]")
+    add_slip_array(run["events"][2], slips_um=[0.02] * 8, noise_um=0.05)
+    view.set_event(2)                                     # from about 100 um and 20 ms to almost nothing elsewhere
+    lo, hi = view.ax_profile.get_ylim()
+    assert len(view.patch_artists) == 6 and hi - lo < 1.0
+    t = np.array([1e3 * s.t_shift_s for s in view.result.sensors])
+    pad = 0.05 * (t.max() - t.min())
+    np.testing.assert_allclose(view.ax_front.get_ylim(), (t.min() - pad, t.max() + pad))
+
+
+def test_profile_legend_leaves_the_points_visible(slip_app, view):
+    for model in ("EAZ", "quadratic", "EAZ-asymmetric"):
+        view.profile_model_combobox.set(model)
+        view.on_profile_settings()
+        view.canvas.draw()
+        box = view.ax_profile.get_legend().get_window_extent()
+        xs, ys = view.point_artists["profile"].get_data()
+        points = view.ax_profile.transData.transform(np.column_stack([xs, ys]))
+        assert not any(box.contains(px, py) for px, py in points)
+
+
+def test_profile_tips_are_drawn_or_marked_at_the_panel_edge(slip_app, view):
+    fit = view.profile_fit                                # EAZ on this event: zero beyond -21 and 579 mm
+    lo, hi = view.ax_profile.get_xlim()
+    assert fit.tips_mm[0] < -12.4 and fit.tips_mm[1] > 508.4                 # outside the sensors and margins
+    assert lo < fit.tips_mm[0] and fit.tips_mm[1] < hi and view.ax_front.get_xlim() == (lo, hi)
+    markers = [line for line in view.ax_profile.lines if line.get_marker() == "v"]
+    np.testing.assert_allclose(markers[0].get_xdata(), fit.tips_mm)
+    # tips farther out than one array span beyond the sensors: a marker at the panel's edge, with the x
+    for tips, texts in (((-721.0, 1279.0), ["tip at -721 mm", "tip at 1279 mm"]),
+                        ((-900.0, -700.0), ["tips at -900, -700 mm"])):
+        view.profile_fit = sprof.ProfileFit(model="eaz", valid=True, tips_mm=tips,
+                                            params={"D": 100.0, "xc": sum(tips) / 2, "a": (tips[1] - tips[0]) / 2,
+                                                    "lambda": 0.5})
+        view.plot_fault()
+        assert view.ax_profile.get_xlim() == (pytest.approx(-12.4), pytest.approx(508.4))
+        assert [t.get_text() for t in view.ax_profile.texts] == texts
+        assert not [line for line in view.ax_profile.lines if line.get_marker() == "v"]
+        assert len([line for line in view.ax_profile.lines if line.get_marker() in ("<", ">")]) == len(texts)
+
+
+def test_quadratic_profile_is_zero_outside_its_tips(slip_app):
+    run = slip_app.data_manager.get_data("runs/[0]")
+    add_slip_array(run["events"][2], slips_um=[0.0, 0.0, 31.7, 82.9, 100.0, 82.9, 31.7, 0.0], noise_um=0.05)
+    v = SlipDistributionView(slip_app, 0, 2)
+    try:
+        v.profile_model_combobox.set("quadratic")
+        v.on_profile_settings()
+        fit = v.profile_fit                               # 100 um at 279 mm, zero 150 mm either side
+        assert fit.valid and fit.tips_mm == (pytest.approx(129.0, abs=5.0), pytest.approx(429.0, abs=5.0))
+        xx, yy = v.profile_curve.get_data()
+        outside = (xx < fit.tips_mm[0]) | (xx > fit.tips_mm[1])
+        assert outside.any() and np.all(yy[outside] == 0.0) and np.all(yy[~outside] >= 0.0)
+        assert yy.max() == pytest.approx(100.0, abs=2.0)
+    finally:
+        v.on_close()
+
+
+def test_front_panel_draws_a_line_and_a_speed_per_segment(slip_app, view):
+    for mode in ("bilateral", "single"):
+        view.front_mode_combobox.set(mode)
+        view.on_front_settings()
+        segments = view.front_fit.segments
+        assert view.front_fit.valid and segments
+        lines = [line for line in view.ax_front.lines if line.get_linestyle() == "-"]
+        assert len(lines) == len(segments)
+        for line, seg in zip(lines, segments):
+            x = np.array([seg.x_from, seg.x_to])
+            np.testing.assert_allclose(line.get_xdata(), x)
+            np.testing.assert_allclose(line.get_ydata(), 1e3 * (seg.slope_s_per_mm * x + seg.intercept_s))
+        assert [t.get_text() for t in view.ax_front.texts] == [
+            "simultaneous" if math.isinf(s.velocity_m_s) else f"{abs(s.velocity_m_s):.3g} m/s" for s in segments]
+
+
+# ------------------------------------------------------ front text and status
+def test_front_auto_choice_leaves_out_only_doubtful_event_times(slip_app, view):
+    view.after_end_var.set("6")                           # past the record's end: every after window is clipped
+    view.schedule(view.on_window_edited, now=True)
+    assert all(cs.FLAG_AFTER_CLIPPED in s.flags for s in view.result.sensors)
+    assert view.front_use_auto and view.front_use == [True] * 8 and view.front_fit.valid
+    assert view.front_text_var.get().endswith("sensors: all, none with a doubtful t_i")
+    assert "doubtful t_i" not in [t.get_text() for t in view.ax_front.get_legend().get_texts()]
+
+
+def test_front_text_when_too_few_sensors_have_a_clean_event_time(slip_app):
+    run = slip_app.data_manager.get_data("runs/[0]")
+    add_slip_array(run["events"][2], slips_um=[0.02] * 8, noise_um=0.05)
+    add_slip_array(run["events"][3], slips_um=[0.02] * 4 + [100.0] + [0.02] * 3, noise_um=0.05)
+    v = SlipDistributionView(slip_app, 0, 2)
+    try:
+        assert v.front_use_auto and not any(v.front_use)
+        for mode in ("bilateral", "single"):
+            v.front_mode_combobox.set(mode)
+            v.on_front_settings()
+            assert v.front_text_var.get() == ("front: no sensor with a clean t_i; choose sensors under Sensors used\n"
+                                              "sensors: all but 8 with a doubtful t_i")
+        v.set_event(3)
+        assert v.front_use == [False] * 4 + [True] + [False] * 3
+        assert v.front_text_var.get() == ("front: only one sensor with a clean t_i; choose sensors under Sensors used\n"
+                                          "sensors: all but 7 with a doubtful t_i")
+        v.set_front_use(5, False)                         # a choice of the user's: no automatic line
+        assert not v.front_use_auto and "clean t_i" not in v.front_text_var.get()
+    finally:
+        v.on_close()
+
+
+def test_status_names_an_entry_that_was_not_applied(slip_app, view):
+    assert view.save()
+    view.smoothing_var.set("-1")
+    view.schedule(view.on_settings_edited, now=True)
+    assert view.status_var.get() == "rate smoothing must be >= 0"
+    for change in (lambda: (view.weighted_var.set(True), view.on_profile_settings()),
+                   lambda: (view.weighted_var.set(False), view.on_profile_settings()),
+                   lambda: view.step_sensor(+1)):
+        change()
+        status = view.status_var.get()
+        assert status.endswith(" | entry not applied: rate smoothing must be >= 0") and "matches" not in status
+    view.smoothing_var.set("2.5")                         # the applied value again
+    view.schedule(view.on_settings_edited, now=True)
+    assert view.status_var.get().endswith(" | matches the saved record")
+    view.patch_lo_var.set("400")
+    view.patch_hi_var.set("150")
+    view.schedule(view.on_patch_edited, now=True)
+    view.front_mode_combobox.set("single")
+    view.on_front_settings()
+    assert view.status_var.get().endswith(" | entry not applied: the patch must have from < to")
+
+
+def test_real_mouse_click_on_a_profile_point(slip_app, view):
+    widget = shown(view)
+    xs, ys = view.point_artists["profile"].get_data()
+    px, py = view.ax_profile.transData.transform((xs[6], ys[6]))
+    x, y = int(round(px)), int(round(view.canvas.figure.bbox.height - py))
+    widget.event_generate("<Button-1>", x=x, y=y)
+    assert view.sensor == 6                               # picked while the press is handled
+    widget.event_generate("<ButtonRelease-1>", x=x, y=y)
+    widget.update()                                       # the table selection comes back through Tk
+    assert view.sensor == 6 and view._drag is None
+
+
+def test_real_wheel_over_a_point_leaves_the_sensor(slip_app, view):
+    widget = shown(view)
+    xs, ts = view.point_artists["front"].get_data()
+    px, py = view.ax_front.transData.transform((xs[3], ts[3]))
+    x, y = int(round(px)), int(round(view.canvas.figure.bbox.height - py))
+    scrolls = []
+    view.canvas.mpl_connect("scroll_event", scrolls.append)
+    widget.event_generate("<MouseWheel>", x=x, y=y, rootx=widget.winfo_rootx() + x,
+                          rooty=widget.winfo_rooty() + y, delta=1)
+    widget.update()
+    if not scrolls:
+        pytest.skip("the wheel event did not reach the canvas")
+    assert scrolls[0].inaxes is view.ax_front and view.sensor == 0
+
+
+def test_home_after_another_event_shows_that_event(slip_app, view):
+    run = slip_app.data_manager.get_data("runs/[0]")
+    add_slip_array(run["events"][2], slips_um=[0.0, 2.0, 5.0, 9.0, 10.0, 8.0, 4.0, 1.0], t0_s=0.3, seed=7)
+    view.canvas.draw()
+    view.toolbar.push_current()                           # a toolbar zoom puts every panel's limits in its history
+    view.ax_trace.set_xlim(-0.2, 0.3)
+    view.set_event(2)
+    view.toolbar._buttons["Home"].invoke()
+    for name, ax in (("profile", view.ax_profile), ("front", view.ax_front)):
+        xs, ys = view.point_artists[name].get_data()
+        (x0, x1), (y0, y1) = ax.get_xlim(), ax.get_ylim()
+        assert np.all((xs >= x0) & (xs <= x1) & (ys >= y0) & (ys <= y1)), name
+    view.ax_front.set_ylim(250, 260)                      # a zoom on a fault panel, then Home
+    view.toolbar.home()
+    assert view.ax_front.get_ylim() == tuple(view._fault_auto[2])
+
+
+def test_unresolved_profile_parameters_are_shown_as_ranges(slip_app):
+    run = slip_app.data_manager.get_data("runs/[0]")
+    # real t0207 run 1 event 10: no sensor inside the elliptical part, so lambda is free
+    add_slip_array(run["events"][2], slips_um=[4.31, 0.29, 24.13, 48.47, 89.23, 64.96, 35.63, 19.4],
+                   noise_um=0.2, seed=3)
+    # real run 1 event 7: three sensors slip, the rupture edges are only bracketed
+    add_slip_array(run["events"][3], slips_um=[-0.62, -1.02, -0.31, 1.32, 3.11, 15.38, 4.8, 0.82],
+                   noise_um=0.2, seed=4)
+    v = SlipDistributionView(slip_app, 0, 2)
+    try:
+        fit = v.profile_fit
+        assert fit.valid and "lambda" in fit.unresolved and "D" in fit.ranges
+        text = v.profile_text_var.get()
+        assert "not resolved by the sensors:" in text and "lambda 0 to " in text and "fit equally" in text
+        v.set_event(3)
+        fit = v.profile_fit
+        assert fit.valid and "tips" in fit.unresolved
+        text = v.profile_text_var.get()
+        assert "-x edge 217 to 279 mm" in text and "+x edge 403 to 465 mm" in text and "rupture from" not in text
+        labels = [line.get_label() for line in v.ax_profile.lines]
+        assert "rupture edge, not resolved" in labels
+    finally:
+        v.on_close()
+
+
+def test_front_texts_name_the_apex_and_unresolved_speeds():
+    from labquake_explorer.analysis import slip_profile as sp
+    from labquake_explorer.ui.views.slip_distribution_view import apex_text, segment_speed_label, segment_text
+
+    def seg(x0, x1, slope, resolved=True, min_speed=float("nan")):
+        return sp.FrontSegment(x0, x1, 3, slope, 0.0, 1e-3 / slope if slope else math.inf, 0.9, resolved, min_speed)
+
+    out = sp.FrontFit("bilateral", True, "", [seg(31, 250, -2e-5), seg(250, 465, 2e-5)], 250.0, 0.0213)
+    assert apex_text(out) == "fronts start at x = 250 mm, 21.30 ms after the event time"
+    into = sp.FrontFit("bilateral", True, "", [seg(31, 250, 2e-5), seg(250, 465, -2e-5)], 250.0, 0.0213)
+    assert apex_text(into).startswith("fronts meet at x = 250 mm")
+    assert apex_text(sp.FrontFit("bilateral", True, "", [seg(31, 465, 0.0)], float("nan"), float("nan"))) is None
+    assert apex_text(sp.FrontFit("single", True, "", [seg(31, 465, 2e-5)])) is None
+    fast = seg(31, 279, 1e-6, resolved=False, min_speed=496.0)
+    assert segment_speed_label(fast) == "> 496 m/s" and "faster than 496 m/s" in segment_text(fast)
+    assert segment_speed_label(seg(31, 279, 0.0)) == "simultaneous"
+    assert segment_text(seg(31, 279, 2e-5)) == "x 31 to 279 mm: 50 m/s towards +x (3 sensors, R^2 = 0.900)"
+
+
+def test_front_fit_gets_the_sampling_interval(slip_app):
+    run = slip_app.data_manager.get_data("runs/[0]")
+    add_slip_array(run["events"][2], front_speed_m_s=2000.0, seed=5)   # crosses the array within one sample
+    v = SlipDistributionView(slip_app, 0, 2)
+    try:
+        segments = v.front_fit.segments
+        assert segments and all(not s.resolved or math.isinf(s.velocity_m_s) for s in segments)
+        dt = cs.sampling_interval(v.time)
+        assert all(s.min_speed_m_s == pytest.approx((s.x_to - s.x_from) * 1e-3 / dt) for s in segments)
+        text = v.front_text_var.get()
+        assert "faster than" in text or "simultaneous" in text
+    finally:
+        v.on_close()

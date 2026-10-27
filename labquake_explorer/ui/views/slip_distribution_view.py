@@ -15,19 +15,58 @@ values can be typed in the entries.  With "same windows for all sensors" a
 window edit applies to every sensor, relative to each one's ``t_i``.
 Everything recomputes as soon as a value changes.
 
+The two panels on the right show the result along the fault: the coseismic
+slip against ``x`` with error bars of each sensor's noise and a profile fit
+(``quadratic`` with values below zero masked to zero, or the earthquake arrest
+zone model of Ke et al. 2021, symmetric ``EAZ`` or ``EAZ-asymmetric``; see
+:mod:`labquake_explorer.analysis.slip_profile`), and the event times ``t_i``
+against ``x`` with the apparent velocity of the rupture front.  A left click
+on a point selects its sensor; a zoom of these two panels stays until another
+event or field is loaded.  The bare PMMA patch is drawn on both panels; its
+edges are typed in and saved for the whole experiment
+(``data['fault']['patch_x_mm']``), where preprocessing can set them too.
+Edges typed and not saved there stay while the view moves between events.
+
+The sensors do not always pin every profile parameter (``ProfileFit.unresolved``):
+an unresolved parameter is listed under "not resolved by the sensors" with the
+range that fits equally well (``ProfileFit.ranges``) when it is known, and a
+range of a parameter that is resolved but moves with an unresolved one (EAZ
+``D`` following ``lambda``) is shown beside its value.  A rupture edge that is
+not pinned is given, and drawn on the zero line, as the bracket it lies in
+(``beyond`` the last sensor when it is open); markers mark only the edges
+that are pinned.
+
+The front is one line (``single``) or, by default, a hinge of two lines that
+meet at a fitted apex (``bilateral``: at least four sensors; with fewer, two
+lines through the earliest sensor; one line when both sides run the same way).
+The text gives the apex and its time, where the fronts start (diverging) or
+meet (converging), and the panel marks it.  The fit gets the event's sampling
+interval: a segment that the front crosses within less than one sample is not
+resolved and reads "faster than" the speed of crossing it in one sample (``>``
+on the panel); a flat one (zero slope, infinite velocity) reads
+"simultaneous".
+
 Save stores ``event['slip_analysis']``: the record of
-:meth:`SlipAnalysis.as_dict` plus ``field``, ``unit`` and ``same_windows``.
+:meth:`SlipAnalysis.as_dict` plus ``field``, ``unit``, ``same_windows``,
+``patch_x_mm`` (the edges drawn), ``profile`` (the fit record plus ``use``,
+the sensors chosen for it) and ``front`` (the front fit plus ``use`` and
+``use_auto``: while the front's sensor choice has not been edited it follows
+the pick flags, leaving out the sensors whose ``t_i`` is doubtful: pick at
+the search edge, weak or no rate peak).
 """
 from __future__ import annotations
 
 import math
 import tkinter as tk
+from tkinter import font as tkfont
 from tkinter import messagebox, ttk
 from typing import Optional
 
 import numpy as np
+from matplotlib.backend_bases import MouseButton
 
 from labquake_explorer.analysis import coseismic_slip as cs
+from labquake_explorer.analysis import slip_profile as sprof
 from labquake_explorer.data.channels import channel_names, is_channel_array
 from labquake_explorer.data.picks import extraction_record
 from labquake_explorer.ui.actions import register_view
@@ -39,9 +78,27 @@ HANDLE_PICK_PX = 6                     # a press this close (pixels) to t_i or a
 ZOOM_HALF_S = 0.2                      # "Zoom to t_i" shows t_i +- this
 METHOD_LABELS = {cs.METHOD_MAX_RATE: "max slip rate", cs.METHOD_MANUAL: "manual"}
 BEFORE_COLOR, AFTER_COLOR, TI_COLOR = "#1f77b4", "#ff7f0e", "#d62728"
+PROFILE_LABELS = dict(sprof.MODEL_LABELS)      # model key -> combobox text
+DEFAULT_PROFILE_MODEL = "eaz"
+DEFAULT_FRONT_MODE = "bilateral"
+FAULT_KEY, PATCH_KEY = "fault", "patch_x_mm"   # experiment level: data['fault']['patch_x_mm']
+T_I_FLAGS = (cs.FLAG_EDGE, cs.FLAG_WEAK, cs.FLAG_NO_PEAK)   # the pick flags that make t_i doubtful
+PATCH_COLOR, POINT_COLOR, FRONT_COLOR, FLAG_COLOR = "#c08000", "#1f77b4", "#2ca02c", "#9467bd"
+EDGE_COLOR = "#404040"                 # rupture edges: pinned ones as markers, free ones as their bracket
 TABLE_COLUMNS = (("sensor", 70), ("x (mm)", 60), ("t_i from", 90), ("t_i - event (ms)", 100),
                  ("slip (um)", 75), ("sigma (um)", 75), ("flags", 260))
 HANDLE_NAMES = ("t_i", "before_start", "before_end", "after_start", "after_end")
+TEXT_WRAP_PX = 250                     # the fit texts wrap at this width
+SIDES = (("minus", "-x"), ("plus", "+x"))   # the rupture edges, in the order of ProfileFit.tips_mm
+NOT_RESOLVED = "not resolved by the sensors:"
+# profile parameters as shown: label, unit ("u" is the slip unit), significant digits;
+# the rows they are grouped in (D and xc read "D = ... at xc = ...")
+PARAM_FORMAT = {"c0": ("c0", "{u}", 4), "c1": ("c1", "{u}/mm", 4), "c2": ("c2", "{u}/mm^2", 4),
+                "D": ("D", "{u}", 3), "xc": ("xc", "mm", 4), "a": ("a", "mm", 4), "lambda": ("lambda", "", 3),
+                "a_minus": ("a-", "mm", 4), "a_plus": ("a+", "mm", 4),
+                "lambda_minus": ("lambda-", "", 3), "lambda_plus": ("lambda+", "", 3)}
+PARAM_ROWS = {"quadratic": (("c0", "c1"), ("c2",)), "eaz": (("D", "xc"), ("a", "lambda")),
+              "eaz_asymmetric": (("D", "xc"), ("a_minus", "a_plus"), ("lambda_minus", "lambda_plus"))}
 
 
 def _text(value) -> str:
@@ -62,6 +119,128 @@ def _parse(text: str, name: str, scale: float = 1.0) -> float:
     if not math.isfinite(value):
         raise ValueError(f"{name}: enter a finite number")
     return value * scale
+
+
+def _bools(value, n: int, default: bool) -> list:
+    """``value`` as ``n`` Python bools, or ``n`` times ``default`` when it does not fit."""
+    try:
+        flags = [bool(v) for v in np.asarray(value).ravel()]
+    except (TypeError, ValueError):
+        return [default] * n
+    return flags if len(flags) == n and value is not None else [default] * n
+
+
+def _patch_pair(value) -> Optional[tuple]:
+    """Two finite, different edges (in either order) as an increasing tuple, else None."""
+    try:
+        lo, hi = sorted(float(v) for v in np.asarray(value, dtype=float).ravel())
+    except (TypeError, ValueError):
+        return None
+    return (lo, hi) if math.isfinite(lo) and math.isfinite(hi) and lo < hi else None
+
+
+def _value_text(value) -> str:
+    """A stored value as short text, for a message."""
+    try:
+        return str(np.asarray(value, dtype=float).ravel().tolist())
+    except (TypeError, ValueError):
+        return repr(value)
+
+
+def doubtful_t_i(sensor: cs.SensorSlip) -> bool:
+    """True when a pick flag makes the sensor's ``t_i`` doubtful (the slip
+    window flags do not)."""
+    return any(flag in T_I_FLAGS for flag in sensor.flags)
+
+
+def tip_brackets(fit: Optional[sprof.ProfileFit]) -> dict:
+    """The rupture edges of a valid profile fit that the sensors leave free:
+    ``"minus"``/``"plus"`` -> ``(lo, hi)``, the bracket the edge lies in (NaN: open
+    on that end).  Empty while ``tips`` is resolved; when it is not, the sides
+    without a range are the pinned ones (both brackets open if no side has one)."""
+    if fit is None or not fit.valid or "tips" not in fit.unresolved:
+        return {}
+    out = {}
+    for side, _ in SIDES:
+        value = fit.ranges.get("tip_" + side)
+        try:
+            lo, hi = (float(v) for v in value)
+        except (TypeError, ValueError):
+            continue
+        out[side] = (lo, hi)
+    return out or {side: (math.nan, math.nan) for side, _ in SIDES}
+
+
+def _range_text(lo: float, hi: float, digits: int, unit: str = "") -> str:
+    """``lo to hi unit``; an open (NaN) end reads ``or more`` / ``or less``."""
+    unit = f" {unit}" if unit else ""
+    if math.isfinite(lo) and math.isfinite(hi):
+        return f"{lo:.{digits}g} to {hi:.{digits}g}{unit}"
+    if math.isfinite(lo):
+        return f"{lo:.{digits}g}{unit} or more"
+    if math.isfinite(hi):
+        return f"{hi:.{digits}g}{unit} or less"
+    return "any value"
+
+
+def _edge_text(label: str, lo: float, hi: float) -> str:
+    """A free rupture edge as its bracket: ``-x edge 217 to 279 mm``, ``+x edge
+    beyond 465 mm`` (open above), ``-x edge below 31 mm`` (open below)."""
+    if math.isfinite(lo) and math.isfinite(hi):
+        return f"{label} edge {lo:.4g} to {hi:.4g} mm"
+    if math.isfinite(lo):
+        return f"{label} edge beyond {lo:.4g} mm"
+    if math.isfinite(hi):
+        return f"{label} edge below {hi:.4g} mm"
+    return f"{label} edge"
+
+
+def segment_speed_label(seg: sprof.FrontSegment) -> str:
+    """The front panel's label of a segment: its speed, ``> N m/s`` when the front
+    crosses it within one sample, ``simultaneous`` when it is flat."""
+    v = seg.velocity_m_s
+    if math.isinf(v):
+        return "simultaneous"
+    if not seg.resolved and math.isfinite(seg.min_speed_m_s):
+        return f"> {seg.min_speed_m_s:.3g} m/s"
+    return f"{abs(v):.3g} m/s"
+
+
+def segment_text(seg: sprof.FrontSegment) -> str:
+    """One line of the front text: where, the speed and direction, the sensors and R^2."""
+    where = f"x {seg.x_from:.4g} to {seg.x_to:.4g} mm"
+    n = f"{seg.n} sensor{'' if seg.n == 1 else 's'}"
+    v, bound = seg.velocity_m_s, seg.min_speed_m_s
+    if math.isinf(v):
+        faster = f", faster than {bound:.3g} m/s" if math.isfinite(bound) else ""
+        return f"{where}: simultaneous{faster} ({n})"
+    if not seg.resolved and math.isfinite(bound):
+        return f"{where}: faster than {bound:.3g} m/s (less than one sample across it; {n})"
+    r2 = f", R^2 = {seg.r2:.3f}" if math.isfinite(seg.r2) else ""
+    return f"{where}: {abs(v):.3g} m/s towards {'+x' if v > 0 else '-x'} ({n}{r2})"
+
+
+def apex_text(fit: sprof.FrontFit) -> Optional[str]:
+    """Where a bilateral front starts (two lines leaving the apex), or where its two
+    fronts meet (two lines running into it), with the time there; for a front that
+    runs one way, its earliest point.  None without an apex (NaN, single mode) or
+    when no side moves."""
+    if fit.mode != "bilateral" or not fit.segments:
+        return None
+    if not (math.isfinite(fit.split_x_mm) and math.isfinite(fit.t0_s)):
+        return None
+    t = 1e3 * fit.t0_s
+    at = f"x = {fit.split_x_mm:.4g} mm, {abs(t):.2f} ms {'after' if t >= 0 else 'before'} the event time"
+    left, right = fit.segments[0].slope_s_per_mm, fit.segments[-1].slope_s_per_mm
+    if len(fit.segments) == 1:
+        return f"one-way front, earliest at {at}" if left != 0 else None
+    if left == right == 0:
+        return None
+    if left <= 0 <= right:
+        return f"fronts start at {at}"
+    if left >= 0 >= right:
+        return f"fronts meet at {at}"
+    return f"the two lines meet at {at}"
 
 
 def slip_fields(event) -> list:
@@ -106,14 +285,29 @@ class SlipDistributionView(EventView):
         self._pending = None
         self._syncing = False
         self._shown: dict = {}         # entry variable name -> the text the view last put there
+        self.profile_fit: Optional[sprof.ProfileFit] = None
+        self.front_fit: Optional[sprof.FrontFit] = None
+        self.profile_use: list = []
+        self.front_use: list = []
+        self.front_use_auto = True
+        self.patch_x_mm: Optional[tuple] = None
+        self._patch_draft = False      # patch_x_mm was typed here and not saved to the experiment
+        self.point_artists: dict = {}
+        self.patch_artists: list = []
+        self.profile_errorbar = None
+        self.profile_curve = None
+        self._profile_xlim = (0.0, 1.0)
+        self._fault_auto = None        # the fault panels' limits as the last redraw set them
         super().__init__(app, run_idx, event_idx)
 
     # ------------------------------------------------------------------ ui
     def build_ui(self) -> None:
-        self.grid_columnconfigure(1, weight=1)
+        self.grid_columnconfigure(2, weight=1)
         self.grid_rowconfigure(0, weight=1)
         left = ttk.Frame(self)
         left.grid(row=0, column=0, rowspan=3, padx=5, pady=5, sticky="nsw")
+        fits = ttk.Frame(self)
+        fits.grid(row=0, column=1, rowspan=3, padx=5, pady=5, sticky="nsw")
 
         frame = ttk.LabelFrame(left, text="Event")
         frame.pack(fill="x", pady=(0, 4))
@@ -190,10 +384,22 @@ class SlipDistributionView(EventView):
         ttk.Label(left, textvariable=self.status_var, wraplength=280, foreground="#a03030", justify="left").pack(
             fill="x", pady=2)
 
-        self.make_figure(figsize=(9, 5), figure_kwargs={"layout": "constrained"},
-                         row=0, column=1, padx=5, pady=5, sticky="nsew")
-        self.ax_trace = self.figure.add_subplot(111)
+        self._build_fit_frames(fits)
+        self.make_figure(figsize=(8.5, 6), figure_kwargs={"layout": "constrained"},
+                         row=0, column=2, padx=5, pady=5, sticky="nsew")
+        gs = self.figure.add_gridspec(2, 2, width_ratios=(1.35, 1.0))
+        self.ax_trace = self.figure.add_subplot(gs[:, 0])
         self.ax_rate = self.ax_trace.twinx()
+        self.ax_profile = self.figure.add_subplot(gs[0, 1])
+        self.ax_front = self.figure.add_subplot(gs[1, 1], sharex=self.ax_profile)
+        self.canvas.mpl_connect("pick_event", self.on_pick)                   # points of the fit panels
+        toolbar = getattr(self, "toolbar", None)
+        if toolbar is not None:                  # the Home button and the 'h' key go through home()
+            self._toolbar_home = toolbar.home
+            toolbar.home = self.home
+            button = getattr(toolbar, "_buttons", {}).get("Home")
+            if button is not None:
+                button.config(command=self.home)
         self.canvas.mpl_connect("button_press_event", self.on_press)
         self.canvas.mpl_connect("motion_notify_event", self.on_motion)
         self.canvas.mpl_connect("button_release_event", self.on_release)
@@ -203,9 +409,77 @@ class SlipDistributionView(EventView):
         for name, width in TABLE_COLUMNS:
             self.table.heading(name, text=name)
             self.table.column(name, width=width, anchor="e" if name not in ("sensor", "t_i from", "flags") else "w")
-        self.table.grid(row=2, column=1, padx=5, pady=(0, 5), sticky="ew")
+        self.table.grid(row=2, column=2, padx=5, pady=(0, 5), sticky="ew")
         self.table.bind("<ButtonPress-1>", lambda e: self.flush_pending(), add="+")    # before the class binding
         self.table.bind("<<TreeviewSelect>>", self.on_table_select)
+
+    def _build_fit_frames(self, master) -> None:
+        frame = ttk.LabelFrame(master, text="Bare PMMA patch (experiment)")
+        frame.pack(fill="x", pady=(0, 4))
+        self.patch_lo_var = tk.StringVar(master=self, value="")
+        self.patch_hi_var = tk.StringVar(master=self, value="")
+        self._entry(frame, "From x (mm):", self.patch_lo_var, 0, self.on_patch_edited)
+        self._entry(frame, "To x (mm):", self.patch_hi_var, 1, self.on_patch_edited)
+        ttk.Button(frame, text="Save to experiment", command=self.save_patch).grid(
+            row=2, column=0, columnspan=2, padx=4, pady=2, sticky="w")
+        self.patch_note_var = tk.StringVar(master=self, value="")
+        ttk.Label(frame, textvariable=self.patch_note_var, foreground="#606060", wraplength=TEXT_WRAP_PX,
+                  justify="left").grid(row=3, column=0, columnspan=2, padx=4, sticky="w")
+
+        frame = ttk.LabelFrame(master, text="Slip profile")
+        frame.pack(fill="x", pady=4)
+        ttk.Label(frame, text="Model:").grid(row=0, column=0, padx=4, pady=2, sticky="e")
+        self.profile_model_combobox = ttk.Combobox(frame, width=15, state="readonly",
+                                                   values=[PROFILE_LABELS[m] for m in sprof.MODELS])
+        self.profile_model_combobox.set(PROFILE_LABELS[DEFAULT_PROFILE_MODEL])
+        self.profile_model_combobox.grid(row=0, column=1, padx=4, pady=2, sticky="w")
+        self.profile_model_combobox.bind("<<ComboboxSelected>>", lambda e: self.on_profile_settings())
+        self.weighted_var = tk.BooleanVar(master=self, value=False)
+        ttk.Checkbutton(frame, text="weight by 1/sigma^2", variable=self.weighted_var,
+                        command=self.on_profile_settings).grid(row=1, column=0, columnspan=2, padx=4, pady=2, sticky="w")
+        self.profile_use_mb = self._use_menu(frame, 2)
+        self.profile_text_var = tk.StringVar(master=self, value="")
+        ttk.Label(frame, textvariable=self.profile_text_var, wraplength=TEXT_WRAP_PX, justify="left").grid(
+            row=3, column=0, columnspan=2, padx=4, pady=2, sticky="w")
+        try:                                             # the font the texts are packed into lines with
+            self._text_font = tkfont.nametofont("TkDefaultFont")
+        except tk.TclError:
+            self._text_font = None
+
+        frame = ttk.LabelFrame(master, text="Rupture front (t_i against x)")
+        frame.pack(fill="x", pady=4)
+        ttk.Label(frame, text="Fit:").grid(row=0, column=0, padx=4, pady=2, sticky="e")
+        self.front_mode_combobox = ttk.Combobox(frame, width=15, state="readonly", values=list(sprof.FRONT_MODES))
+        self.front_mode_combobox.set(DEFAULT_FRONT_MODE)
+        self.front_mode_combobox.grid(row=0, column=1, padx=4, pady=2, sticky="w")
+        self.front_mode_combobox.bind("<<ComboboxSelected>>", lambda e: self.on_front_settings())
+        ttk.Label(frame, text="single: one line; bilateral: two lines that\nmeet at a fitted apex",
+                  foreground="#606060", justify="left").grid(row=1, column=0, columnspan=2, padx=4, sticky="w")
+        self.front_use_mb = self._use_menu(frame, 2)
+        self.front_text_var = tk.StringVar(master=self, value="")
+        ttk.Label(frame, textvariable=self.front_text_var, wraplength=TEXT_WRAP_PX, justify="left").grid(
+            row=3, column=0, columnspan=2, padx=4, pady=2, sticky="w")
+
+    def _use_menu(self, master, row) -> tk.Menubutton:
+        mb = tk.Menubutton(master, text="Sensors used", relief="raised")
+        mb.grid(row=row, column=0, columnspan=2, padx=4, pady=2, sticky="w")
+        mb.menu = tk.Menu(mb, tearoff=0)
+        mb["menu"] = mb.menu
+        mb.items = []
+        return mb
+
+    def _fill_use_menu(self, mb, flags, command) -> None:
+        mb.menu.delete(0, "end")
+        mb.items = [tk.IntVar(master=self, value=int(bool(f))) for f in flags]
+        for i, var in enumerate(mb.items):
+            mb.menu.add_checkbutton(label=self.sensor_label(i), variable=var,
+                                    command=lambda i=i, var=var: command(i, bool(var.get())))
+
+    @staticmethod
+    def _sync_use_menu(mb, flags) -> None:
+        for var, flag in zip(mb.items, flags):
+            if bool(var.get()) != bool(flag):
+                var.set(int(bool(flag)))
 
     def _entry(self, master, label, var, row, callback, width=9):
         ttk.Label(master, text=label).grid(row=row, column=0, padx=4, pady=2, sticky="e")
@@ -330,9 +604,50 @@ class SlipDistributionView(EventView):
             self.saved = None
         self.sensor_combobox.config(values=[self.sensor_label(i) for i in range(n)])
         self.sensor = min(max(self.sensor, 0), n - 1)
+        self.restore_fit_settings(record if inputs is not None else None)
         self.result = None                           # never keep another event's or field's result
         if not self.recompute(reset_view=True):
             self.clear_display()
+
+    def restore_fit_settings(self, record: Optional[dict]) -> None:
+        """Profile and front settings from a saved record.  Without one the model,
+        the weighting and the front mode stay as they are and every sensor is
+        used.  Patch edges typed here and not saved to the experiment stay;
+        otherwise they come from the experiment, else the record, else stay as
+        they are."""
+        n = len(self.channels)
+        profile = record.get("profile") if isinstance(record, dict) else None
+        front = record.get("front") if isinstance(record, dict) else None
+        if isinstance(profile, dict):
+            model = str(profile.get("model", DEFAULT_PROFILE_MODEL))
+            self.profile_model_combobox.set(PROFILE_LABELS[model if model in sprof.MODELS else DEFAULT_PROFILE_MODEL])
+            self.weighted_var.set(bool(np.asarray(profile.get("weighted", False)).ravel()[0]))
+        self.profile_use = _bools(profile.get("use") if isinstance(profile, dict) else None, n, True)
+        if isinstance(front, dict):
+            mode = str(front.get("mode", DEFAULT_FRONT_MODE))
+            self.front_mode_combobox.set(mode if mode in sprof.FRONT_MODES else DEFAULT_FRONT_MODE)
+            self.front_use_auto = bool(np.asarray(front.get("use_auto", True)).ravel()[0])
+            self.front_use = _bools(front.get("use"), n, True)
+        else:
+            self.front_use_auto = True
+            self.front_use = [True] * n
+        patch = self.patch_x_mm                      # a draft typed here; else what stays when nothing is found
+        if not self._patch_draft:
+            found = self.experiment_patch()
+            if found is None and isinstance(record, dict):
+                found = _patch_pair(record.get(PATCH_KEY))
+            if found is not None:
+                patch = found
+        self._fill_use_menu(self.profile_use_mb, self.profile_use, self.set_profile_use)
+        self._fill_use_menu(self.front_use_mb, self.front_use, self.set_front_use)
+        self.show_patch(patch)
+
+    def show_patch(self, patch: Optional[tuple]) -> None:
+        """Make ``patch`` the edges drawn, put them in the entries and update the note."""
+        self.patch_x_mm = patch
+        self._show(self.patch_lo_var, _text(patch[0]) if patch else "")
+        self._show(self.patch_hi_var, _text(patch[1]) if patch else "")
+        self.update_patch_note()
 
     def sensor_label(self, i: int) -> str:
         x = self.x_mm[i]
@@ -345,6 +660,10 @@ class SlipDistributionView(EventView):
         self.ax_rate.clear()
         self.handles = {}
         self.spans = {}
+        self.profile_fit = self.front_fit = None
+        self.plot_fault(reset_view=True)
+        self.profile_text_var.set("")
+        self.front_text_var.set("")
         self.canvas.draw_idle()
 
     # ----------------------------------------------------------- settings
@@ -416,6 +735,7 @@ class SlipDistributionView(EventView):
         self.result = result
         self.methods = [s.method for s in result.sensors]
         self.t_shift = [s.t_shift_s for s in result.sensors]
+        self.refit(draw=False)
         self.show_sensor()
         self.fill_table()
         self.plot(reset_view=reset_view)
@@ -504,7 +824,10 @@ class SlipDistributionView(EventView):
         self.recompute()
 
     def on_t_shift_edited(self) -> None:
-        if self._syncing or self.current() is None or not self._edited(self.t_shift_var):
+        if self._syncing or self.current() is None:
+            return
+        if not self._edited(self.t_shift_var):
+            self.update_status()                  # the applied value again: an earlier error no longer holds
             return
         try:
             shift = _parse(self.t_shift_var.get(), "t_i - event time (ms)", 1e-3)
@@ -530,7 +853,10 @@ class SlipDistributionView(EventView):
 
     def on_window_edited(self) -> None:
         window_vars = (self.before_start_var, self.before_end_var, self.after_start_var, self.after_end_var)
-        if self._syncing or self.result is None or not self._edited(*window_vars):
+        if self._syncing or self.result is None:
+            return
+        if not self._edited(*window_vars):
+            self.update_status()
             return
         try:
             before, after = self.read_windows()
@@ -566,12 +892,453 @@ class SlipDistributionView(EventView):
         # with no result (a bad value stopped the last recompute) any value is worth a try
         if self.result is None or self._edited(self.reference_var, self.smoothing_var, self.search_var, self.snr_var):
             self.recompute()
+        else:
+            self.update_status()
 
     def repick_all(self) -> None:
         """Every sensor back to the automatic max-rate pick."""
         self.flush_pending()
         self.methods = [cs.METHOD_MAX_RATE] * len(self.channels)
         self.recompute()
+
+    # ------------------------------------------------------- profile and front
+    def profile_model(self) -> str:
+        label = self.profile_model_combobox.get()
+        return next((k for k, v in PROFILE_LABELS.items() if v == label), DEFAULT_PROFILE_MODEL)
+
+    def front_mode(self) -> str:
+        mode = self.front_mode_combobox.get()
+        return mode if mode in sprof.FRONT_MODES else DEFAULT_FRONT_MODE
+
+    def refit(self, draw: bool = True) -> None:
+        """Fit the slip profile and the rupture front to the current per-sensor result."""
+        if self.result is None:
+            return
+        sensors = self.result.sensors
+        slip = np.array([s.coseismic_slip for s in sensors])
+        sigma = np.array([s.noise for s in sensors])
+        self.profile_fit = sprof.fit_profile(self.x_mm, slip, sigma, model=self.profile_model(),
+                                             weighted=bool(self.weighted_var.get()), use=self.profile_use)
+        if self.front_use_auto:
+            self.front_use = [not doubtful_t_i(s) for s in sensors]
+            self._sync_use_menu(self.front_use_mb, self.front_use)
+        # the t_i sit on the samples: a segment crossed within one of them is not resolved
+        self.front_fit = sprof.fit_front(self.x_mm, [s.t_shift_s for s in sensors], use=self.front_use,
+                                         mode=self.front_mode(), dt_s=cs.sampling_interval(self.time))
+        self.profile_text_var.set(self.profile_text())
+        self.front_text_var.set(self.front_text())
+        if draw:
+            self.plot_fault()
+            self.canvas.draw_idle()
+            self.update_status()
+
+    def on_profile_settings(self) -> None:
+        self.refit()
+
+    def on_front_settings(self) -> None:
+        self.refit()
+
+    def set_profile_use(self, i: int, used: bool) -> None:
+        self.profile_use[int(i)] = bool(used)
+        self._sync_use_menu(self.profile_use_mb, self.profile_use)
+        self.refit()
+
+    def set_front_use(self, i: int, used: bool) -> None:
+        """An explicit choice of the front's sensors; it stops following the flags."""
+        self.front_use_auto = False
+        self.front_use[int(i)] = bool(used)
+        self._sync_use_menu(self.front_use_mb, self.front_use)
+        self.refit()
+
+    def _fits(self, text: str) -> bool:
+        """True when ``text`` fits on one line of the fit texts."""
+        if self._text_font is not None:
+            try:
+                return self._text_font.measure(text) <= TEXT_WRAP_PX
+            except tk.TclError:
+                pass
+        return len(text) <= TEXT_WRAP_PX // 7
+
+    def _pack(self, rows) -> list:
+        """Lines of short texts: those of a row joined by ", " while they fit
+        ``TEXT_WRAP_PX``, and a row that fits whole on the line before it joins it."""
+        lines = []
+        for row in rows:
+            row_lines = []
+            for text in row:
+                if row_lines and self._fits(f"{row_lines[-1]}, {text}"):
+                    row_lines[-1] = f"{row_lines[-1]}, {text}"
+                else:
+                    row_lines.append(text)
+            if lines and len(row_lines) == 1 and self._fits(f"{lines[-1]}, {row_lines[0]}"):
+                lines[-1] = f"{lines[-1]}, {row_lines[0]}"
+            else:
+                lines.extend(row_lines)
+        return lines
+
+    def _param_format(self, name: str) -> tuple:
+        """``(label, unit, digits)`` of a profile parameter as shown."""
+        label, unit, digits = PARAM_FORMAT.get(name, (name, "", 4))
+        return label, unit.format(u=self.unit), digits
+
+    def _param_text(self, fit: sprof.ProfileFit, name: str) -> str:
+        """``name = value unit``, with the range that fits equally well beside it when
+        the parameter has one (it moves with an unresolved one)."""
+        label, unit, digits = self._param_format(name)
+        text = f"{label} = {fit.params[name]:.{digits}g}" + (f" {unit}" if unit else "")
+        if name in fit.ranges:
+            lo, hi = (float(v) for v in fit.ranges[name])
+            text += f" ({_range_text(lo, hi, digits)} fit equally)"
+        return text
+
+    def profile_text(self) -> str:
+        """The profile fit: the parameters the sensors pin and the rupture extent;
+        under "not resolved by the sensors" those they leave free, as the range that
+        fits equally well where it is known, and the free rupture edges as their
+        brackets; then the fit quality."""
+        fit = self.profile_fit
+        label = PROFILE_LABELS.get(fit.model, fit.model) if fit is not None else ""
+        if fit is None or not fit.valid:
+            return f"{label}: {fit.reason if fit is not None else 'no fit'}"
+        u = self.unit
+        unresolved = [name for name in fit.unresolved if name in fit.params]
+        rows = []
+        for row in PARAM_ROWS.get(fit.model, (tuple(fit.params),)):
+            shown = [name for name in row if name not in unresolved]
+            if shown == ["D", "xc"] and "D" not in fit.ranges:
+                rows.append([f"{self._param_text(fit, 'D')} at {self._param_text(fit, 'xc')}"])
+            else:
+                rows.append([self._param_text(fit, name) for name in shown])
+        lines = self._pack(rows)
+        if fit.model == "quadratic" and math.isfinite(fit.peak) and not unresolved:
+            lines.append(f"peak {fit.peak:.3g} {u} at x = {fit.peak_x_mm:.4g} mm")
+        brackets = tip_brackets(fit)
+        if not brackets:
+            if all(math.isfinite(v) for v in fit.tips_mm):
+                lines.append(f"rupture from {fit.tips_mm[0]:.4g} to {fit.tips_mm[1]:.4g} mm")
+        else:                                            # the pinned edge of a pair with a free one
+            lines.extend(f"{side_label} edge at {tip:.4g} mm" for (side, side_label), tip in zip(SIDES, fit.tips_mm)
+                         if side not in brackets and math.isfinite(tip))
+        free = []
+        named = [self._param_format(name)[0] for name in unresolved if name not in fit.ranges]
+        if named:
+            free.append(", ".join(named))
+        for name in unresolved:
+            if name in fit.ranges:
+                plabel, unit, digits = self._param_format(name)
+                lo, hi = (float(v) for v in fit.ranges[name])
+                free.append(f"{plabel} {_range_text(lo, hi, digits, unit)}")
+        free.extend(_edge_text(side_label, *brackets[side]) for side, side_label in SIDES if side in brackets)
+        if free:
+            lines += [NOT_RESOLVED] + free
+        prefix = f"{label}:"
+        if lines and self._fits(f"{prefix} {lines[0]}"):
+            lines[0] = f"{prefix} {lines[0]}"
+        else:
+            lines.insert(0, prefix)
+        lines.append(f"R^2 = {fit.r2:.4f}, rms = {fit.rms:.3g} {u}, {fit.n} sensors"
+                     + (", weighted" if fit.weighted else ""))
+        if fit.at_bounds:
+            lines.append("at a bound: " + ", ".join(self._param_format(name)[0] for name in fit.at_bounds))
+        return "\n".join(lines)
+
+    def front_text(self) -> str:
+        fit = self.front_fit
+        if fit is None:
+            return "front: no fit"
+        auto = None
+        if self.front_use_auto:
+            n_doubtful = sum(1 for used in self.front_use if not used)
+            auto = (f"sensors: all but {n_doubtful} with a doubtful t_i" if n_doubtful
+                    else "sensors: all, none with a doubtful t_i")
+        if not fit.valid:
+            reason = fit.reason
+            if self.front_use_auto:
+                n = sum(1 for used in self.front_use if used)
+                if n < 2:
+                    reason = f"{'no sensor' if n == 0 else 'only one sensor'} with a clean t_i"
+                reason += "; choose sensors under Sensors used"
+            return "\n".join([f"front: {reason}"] + ([auto] if auto else []))
+        lines = [segment_text(seg) for seg in fit.segments]
+        apex = apex_text(fit)
+        if apex:
+            lines.append(apex)
+        if auto:
+            lines.append(auto)
+        return "\n".join(lines)
+
+    def experiment_patch_value(self):
+        """``data['fault']['patch_x_mm']`` as stored, or None when there is none."""
+        data = self.data_manager.data if isinstance(self.data_manager.data, dict) else {}
+        fault = data.get(FAULT_KEY)
+        return fault.get(PATCH_KEY) if isinstance(fault, dict) else None
+
+    def experiment_patch(self) -> Optional[tuple]:
+        """The experiment's patch edges, increasing, or None when absent or unusable."""
+        return _patch_pair(self.experiment_patch_value())
+
+    def read_patch(self) -> Optional[tuple]:
+        """The patch edges in the entries: None when both are blank, ValueError
+        when unusable.  An entry the user has not edited gives the edge in use at
+        full precision, not its rounded text."""
+        lo_text, hi_text = self.patch_lo_var.get().strip(), self.patch_hi_var.get().strip()
+        if not lo_text and not hi_text:
+            return None
+        applied = self.patch_x_mm
+        lo = applied[0] if applied and not self._edited(self.patch_lo_var) else _parse(lo_text, "patch from (mm)")
+        hi = applied[1] if applied and not self._edited(self.patch_hi_var) else _parse(hi_text, "patch to (mm)")
+        if lo >= hi:
+            raise ValueError("the patch must have from < to")
+        return lo, hi
+
+    def on_patch_edited(self) -> None:
+        if self._syncing:
+            return
+        if not self._edited(self.patch_lo_var, self.patch_hi_var):
+            self.update_status()
+            return
+        try:
+            patch = self.read_patch()
+        except ValueError as e:
+            self.status_var.set(str(e))
+            return
+        for var in (self.patch_lo_var, self.patch_hi_var):
+            self._shown[str(var)] = var.get()
+        self.patch_x_mm = patch
+        self._patch_draft = patch is not None
+        self.update_patch_note()
+        self.plot_fault()
+        self.canvas.draw_idle()
+        self.update_status()
+
+    def update_patch_note(self) -> None:
+        saved, value = self.experiment_patch(), self.experiment_patch_value()
+        if self.patch_x_mm is None:
+            note = "no patch edges in the experiment" if saved is None else ""
+        elif saved == self.patch_x_mm:
+            note = "saved in the experiment"
+        else:
+            note = "not saved to the experiment"
+        if saved is None and value is not None:
+            unusable = f"experiment patch edges unusable: {_value_text(value)}"
+            note = f"{note}; {unusable}" if self.patch_x_mm is not None else unusable
+        self.patch_note_var.set(note)
+
+    def save_patch(self) -> bool:
+        """Store the patch edges for the whole experiment (``data['fault']['patch_x_mm']``)
+        and show them in the other open Slip Distribution windows."""
+        self.flush_pending()
+        try:
+            patch = self.read_patch()
+        except ValueError as e:
+            self.status_var.set(str(e))
+            return False
+        if patch is None:
+            self.status_var.set("type both patch edges first")
+            return False
+        old = self.experiment_patch()
+        self.data_manager.set_data(f"{FAULT_KEY}/{PATCH_KEY}", [float(patch[0]), float(patch[1])], add_key=True)
+        for var in (self.patch_lo_var, self.patch_hi_var):
+            self._shown[str(var)] = var.get()
+        self.patch_x_mm = patch
+        self._patch_draft = False
+        self.app.refresh_tree()
+        self.update_patch_note()
+        self.plot_fault()
+        self.canvas.draw_idle()
+        for view in list(getattr(self.app, "child_windows", [])):
+            if view is not self and isinstance(view, SlipDistributionView) and view.winfo_exists():
+                view.on_experiment_patch_saved(old)
+        self.status_var.set("patch edges saved in the experiment")
+        return True
+
+    def on_experiment_patch_saved(self, old: Optional[tuple]) -> None:
+        """Another window saved new patch edges in the experiment (replacing
+        ``old``): show them, unless this view holds edges typed here, which stay."""
+        self.flush_pending()
+        if self._patch_draft and self.patch_x_mm is not None and self.patch_x_mm != old:
+            self.update_patch_note()
+            return
+        self._patch_draft = False
+        self.show_patch(self.experiment_patch())
+        self.plot_fault()
+        self.canvas.draw_idle()
+        self.update_status()
+
+    def _draw_patch(self, ax) -> None:
+        if self.patch_x_mm is None:
+            return
+        lo, hi = self.patch_x_mm
+        self.patch_artists.append(ax.axvspan(lo, hi, color=PATCH_COLOR, alpha=0.12, zorder=0))
+        for x in (lo, hi):
+            self.patch_artists.append(ax.axvline(x, color=PATCH_COLOR, ls="--", lw=1.0, zorder=1))
+
+    def pinned_tips(self) -> list:
+        """The finite rupture tips of a valid profile fit that the sensors pin."""
+        fit = self.profile_fit
+        if fit is None or not fit.valid:
+            return []
+        brackets = tip_brackets(fit)
+        return [float(t) for (side, _), t in zip(SIDES, fit.tips_mm) if side not in brackets and math.isfinite(t)]
+
+    def _x_range(self) -> tuple:
+        """x-limits of the fault panels: the sensors with a margin, the patch, and
+        the pinned tips and the ends of the free edges' brackets of a valid profile
+        fit up to one array span beyond the sensors."""
+        x = self.x_mm[np.isfinite(self.x_mm)]
+        if x.size == 0:
+            return 0.0, 1.0
+        span = float(x.max() - x.min()) or 1.0
+        lo, hi = min(0.0, float(x.min()) - 0.1 * span), float(x.max()) + 0.1 * span
+        if self.patch_x_mm is not None:
+            lo, hi = min(lo, self.patch_x_mm[0]), max(hi, self.patch_x_mm[1])
+        ends = self.pinned_tips() + [v for bracket in tip_brackets(self.profile_fit).values() for v in bracket]
+        for tip in ends:
+            if math.isfinite(tip) and float(x.min()) - span <= tip <= float(x.max()) + span:
+                lo, hi = min(lo, tip - 0.05 * span), max(hi, tip + 0.05 * span)
+        return lo, hi
+
+    def _draw_brackets(self, ax, lo: float, hi: float) -> None:
+        """Each free rupture edge as a bar on the zero line over the bracket it lies
+        in, with ticks at its ends; an open end runs past that edge of the panel."""
+        far = 10.0 * (hi - lo)                           # an open end: well past the panel, whatever the zoom
+        for i, (side, (b_lo, b_hi)) in enumerate(tip_brackets(self.profile_fit).items()):
+            start = b_lo if math.isfinite(b_lo) else lo - far
+            stop = b_hi if math.isfinite(b_hi) else hi + far
+            ax.plot([start, stop], [0.0, 0.0], "-", color=EDGE_COLOR, lw=6, alpha=0.35, solid_capstyle="butt",
+                    zorder=2, label="rupture edge, not resolved" if i == 0 else "_edge_" + side)
+            ends = [v for v in (b_lo, b_hi) if math.isfinite(v)]
+            if ends:
+                ax.plot(ends, [0.0] * len(ends), "|", color=EDGE_COLOR, ms=11, mew=1.5, zorder=2,
+                        label="_edge_ends_" + side)
+
+    def plot_profile(self) -> None:
+        ax = self.ax_profile
+        ax.clear()
+        self.patch_artists = []
+        self.point_artists.pop("profile", None)
+        self.profile_errorbar = self.profile_curve = None
+        if self.result is None:
+            return
+        sensors = self.result.sensors
+        x = self.x_mm
+        y = np.array([s.coseismic_slip for s in sensors])
+        sigma = np.array([s.noise for s in sensors])
+        lo, hi = self._x_range()
+        self._profile_xlim = (lo, hi)
+        self._draw_patch(ax)
+        ax.axhline(0.0, color="#b0b0b0", lw=0.6, zorder=1)
+        self.profile_errorbar = ax.errorbar(x, y, yerr=np.where(np.isfinite(sigma), sigma, 0.0), fmt="none",
+                                            ecolor=POINT_COLOR, elinewidth=1.0, capsize=3, zorder=3)
+        self.point_artists["profile"], = ax.plot(x, y, "o", color=POINT_COLOR, ms=6, picker=5, zorder=4,
+                                                 label="coseismic slip, error bar = noise")
+        unused = ~np.asarray(self.profile_use, dtype=bool)
+        if np.any(unused):
+            ax.plot(x[unused], y[unused], "o", mfc="white", mec="#9a9a9a", ms=6, zorder=5, label="not fitted")
+        k = self.sensor
+        ax.plot([x[k]], [y[k]], "o", mfc="none", mec=TI_COLOR, mew=1.6, ms=12, zorder=6)
+        fit = self.profile_fit
+        if fit is not None and fit.valid:
+            xx = np.linspace(lo, hi, 600)
+            self.profile_curve, = ax.plot(xx, fit.evaluate(xx), "-", color="k", lw=1.4, zorder=2,
+                                          label=PROFILE_LABELS.get(fit.model, fit.model))
+            self._draw_brackets(ax, lo, hi)
+            tips = self.pinned_tips()                    # markers only where the sensors pin a tip
+            inside = [t for t in tips if lo <= t <= hi]
+            if inside:
+                ax.plot(inside, [0.0] * len(inside), "v", color="k", ms=6, zorder=6)
+            # a tip farther out than _x_range reaches: a marker at that edge of the panel, with its x
+            edge = ax.get_yaxis_transform()              # x in axes fractions, y in data
+            for beyond, at, marker, ha, dx in (([t for t in tips if t < lo], 0.0, "<", "left", 3),
+                                               ([t for t in tips if t > hi], 1.0, ">", "right", -3)):
+                if beyond:
+                    ax.plot([0.02 if at == 0.0 else 0.98], [0.0], marker, color="k", ms=6, zorder=6,
+                            transform=edge)
+                    ax.annotate(f"tip{'s' if len(beyond) > 1 else ''} at "
+                                f"{', '.join(f'{t:.4g}' for t in beyond)} mm", (at, 0.0), xycoords=edge,
+                                textcoords="offset points", xytext=(dx, 7), ha=ha, fontsize=7)
+        # data limits from what is drawn now: after clear() the patch span (no y extent) comes first
+        # and would leave the previous drawing's y limits in place
+        ax.relim()
+        ax.set_xlim(lo, hi)
+        ax.set_ylabel(f"coseismic slip ({self.unit})")
+        ax.set_title("slip along the fault", fontsize=9)
+        ax.grid(True, linestyle="--", alpha=0.3)
+        ax.legend(loc="best", fontsize=7)
+        ax.tick_params(labelbottom=False)
+
+    def plot_front(self) -> None:
+        ax = self.ax_front
+        ax.clear()
+        self.point_artists.pop("front", None)
+        if self.result is None:
+            return
+        sensors = self.result.sensors
+        x = self.x_mm
+        t_ms = np.array([1e3 * s.t_shift_s for s in sensors])
+        self._draw_patch(ax)
+        self.point_artists["front"], = ax.plot(x, t_ms, "o", color=FRONT_COLOR, ms=6, picker=5, zorder=4, label="t_i")
+        doubtful = np.array([doubtful_t_i(s) for s in sensors])
+        if np.any(doubtful):
+            ax.plot(x[doubtful], t_ms[doubtful], "s", mfc="none", mec=FLAG_COLOR, ms=9, mew=1.2, zorder=5,
+                    label="doubtful t_i")
+        unused = ~np.asarray(self.front_use, dtype=bool)
+        if np.any(unused):
+            ax.plot(x[unused], t_ms[unused], "x", color="#7a7a7a", ms=7, zorder=6, label="not fitted")
+        k = self.sensor
+        ax.plot([x[k]], [t_ms[k]], "o", mfc="none", mec=TI_COLOR, mew=1.6, ms=12, zorder=6)
+        fit = self.front_fit
+        if fit is not None and fit.valid:
+            # each segment from x_from to x_to: those of a hinge both end at the apex, at t0
+            for seg in fit.segments:
+                xx = np.array([seg.x_from, seg.x_to])
+                ax.plot(xx, 1e3 * (seg.slope_s_per_mm * xx + seg.intercept_s), "-", color="k", lw=1.2, zorder=3)
+                ax.annotate(segment_speed_label(seg),
+                            (xx.mean(), 1e3 * (seg.slope_s_per_mm * xx.mean() + seg.intercept_s)),
+                            textcoords="offset points", xytext=(0, 6), ha="center", fontsize=8)
+            if math.isfinite(fit.split_x_mm) and math.isfinite(fit.t0_s):
+                ax.plot([fit.split_x_mm], [1e3 * fit.t0_s], "D", mfc="none", mec="k", mew=1.4, ms=8, zorder=6,
+                        label="apex")
+        ax.relim()                                       # as in plot_profile
+        ax.set_xlim(*self._profile_xlim)
+        ax.set_xlabel("x along the fault (mm)")
+        ax.set_ylabel("t_i - event time (ms)")
+        ax.grid(True, linestyle="--", alpha=0.3)
+        ax.legend(loc="best", fontsize=7)
+
+    def plot_fault(self, reset_view: bool = False) -> None:
+        """Redraw the profile and front panels.  Limits the user changed there
+        (they differ from those the last redraw set: the toolbar's zoom or pan)
+        are kept, the shared x and each panel's y on its own, unless
+        ``reset_view``."""
+        limits = (self.ax_profile.get_xlim, self.ax_profile.get_ylim, self.ax_front.get_ylim)
+        setters = (self.ax_profile.set_xlim, self.ax_profile.set_ylim, self.ax_front.set_ylim)
+        now = [get() for get in limits]
+        auto = self._fault_auto
+        kept = [None] * 3 if reset_view or auto is None else [n if n != a else None for n, a in zip(now, auto)]
+        toolbar = getattr(self, "toolbar", None)
+        if reset_view and toolbar is not None:
+            toolbar.update()                     # the toolbar's history holds the previous event's limits
+        self.plot_profile()
+        self.plot_front()
+        if self.result is None:
+            self._fault_auto = None
+            return
+        self._fault_auto = [get() for get in limits]
+        for value, set_lim in zip(kept, setters):
+            if value is not None:
+                set_lim(value)
+
+    def home(self) -> None:
+        """The toolbar's Home: the trace back to the first view in the toolbar's
+        history, the fault panels to the limits the last redraw set (the history
+        may hold limits from before a refit)."""
+        self._toolbar_home()
+        if self._fault_auto is not None:
+            for value, set_lim in zip(self._fault_auto, (self.ax_profile.set_xlim, self.ax_profile.set_ylim,
+                                                         self.ax_front.set_ylim)):
+                set_lim(value)
+            self.canvas.draw_idle()
 
     # ------------------------------------------------------------- plotting
     def plot(self, reset_view: bool = False, new_sensor: bool = False) -> None:
@@ -638,6 +1405,7 @@ class SlipDistributionView(EventView):
         else:
             ax.set_xlim(float(t_rel[0]), float(t_rel[-1]))
         self._fit_rate_ylim()
+        self.plot_fault(reset_view=reset_view)
         self.canvas.draw_idle()
 
     def _visible(self) -> np.ndarray:
@@ -700,10 +1468,22 @@ class SlipDistributionView(EventView):
                 best, best_d = name, d
         return best
 
+    def on_pick(self, event) -> None:
+        """A left click on a point of the profile or front panel selects its
+        sensor; the wheel or another button over a point does nothing."""
+        mouse = getattr(event, "mouseevent", None)
+        if mouse is None or mouse.name != "button_press_event" or mouse.button != MouseButton.LEFT:
+            return
+        if self.toolbar_active() or self._drag is not None or self.result is None:
+            return
+        ind = getattr(event, "ind", None)
+        if event.artist in self.point_artists.values() and ind is not None and len(ind):
+            self.set_sensor(int(ind[0]))
+
     def on_press(self, event) -> None:
         """Grab ``t_i`` or a window edge near the press, else a fit window by its
-        body.  The hit test is done here in pixels: pick events would go to the
-        rate axes, which matplotlib asks first."""
+        body.  The handles are hit-tested here, in pixels, so that the nearest
+        one wins and ``t_i`` wins a tie."""
         self.flush_pending()
         if self.toolbar_active() or self._drag is not None or self.current() is None or not self._in_trace(event):
             return
@@ -802,18 +1582,36 @@ class SlipDistributionView(EventView):
             return None
         rec = self.result.as_dict()
         rec.update({"field": self.field, "unit": self.unit, "same_windows": bool(self.same_windows_var.get())})
+        rec[PATCH_KEY] = [float(v) for v in self.patch_x_mm] if self.patch_x_mm else [float("nan")] * 2
+        if self.profile_fit is not None:
+            profile = self.profile_fit.as_dict()
+            profile["use"] = [bool(v) for v in self.profile_use]
+            rec["profile"] = profile
+        if self.front_fit is not None:
+            front = self.front_fit.as_dict()
+            front["use"] = [bool(v) for v in self.front_use]
+            front["use_auto"] = bool(self.front_use_auto)
+            rec["front"] = front
         return rec
+
+    def entry_error(self) -> Optional[str]:
+        """Why an entry holds a value that cannot be applied, or None."""
+        try:
+            self.read_settings()
+            _parse(self.t_shift_var.get(), "t_i - event time (ms)")
+            self.read_windows()
+            self.read_patch()
+        except ValueError as e:
+            return str(e)
+        return None
 
     def save(self) -> bool:
         """Store the record; refused while an entry holds a value that was not
         applied, or when there is no result for this event."""
         self.flush_pending()
-        try:
-            self.read_settings()
-            _parse(self.t_shift_var.get(), "t_i - event time (ms)")
-            self.read_windows()
-        except ValueError as e:
-            self.status_var.set(f"not saved: {e}")
+        error = self.entry_error()
+        if error is not None:
+            self.status_var.set(f"not saved: {error}")
             return False
         rec = self.record()
         if rec is None or self.result.event_time != self.t_event:
@@ -841,8 +1639,34 @@ class SlipDistributionView(EventView):
                 and math.isclose(inputs["reference_halfwidth_s"], rec["reference_halfwidth_s"])
                 and bool(np.asarray(self.saved.get("same_windows", True)).ravel()[0]) == rec["same_windows"])
         manual = [i for i, m in enumerate(rec["time_method"]) if m == cs.METHOD_MANUAL]
-        return bool(same and all(math.isclose(inputs["t_shift_s"][i], rec["t_shift_s"][i], abs_tol=1e-12)
-                                 for i in manual))
+        same = same and all(math.isclose(inputs["t_shift_s"][i], rec["t_shift_s"][i], abs_tol=1e-12) for i in manual)
+        return bool(same and self._fit_settings_match(rec))
+
+    def _fit_settings_match(self, rec: dict) -> bool:
+        """Profile model, weighting and sensors, front mode and sensors, and patch
+        edges equal those of the saved record (a record without them counts as
+        the defaults).  The patch edges count only while the experiment has
+        none: otherwise its edges are the ones every event opens with."""
+        n = len(self.channels)
+        saved = self.saved
+        profile = saved.get("profile") if isinstance(saved.get("profile"), dict) else {}
+        front = saved.get("front") if isinstance(saved.get("front"), dict) else {}
+        if str(profile.get("model", DEFAULT_PROFILE_MODEL)) != rec.get("profile", {}).get("model", DEFAULT_PROFILE_MODEL):
+            return False
+        if bool(np.asarray(profile.get("weighted", False)).ravel()[0]) != bool(rec["profile"]["weighted"]):
+            return False
+        if _bools(profile.get("use"), n, True) != rec["profile"]["use"]:
+            return False
+        if str(front.get("mode", DEFAULT_FRONT_MODE)) != rec["front"]["mode"]:
+            return False
+        saved_auto = bool(np.asarray(front.get("use_auto", True)).ravel()[0]) if front else True
+        if saved_auto != rec["front"]["use_auto"]:
+            return False
+        if not saved_auto and _bools(front.get("use"), n, True) != rec["front"]["use"]:
+            return False
+        if self.experiment_patch() is not None:
+            return True
+        return _patch_pair(saved.get(PATCH_KEY)) == _patch_pair(rec[PATCH_KEY])
 
     def update_status(self) -> None:
         if self.result is None:
@@ -853,7 +1677,10 @@ class SlipDistributionView(EventView):
                  f"reference at {1e3 * (self.result.t_ref - self.t_event):+.1f} ms"]
         if flagged:
             parts.append("check: " + ", ".join(f"{s.channel} ({'; '.join(s.flags)})" for s in flagged))
-        if self.saved is None:
+        error = self.entry_error()
+        if error is not None:
+            parts.append(f"entry not applied: {error}")
+        elif self.saved is None:
             parts.append("not saved")
         else:
             parts.append("matches the saved record" if self.matches_saved() else "differs from the saved record (Save to update)")

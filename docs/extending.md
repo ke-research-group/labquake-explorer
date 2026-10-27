@@ -80,6 +80,14 @@ looks like this:
 | `calibration` | the steps that produced the physical channels (see the preprocessing package) |
 | `event_extraction`, `events` | the Pick Events form's record, with the picks (`event_indices`) inside (schema below), and the extracted events |
 
+At the experiment level (next to `runs`), `fault` describes the sample:
+`fault['patch_x_mm'] = [from, to]` gives the edges of the bare PMMA patch along
+the fault in mm (in either order), in the frame of the sensor positions. The
+Slip Distribution view draws it and can save it there; a preprocessing notebook
+can set it with `experiment(..., fault={'patch_x_mm': [x0, x1]})`. A value that
+does not give two finite, different edges is not drawn, and the view says it is
+unusable.
+
 A **channel array** (`labquake_explorer/data/channels.py`) is a dict with
 `data` shaped `(n_channels, n)`, `channels` naming the rows, `unit`, and an
 optional `positions` table (`x`, `y`, `z` per channel, NaN when unknown, plus
@@ -138,8 +146,9 @@ event of the run and saves each result.
 
 Coseismic slip of every sensor of a slip channel array (`field`, normally
 `slip`), each sensor with its own event time `t_i`
-(`labquake_explorer/analysis/coseismic_slip.py`). Lists hold one entry per
-sensor, in the order of `channels`.
+(`labquake_explorer/analysis/coseismic_slip.py`). Top-level lists hold one
+entry per sensor, in the order of `channels`, except `patch_x_mm`
+(`[from, to]`); inside `profile` and `front` only `use` is per sensor.
 
 | key | meaning |
 |---|---|
@@ -158,6 +167,36 @@ sensor, in the order of `channels`.
 | `peak_rate_um_s` | smoothed slip rate at `t_i` |
 | `rate_noise_um_s` | standard deviation of the smoothed slip rate in the before window; a `max_rate` peak below `rate_snr` times this is flagged `weak rate peak` |
 | `flags` | one text per sensor, `"; "`-joined: `pick at search edge`, `weak rate peak`, `no rate peak`, `before/after window clipped` (the window runs past the data), `before/after window has gaps` (less than half of its samples are finite), `before/after fit invalid` |
+| `patch_x_mm` | the bare PMMA patch edges drawn, `[from, to]` (NaN when none). An event opens with the experiment's `fault['patch_x_mm']` (see Run layout), else with this copy; edges typed in the view and not saved to the experiment stay as it moves between events. The copy counts towards "differs from the saved record" only while the experiment has no edges |
+| `profile` | slip profile fit (`labquake_explorer/analysis/slip_profile.py`): `model` (`quadratic`, `eaz` or `eaz_asymmetric`), `params`, `valid`, `reason`, `n` (the sensors fitted: those in `use` with a finite slip and, when weighted, a positive `sigma`), `weighted`, `r2`, `rms_um`, `tips_mm` (where the fitted profile reaches zero), `peak_x_mm`, `peak_um`, `at_bounds`, `unresolved` (the parameters the sensors do not pin down, and `tips` when a rupture edge is only bracketed), `ranges` (name to `[lo, hi]`, the values that fit equally well where known, NaN for an open end; `tip_minus`/`tip_plus` are the brackets of free edges, and an EAZ `D` that moves with a free `lambda` has a range without being listed), and `use` (the sensors chosen) |
+| `front` | rupture-front fit of `t_shift_s` (`t_i - event_time`) against `x`: `mode` (`single` or `bilateral`, below), `valid`, `reason`, `split_x_mm` and `t0_s` (bilateral: the apex and its time relative to `event_time`; NaN when there is none), `segments` (`x_from`, `x_to`, `n`, `slope_s_per_mm`, `intercept_s` at x = 0 relative to `event_time`, `velocity_m_s` positive towards +x and infinite for a flat line, `r2`, `resolved` false when the front crosses the segment within one sample, and `min_speed_m_s`, the speed of crossing it in one sample: the lower bound of an unresolved one), `use` and `use_auto` (while true, `use` follows the pick flags: the sensors whose `t_i` is doubtful, flagged `pick at search edge`, `weak rate peak` or `no rate peak`, are left out) |
+
+Profile models, with `x` in mm: `quadratic` is `max(0, c0 + c1 x + c2 x^2)`,
+the mask being part of the model so that sensors outside the rupture sit on
+the zero part; `eaz` is the earthquake arrest zone model of Ke, McLaskey &
+Kammer (2021, GJI 224, 581), eq. 2, an ellipse of radius `lambda a` in the
+middle and a `(a - r)^(3/2)` tip beyond `r_joint = a (sqrt(1 + 3 lambda^2) - 1)`
+(parameters `D`, `xc`, `a`, `lambda`, `0 < lambda <= 1`); `eaz_asymmetric` is
+eq. 3, the same with `a_minus`, `a_plus`, `lambda_minus`, `lambda_plus` on the
+two sides of `xc`. Fits are bounded least squares from several starts,
+unweighted unless `weighted` (then `1/sigma^2` with `sigma = noise_um`; a
+sigma below 1e-6 of the median, a dead channel, is left out). A fit is invalid
+when its profile stays within each sensor's sigma or it did not converge. The
+sensors leave a parameter free when no sensor sees the part of the profile it
+shapes: EAZ `lambda` when no sensor lies inside `r_joint` (any `lambda` up to the
+value that puts `r_joint` at the nearest sensor fits equally), the extent and the
+edges when no more sensors slip than the model has parameters.
+
+The front is fitted to the `t_i` of the sensors in `use`, with the event's
+sampling interval. `single` is one line. `bilateral` is a hinge, two lines that
+meet at a fitted apex (`split_x_mm`, `t0_s`): least squares over the apex
+position, at least four sensors and two on each side; with fewer sensors, two
+lines through the earliest one; one line when both sides run the same way.
+
+The view opens with `eaz`, unweighted, and `bilateral`; an event without a
+record keeps the current model, weighting and mode, and uses every sensor with
+`use_auto` true; a record without `profile` or `front` is read as those
+defaults.
 
 ### `arrivals` (Pick Arrivals, per record, version 1)
 
