@@ -185,10 +185,12 @@ def slip_rate(time, data, smoothing_s: float = DEFAULT_RATE_SMOOTHING_S, rate_fi
     rate = np.gradient(d, t, axis=-1)
     k = smoothing_samples(smoothing_s, dt)
     if k > 1:
-        # mean of the finite samples in each window: a NaN only blanks its neighbourhood
+        # mean of the finite samples in each window: a NaN only blanks its neighbourhood, and at
+        # the ends the window holds only the samples there are (padding with copies of the end
+        # sample would weight its one-sided, noisiest difference up to half the window)
         finite = np.isfinite(rate)
-        total = uniform_filter1d(np.where(finite, rate, 0.0), size=k, axis=-1, mode="nearest")
-        count = uniform_filter1d(finite.astype(float), size=k, axis=-1, mode="nearest")
+        total = uniform_filter1d(np.where(finite, rate, 0.0), size=k, axis=-1, mode="constant")
+        count = uniform_filter1d(finite.astype(float), size=k, axis=-1, mode="constant")
         with np.errstate(invalid="ignore", divide="ignore"):
             rate = np.where(count > 0.5 / k, total / np.maximum(count, 1e-300), np.nan)
     return rate

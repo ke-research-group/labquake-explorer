@@ -306,3 +306,13 @@ def test_lowpass_type_and_orders():
     rec = run(event, rate_lowpass_type="bessel", rate_lowpass_order=2).as_dict()
     inputs = cs.restore_inputs(rec, rec["channels"])
     assert (inputs["rate_lowpass_type"], inputs["rate_lowpass_order"], inputs["rate_savgol_order"]) == ("bessel", 2, 2)
+
+
+def test_moving_average_ends_are_as_quiet_as_the_rest():
+    t = np.arange(0.0, 4.0, 0.0005)
+    d = 5.0 * t + np.random.default_rng(2).normal(0.0, 0.2, t.size)       # 5 um/s and noise
+    rate = cs.slip_rate(t, d, 0.01, "boxcar")
+    interior = rate[100:-100]
+    spread = np.max(np.abs(interior - 5.0))
+    # the end samples average fewer samples, so allow some more scatter, but not the one-sample difference
+    assert np.max(np.abs(rate[:20] - 5.0)) < 2.0 * spread and np.max(np.abs(rate[-20:] - 5.0)) < 2.0 * spread
