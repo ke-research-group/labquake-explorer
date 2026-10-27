@@ -90,6 +90,10 @@ SINGULAR = 1e-6                       # s_min / s_max of the scaled Jacobian bel
 FRONT_MODES = ("single", "bilateral")
 EXTENT = {"quadratic": (), "eaz": ("a", "lambda"),                   # the parameters that set the extent
           "eaz_asymmetric": ("a_minus", "a_plus", "lambda_minus", "lambda_plus")}
+# where a parameter the user holds or bounds may go: (low, high, low included)
+DOMAIN = {"D": (0.0, math.inf, True), "a": (0.0, math.inf, False), "a_minus": (0.0, math.inf, False),
+          "a_plus": (0.0, math.inf, False), "lambda": (0.0, 1.0, False), "lambda_minus": (0.0, 1.0, False),
+          "lambda_plus": (0.0, 1.0, False)}
 
 
 # ---------------------------------------------------------------------- models
@@ -243,6 +247,7 @@ class ProfileFit:
     at_bounds: list = field(default_factory=list)
     unresolved: list = field(default_factory=list)      # parameters the sensors leave free, and "tips"
     ranges: dict = field(default_factory=dict)          # name -> [lo, hi] fitting equally well; NaN: open
+    fixed: list = field(default_factory=list)           # parameters held at the user's values
 
     def evaluate(self, x) -> np.ndarray:
         if not self.valid:
@@ -450,9 +455,9 @@ def _eaz_asymmetric_starts(x, y, w, d_hi: float, span: float, step: float) -> li
                   N_POLISHED["eaz_asymmetric"])
 
 
-def _fit_arrest_zone(model: str, x, y, w, y_peak: float, span: float, step: float, x_peak: float):
-    """Bounded least squares of an arrest-zone model.  Returns ``(res, converged,
-    jac, lo, hi, x_scale)``, with ``res`` None when no start could be polished."""
+def _arrest_zone_setup(model: str, x, y, w, y_peak: float, span: float, step: float, x_peak: float):
+    """Bounds, starting points, scales, profile and Jacobian of an arrest-zone fit:
+    ``(lo, hi, starts, x_scale, profile, jacobian)``."""
     lam_lo, lam_hi = LAMBDA_BOUNDS
     d_hi = 10.0 * y_peak
     xc_lo, xc_hi = float(x.min()) - 2.0 * span, float(x.max()) + 2.0 * span
@@ -476,6 +481,13 @@ def _fit_arrest_zone(model: str, x, y, w, y_peak: float, span: float, step: floa
         starts += _eaz_asymmetric_starts(x, y, w, d_hi, span, step)
         x_scale = np.array([y_peak, span, span, span, 1.0, 1.0])
         profile, jacobian = eaz_asymmetric_profile, _eaz_asymmetric_jacobian
+    return lo, hi, starts, x_scale, profile, jacobian
+
+
+def _fit_arrest_zone(model: str, x, y, w, y_peak: float, span: float, step: float, x_peak: float):
+    """Bounded least squares of an arrest-zone model.  Returns ``(res, converged,
+    jac, lo, hi, x_scale)``, with ``res`` None when no start could be polished."""
+    lo, hi, starts, x_scale, profile, jacobian = _arrest_zone_setup(model, x, y, w, y_peak, span, step, x_peak)
 
     def fun(p):
         return w * (profile(x, *p) - y)
@@ -488,6 +500,81 @@ def _fit_arrest_zone(model: str, x, y, w, y_peak: float, span: float, step: floa
         return None, False, jac, lo, hi, x_scale
     res, converged = _settle(fun, res, (lo, hi), x_scale, 1e-20 * float(np.sum((w * y) ** 2)), jac)
     return res, converged, jac, lo, hi, x_scale
+
+
+def _user_constraints(model: str, fixed, bounds) -> tuple:
+    """The user's held values and bounds as ``(fixed, lo, hi, reason)``: ``fixed`` a dict
+    of floats, ``lo``/``hi`` arrays in ``PARAMETERS[model]`` order (NaN: automatic),
+    ``reason`` the first problem found or ''.  Unknown names raise ValueError."""
+    names = PARAMETERS[model]
+    fixed = dict(fixed or {})
+    bounds = dict(bounds or {})
+    unknown = (set(fixed) | set(bounds)) - set(names)
+    if unknown:
+        raise ValueError(f"{model} has no parameter {sorted(unknown)[0]!r}; it has {names}")
+    lo = np.full(len(names), np.nan)
+    hi = np.full(len(names), np.nan)
+    for name, value in list(fixed.items()):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            value = math.nan
+        if not math.isfinite(value):
+            return {}, lo, hi, f"{name} must be a number"
+        low, high, closed = DOMAIN.get(name, (-math.inf, math.inf, True))
+        if value < low or (value == low and not closed) or value > high:
+            return {}, lo, hi, f"{name} must be {'>=' if closed else '>'} {low:g}" + \
+                (f" and <= {high:g}" if math.isfinite(high) else "")
+        fixed[name] = value
+    for name, pair in bounds.items():
+        try:
+            b_lo, b_hi = (math.nan if v is None else float(v) for v in pair)
+        except (TypeError, ValueError):
+            raise ValueError(f"the bounds of {name} must be a (min, max) pair") from None
+        if math.isfinite(b_lo) and math.isfinite(b_hi) and b_lo >= b_hi:
+            return {}, lo, hi, f"{name}: the minimum must be below the maximum"
+        low, high, closed = DOMAIN.get(name, (-math.inf, math.inf, True))
+        if (math.isfinite(b_hi) and (b_hi < low or (b_hi == low and not closed))) or \
+                (math.isfinite(b_lo) and b_lo > high):
+            return {}, lo, hi, f"{name}: the bounds leave no allowed value"
+        i = names.index(name)
+        lo[i], hi[i] = b_lo, b_hi
+    return fixed, lo, hi, ""
+
+
+def _effective_bounds(model: str, auto_lo, auto_hi, user_lo, user_hi) -> tuple:
+    """The automatic bounds with the user's finite ones in their place, kept inside
+    each parameter's domain."""
+    lo = np.where(np.isfinite(user_lo), user_lo, auto_lo).astype(float)
+    hi = np.where(np.isfinite(user_hi), user_hi, auto_hi).astype(float)
+    for i, name in enumerate(PARAMETERS[model]):
+        low, high, closed = DOMAIN.get(name, (-math.inf, math.inf, True))
+        floor = low if closed else low + 1e-9 * (1.0 if high == math.inf else high - low)
+        lo[i], hi[i] = max(lo[i], floor), min(hi[i], high)
+    return lo, hi
+
+
+def _fit_free(fun_full, jac_full, template, free, starts, lo, hi, x_scale, floor: float, race: bool) -> tuple:
+    """Least squares over the ``free`` entries of ``template`` (the others hold their
+    values).  Returns ``(p, converged)``, ``p`` None when no start could be polished."""
+    def full(q):
+        p = template.copy()
+        p[free] = q
+        return p
+
+    def fun(q):
+        return fun_full(full(q))
+
+    def jac(q):
+        return jac_full(full(q))[:, free]
+
+    bounds = (lo[free], hi[free])
+    res = _best(fun, [np.asarray(p0, dtype=float)[free] for p0 in starts], bounds, x_scale[free],
+                MAX_NFEV, jac, race=race)
+    if res is None:
+        return None, False
+    res, converged = _settle(fun, res, bounds, x_scale[free], floor, jac)
+    return full(res.x), converged
 
 
 def _null_space(jac) -> np.ndarray:
@@ -599,32 +686,39 @@ def _asymmetric_tip_ranges(x, params: dict, tip_sides) -> dict:
     return out
 
 
-def _identify(model: str, params: dict, x, fitted, jac, tips, tip_gradients) -> tuple:
+def _identify(model: str, params: dict, x, fitted, jac, tips, tip_gradients, free=None) -> tuple:
     """The parameters the sensors leave free, and the ranges that fit equally well.
     ``jac`` is the Jacobian per unit of the parameter scales, ``tip_gradients`` the
-    gradients of the two tips in the same units."""
+    gradients of the two tips in the same units.  Only the parameters in ``free``
+    (default all) were fitted; held ones are resolved by the user."""
     names = PARAMETERS[model]
-    null = _null_space(jac)
+    free = set(names) if free is None else set(free)
+    cols = [i for i, name in enumerate(names) if name in free]
+    null = np.zeros((0, len(names)))
+    if cols:
+        sub = _null_space(jac[:, cols])
+        null = np.zeros((sub.shape[0], len(names)))
+        null[:, cols] = sub
     flags = {name for name, v in zip(names, np.sqrt(np.sum(null ** 2, axis=0))) if v > 0.3}
-    free = {}
+    loose = {}                                           # the rupture tips the sensors do not pin
     for side, g in zip(("minus", "plus"), tip_gradients):
         norm = float(np.linalg.norm(g))
-        free[side] = norm > 0 and float(np.linalg.norm(null @ (g / norm))) > 0.3
+        loose[side] = norm > 0 and float(np.linalg.norm(null @ (g / norm))) > 0.3
     ranges = {}
-    few = np.count_nonzero(fitted > 0) <= len(names)
+    few = np.count_nonzero(fitted > 0) <= len(cols)
     if few:
-        flags |= set(EXTENT[model])
-        free = {"minus": True, "plus": True}
+        flags |= set(EXTENT[model]) & free
+        loose = {side: bool(np.any(np.asarray(g)[cols] != 0)) for side, g in zip(("minus", "plus"), tip_gradients)}
     if model == "eaz":
         kind, info = _arrest_zone_side(np.abs(x - params["xc"]), params["D"], params["a"], params["lambda"])
-        if kind == "tip":
+        if kind == "tip" and {"D", "lambda"} <= free:
             flags.add("lambda")
             if not few and flags <= {"D", "lambda"}:
                 flags.discard("D")                        # D follows lambda within its range
                 ranges.update({"lambda": [0.0, info["lam_max"]], "D": info["D"]})
-        elif kind == "ellipse":
+        elif kind == "ellipse" and {"a", "lambda"} <= free:
             flags |= {"a", "lambda"}
-            free = {"minus": True, "plus": True}
+            loose = {"minus": True, "plus": True}
             if not few:
                 ranges.update(info)
                 xc, (a_min, a_max) = params["xc"], info["a"]
@@ -637,45 +731,71 @@ def _identify(model: str, params: dict, x, fitted, jac, tips, tip_gradients) -> 
             kind, info = _arrest_zone_side(sign * (x[on_side] - params["xc"]), params["D"],
                                            params["a_" + suffix], params["lambda_" + suffix])
             sides[suffix] = (kind, info)
-            if kind in ("none", "ellipse"):
-                flags |= {"a_" + suffix, "lambda_" + suffix}
-                free[suffix] = True
-            if kind == "ellipse" and not few:
-                ranges.update({f"{k}_{suffix}": v for k, v in info.items()})
-                a_min, a_max = info["a"]
-                ranges["tip_" + suffix] = sorted((params["xc"] + sign * a_min, params["xc"] + sign * a_max))
+            pair = {"a_" + suffix, "lambda_" + suffix}
+            if kind == "none":
+                flags |= pair & free
+                loose[suffix] = bool({"a_" + suffix, "xc"} & free)
+            elif kind == "ellipse" and pair <= free:
+                flags |= pair
+                loose[suffix] = True
+                if not few:
+                    ranges.update({f"{k}_{suffix}": v for k, v in info.items()})
+                    a_min, a_max = info["a"]
+                    ranges["tip_" + suffix] = sorted((params["xc"] + sign * a_min, params["xc"] + sign * a_max))
         tip_sides = [suffix for suffix, (kind, _) in sides.items() if kind == "tip"]
-        if tip_sides and all(kind in ("tip", "none") for kind, _ in sides.values()):
+        if tip_sides and all(kind in ("tip", "none") for kind, _ in sides.values()) and \
+                {"D"} | {"lambda_" + suffix for suffix in tip_sides} <= free:
             # no sensor within a joint fixes D: D moves, and lambda on each tip side with it
             flags |= {"D"} | {"lambda_" + suffix for suffix in tip_sides}
             if not few:
                 ranges.update(_asymmetric_tip_ranges(x, params, tip_sides))
     if not np.all(np.isfinite(tips)):
-        free = {"minus": False, "plus": False}           # a convex parabola has no tips
-    if any(free.values()):
+        loose = {"minus": False, "plus": False}          # a convex parabola has no tips
+    if any(loose.values()):
         flags.add("tips")
         centre = params["xc"] if model != "quadratic" else 0.5 * (tips[0] + tips[1])
         brackets = _tip_brackets(x, fitted, centre)
         for side in ("minus", "plus"):
-            if free[side]:
+            if loose[side]:
                 ranges.setdefault("tip_" + side, brackets["tip_" + side])
-    unresolved = [name for name in names if name in flags] + (["tips"] if "tips" in flags else [])
+    unresolved = [name for name in names if name in flags and name in free] + (["tips"] if "tips" in flags else [])
+    ranges = {k: v for k, v in ranges.items() if k.startswith("tip_") or k in free}
     return unresolved, ranges
 
 
+def _at_bounds(model: str, p, lo, hi, free) -> list:
+    """The free parameters that ended on one of their bounds."""
+    names = PARAMETERS[model]
+    out = []
+    for i in free:
+        l, h = float(lo[i]), float(hi[i])
+        tol = 1e-6 * (h - l) if math.isfinite(h - l) else 1e-9 * max(1.0, abs(float(p[i])))
+        if (math.isfinite(l) and p[i] - l <= tol) or (math.isfinite(h) and h - p[i] <= tol):
+            out.append(names[i])
+    return out
+
+
 def fit_profile(x_mm, slip, sigma=None, model: str = "eaz", weighted: bool = False,
-                use: Optional[Sequence[bool]] = None) -> ProfileFit:
+                use: Optional[Sequence[bool]] = None, fixed: Optional[dict] = None,
+                bounds: Optional[dict] = None) -> ProfileFit:
     """Fit a slip profile model to the slip of the sensors at ``x_mm``.
 
     ``use`` selects sensors (default all); points with a non-finite position or
     slip are always left out, and with ``weighted`` those without a positive
     finite ``sigma`` too, or with one at most 1e-6 of the median (a constant,
     dead or saturated, record).  Needs at least one point more than the model
-    has parameters.  The fit is invalid when the fitted profile is zero at every
-    sensor, or, given ``sigma``, nowhere above a sensor's noise.
+    has free parameters.  The fit is invalid when the fitted profile is zero at
+    every sensor, or, given ``sigma``, nowhere above a sensor's noise.
+
+    ``fixed`` holds parameters at given values (name -> value; all of them held
+    gives the profile without a fit) and ``bounds`` replaces the automatic
+    bounds of free ones (name -> ``(min, max)``, NaN or None for the automatic
+    end).  Without either, the global search runs as it is; with them, the
+    free parameters are polished from the same starting points.
     """
     if model not in MODELS:
         raise ValueError(f"unknown model {model!r}; use one of {MODELS}")
+    held, user_lo, user_hi, problem = _user_constraints(model, fixed, bounds)
     x = np.asarray(x_mm, dtype=float).ravel()
     y = np.asarray(slip, dtype=float).ravel()
     if x.shape != y.shape:
@@ -695,7 +815,12 @@ def fit_profile(x_mm, slip, sigma=None, model: str = "eaz", weighted: bool = Fal
             if np.any(keep):
                 keep &= s > 1e-6 * float(np.median(s[keep]))
     n = int(np.count_nonzero(keep))
-    n_par = len(PARAMETERS[model])
+    if problem:
+        return _invalid(model, problem, n, weighted)
+    names = PARAMETERS[model]
+    free = [i for i, name in enumerate(names) if name not in held]
+    constrained = bool(held) or bool(np.any(np.isfinite(user_lo)) or np.any(np.isfinite(user_hi)))
+    n_par = len(free)
     if n < n_par + 1:
         return _invalid(model, f"needs at least {n_par + 1} sensors, has {n}", n, weighted)
     xk, yk = x[keep], y[keep]
@@ -720,20 +845,36 @@ def fit_profile(x_mm, slip, sigma=None, model: str = "eaz", weighted: bool = Fal
         def jac(b):
             return (w * (powers @ b > 0))[:, None] * powers
 
+        def to_c(b):
+            b0, b1, b2 = (float(v) for v in b)
+            return np.array([b0 - b1 * xm / xs + b2 * xm ** 2 / xs ** 2, b1 / xs - 2.0 * b2 * xm / xs ** 2,
+                             b2 / xs ** 2])
+
         starts = [np.polyfit(uk, yk, 2, w=w)[::-1], [y_peak, 0.0, -y_peak], [y_peak, 0.0, -0.25 * y_peak]]
         starts += _quadratic_starts(uk, yk, w, step / xs)
-        inf = np.inf
-        bounds = (np.array([-inf, -inf, -inf]), np.array([inf, inf, inf]))
-        res = _best(fun, starts, bounds, "jac", jac=jac)
-        converged = res is not None
-        if res is not None:
-            res, converged = _settle(fun, res, bounds, "jac", 1e-20 * float(np.sum((w * yk) ** 2)), jac)
-        if res is None or not converged:
-            return _invalid(model, "the fit did not converge", n, weighted)
-        b0, b1, b2 = (float(v) for v in res.x)
-        c2 = b2 / xs ** 2
-        c1 = b1 / xs - 2.0 * b2 * xm / xs ** 2
-        c0 = b0 - b1 * xm / xs + b2 * xm ** 2 / xs ** 2
+        floor = 1e-20 * float(np.sum((w * yk) ** 2))
+        lo, hi = _effective_bounds(model, np.full(3, -np.inf), np.full(3, np.inf), user_lo, user_hi)
+        if not constrained:
+            bounds = (lo, hi)
+            res = _best(fun, starts, bounds, "jac", jac=jac)
+            converged = res is not None
+            if res is not None:
+                res, converged = _settle(fun, res, bounds, "jac", floor, jac)
+            if res is None or not converged:
+                return _invalid(model, "the fit did not converge", n, weighted)
+            c = to_c(res.x)
+        else:
+            powers_x = np.column_stack([np.ones(n), xk, xk * xk])
+            template = np.array([held.get(name, np.nan) for name in names])
+            c = template
+            if free:
+                c, converged = _fit_free(lambda c: w * (np.maximum(0.0, powers_x @ c) - yk),
+                                         lambda c: (w * (powers_x @ c > 0))[:, None] * powers_x,
+                                         template, free, [to_c(b) for b in starts], lo, hi,
+                                         y_peak * np.array([1.0, 1.0 / xs, 1.0 / xs ** 2]), floor, False)
+                if c is None or not converged:
+                    return _invalid(model, "the fit did not converge", n, weighted)
+        c0, c1, c2 = (float(v) for v in c)
         params = {"c0": c0, "c1": c1, "c2": c2}
         tips = (float("nan"), float("nan"))
         peak_x = peak = float("nan")
@@ -744,7 +885,7 @@ def fit_profile(x_mm, slip, sigma=None, model: str = "eaz", weighted: bool = Fal
             if disc > 0:
                 r1, r2 = sorted(((-c1 - math.sqrt(disc)) / (2.0 * c2), (-c1 + math.sqrt(disc)) / (2.0 * c2)))
                 tips = (r1, r2)
-        at_bounds = []
+        at_bounds = _at_bounds(model, c, lo, hi, free)
         positive = (c0 + c1 * xk + c2 * xk * xk) > 0
         scale = y_peak * np.array([1.0, 1.0 / xs, 1.0 / xs ** 2])        # the Jacobian per unit of c
         jac = (w * positive)[:, None] * np.column_stack([np.ones(n), xk, xk * xk]) * scale
@@ -752,19 +893,33 @@ def fit_profile(x_mm, slip, sigma=None, model: str = "eaz", weighted: bool = Fal
         tip_gradients = [-np.array([1.0, r, r * r]) / (c1 + 2.0 * c2 * r) * scale if math.isfinite(r)
                          else np.zeros(3) for r in tips]
     else:
-        res, converged, jac, lo, hi, x_scale = _fit_arrest_zone(model, xk, yk, w, y_peak, span, step, x_peak)
-        if res is None or not converged:
-            return _invalid(model, "the fit did not converge", n, weighted)
-        params = dict(zip(PARAMETERS[model], (float(v) for v in res.x)))
-        tol = 1e-6 * (hi - lo)
-        at_bounds = [name for name, v, l, h, t in zip(PARAMETERS[model], res.x, lo, hi, tol)
-                     if (v - l) <= t or (h - v) <= t]
+        if not constrained:
+            res, converged, jac, lo, hi, x_scale = _fit_arrest_zone(model, xk, yk, w, y_peak, span, step, x_peak)
+            if res is None or not converged:
+                return _invalid(model, "the fit did not converge", n, weighted)
+            p_fit = np.array(res.x, dtype=float)
+        else:
+            auto_lo, auto_hi, starts, x_scale, profile, jacobian = _arrest_zone_setup(
+                model, xk, yk, w, y_peak, span, step, x_peak)
+            lo, hi = _effective_bounds(model, auto_lo, auto_hi, user_lo, user_hi)
+            p_fit = np.array([held.get(name, np.nan) for name in names])
+            if free:
+                p_fit, converged = _fit_free(lambda p: w * (profile(xk, *p) - yk),
+                                             lambda p: w[:, None] * jacobian(xk, p), p_fit, free, starts, lo, hi,
+                                             x_scale, 1e-20 * float(np.sum((w * yk) ** 2)), True)
+                if p_fit is None or not converged:
+                    return _invalid(model, "the fit did not converge", n, weighted)
+
+            def jac(p):
+                return w[:, None] * jacobian(xk, p)
+        params = dict(zip(names, (float(v) for v in p_fit)))
+        at_bounds = _at_bounds(model, p_fit, lo, hi, free)
         if model == "eaz":
             tips = (params["xc"] - params["a"], params["xc"] + params["a"])
         else:
             tips = (params["xc"] - params["a_minus"], params["xc"] + params["a_plus"])
         peak_x, peak = params["xc"], params["D"]
-        jac = jac(np.array(res.x, dtype=float)) * x_scale
+        jac = jac(p_fit) * x_scale
         a_minus, a_plus = (2, 2) if model == "eaz" else (2, 3)      # tips xc - a and xc + a
         tip_gradients = [np.zeros(len(x_scale)), np.zeros(len(x_scale))]
         tip_gradients[0][[1, a_minus]] = (1.0, -1.0)
@@ -776,13 +931,15 @@ def fit_profile(x_mm, slip, sigma=None, model: str = "eaz", weighted: bool = Fal
         return _invalid(model, "the fitted profile is zero at every sensor", n, weighted)
     if sigma is not None and not np.any(fitted > np.where(np.isfinite(s[keep]), s[keep], 0.0)):
         return _invalid(model, "the fitted profile is within the noise at every sensor", n, weighted)
-    unresolved, ranges = _identify(model, params, xk, fitted, jac, tips, tip_gradients)
+    unresolved, ranges = _identify(model, params, xk, fitted, jac, tips, tip_gradients,
+                                   free=[names[i] for i in free])
     resid = yk - fitted
     ss_tot = float(np.sum((yk - yk.mean()) ** 2))
     r2 = 1.0 - float(np.sum(resid ** 2)) / ss_tot if ss_tot > 0 else float("nan")
     rms = float(np.sqrt(np.mean(resid ** 2)))
     return ProfileFit(model, params, True, "", n, bool(weighted), r2, rms,
-                      (float(tips[0]), float(tips[1])), float(peak_x), float(peak), at_bounds, unresolved, ranges)
+                      (float(tips[0]), float(tips[1])), float(peak_x), float(peak), at_bounds, unresolved, ranges,
+                      [name for name in names if name in held])
 
 
 # ------------------------------------------------------------------- the front

@@ -366,3 +366,36 @@ def test_bilateral_with_three_sensors_keeps_two_lines_through_the_earliest():
     assert tied.split_x_mm == 279.0 and tied.segments[0].velocity_m_s == math.inf
     at_end = sp.fit_front(x, np.array([75.0, 76.0, 77.0]) * 1e-3, mode="bilateral")
     assert at_end.split_x_mm == 217.0 and len(at_end.segments) == 1
+
+
+def test_held_parameters_and_user_bounds():
+    x = X
+    y = sp.eaz_profile(x, 100.0, 270.0, 230.0, 0.6) + np.array([0.3, -0.2, 0.1, 0.0, -0.1, 0.2, -0.3, 0.1])
+    free = sp.fit_profile(x, y, model="eaz")
+    held = sp.fit_profile(x, y, model="eaz", fixed={"lambda": 0.6})
+    assert held.valid and held.fixed == ["lambda"] and held.params["lambda"] == 0.6
+    assert held.params["xc"] == pytest.approx(270.0, abs=2.0) and held.params["a"] == pytest.approx(230.0, rel=0.02)
+    assert "lambda" not in held.unresolved and held.r2 <= free.r2 + 1e-9
+    capped = sp.fit_profile(x, y, model="eaz", bounds={"a": (None, 200.0)})
+    assert capped.params["a"] == pytest.approx(200.0) and capped.at_bounds == ["a"]
+    params = {"D": 90.0, "xc": 280.0, "a": 250.0, "lambda": 0.5}
+    manual = sp.fit_profile(x, y, model="eaz", fixed=params)            # everything held: no fit
+    assert manual.valid and manual.params == params and manual.fixed == list(params) and manual.unresolved == []
+    np.testing.assert_allclose(manual.evaluate(x), sp.eaz_profile(x, **{"D": 90.0, "xc": 280.0, "a": 250.0,
+                                                                          "lam": 0.5}))
+    quad = sp.fit_profile(x, np.maximum(0.0, 100 - 0.004 * (x - 250.0) ** 2), model="quadratic",
+                          fixed={"c2": -0.004})
+    assert quad.params["c2"] == -0.004 and quad.params["c0"] + quad.params["c1"] * 250 + -0.004 * 250 ** 2 == \
+        pytest.approx(100.0, abs=1e-3)
+
+
+@pytest.mark.parametrize("kwargs, reason", [({"fixed": {"lambda": 1.5}}, "lambda must be > 0 and <= 1"),
+                                            ({"fixed": {"a": 0.0}}, "a must be > 0"),
+                                            ({"fixed": {"D": float("nan")}}, "D must be a number"),
+                                            ({"bounds": {"a": (300.0, 200.0)}}, "the minimum must be below"),
+                                            ({"bounds": {"lambda": (2.0, None)}}, "no allowed value")])
+def test_unusable_held_values_and_bounds(kwargs, reason):
+    fit = sp.fit_profile(X, sp.eaz_profile(X, 100.0, 270.0, 230.0, 0.6), model="eaz", **kwargs)
+    assert not fit.valid and reason in fit.reason
+    with pytest.raises(ValueError, match="no parameter"):
+        sp.fit_profile(X, sp.eaz_profile(X, 100.0, 270.0, 230.0, 0.6), model="eaz", fixed={"c0": 1.0})

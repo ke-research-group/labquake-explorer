@@ -7,10 +7,11 @@ own event time ``t_i``, chosen by one of two methods:
 
 * ``max_rate``: the time of the largest filtered slip rate.  The rate is the
   time derivative of the slip, filtered by ``rate_filter`` (:func:`slip_rate`):
-  ``lowpass``, a zero-phase Butterworth low-pass of the slip at
-  ``rate_cutoff_hz`` before the derivative (the default); ``savgol``, the
-  Savitzky-Golay derivative over ``rate_smoothing_s``; ``boxcar``, the
-  derivative averaged over ``rate_smoothing_s``.  A reference time ``t_ref`` comes
+  ``lowpass``, a zero-phase Butterworth or Bessel low-pass of the slip at
+  ``rate_cutoff_hz`` (order ``rate_lowpass_order``) before the derivative (the
+  default); ``savgol``, the Savitzky-Golay derivative (polynomial order
+  ``rate_savgol_order``) over ``rate_smoothing_s``; ``boxcar``, the derivative
+  averaged over ``rate_smoothing_s``.  A reference time ``t_ref`` comes
   first, at the peak of the mean rate of all sensors within
   ``event_time +- reference_halfwidth_s`` (narrow enough to keep the
   neighbouring events out); each sensor is then searched within
@@ -51,7 +52,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 from scipy.ndimage import uniform_filter1d
-from scipy.signal import butter, savgol_filter, sosfiltfilt
+from scipy.signal import bessel, butter, savgol_filter, sosfiltfilt
 
 RESULT_VERSION = 2                    # 2: fit windows relative to the event time (1: to t_i)
 METHOD_MAX_RATE = "max_rate"
@@ -62,8 +63,11 @@ RATE_FILTERS = ("lowpass", "savgol", "boxcar")
 DEFAULT_RATE_FILTER = "lowpass"
 DEFAULT_RATE_CUTOFF_HZ = 50.0         # lowpass: corner frequency of the slip's low-pass
 DEFAULT_RATE_SMOOTHING_S = 0.010      # savgol and boxcar: the window
-LOWPASS_ORDER = 4                     # of the Butterworth, run forwards and backwards
-SAVGOL_ORDER = 2
+LOWPASS_TYPES = ("butterworth", "bessel")
+DEFAULT_LOWPASS_TYPE = "butterworth"
+DEFAULT_LOWPASS_ORDER = 4             # run forwards and backwards: zero phase, -6 dB at the cutoff
+MAX_FILTER_ORDER = 10
+DEFAULT_SAVGOL_ORDER = 2
 LEGACY_RATE_FILTER = "boxcar"         # records without rate_filter were made with it
 DEFAULT_SEARCH_HALFWIDTH_S = 0.05     # each sensor is searched within t_ref +- this
 DEFAULT_RATE_SNR = 5.0                # flag a pick whose peak rate is below this x the rate noise
@@ -116,17 +120,32 @@ def _fill_gaps(t: np.ndarray, d: np.ndarray) -> np.ndarray:
     return out
 
 
+def _filter_order(value, low: int, name: str) -> int:
+    """A filter order as an int in ``[low, MAX_FILTER_ORDER]`` (ValueError otherwise)."""
+    try:
+        order = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a whole number") from None
+    if order != value or not low <= order <= MAX_FILTER_ORDER:
+        raise ValueError(f"{name} must be a whole number from {low} to {MAX_FILTER_ORDER}")
+    return order
+
+
 def slip_rate(time, data, smoothing_s: float = DEFAULT_RATE_SMOOTHING_S, rate_filter: str = "boxcar",
-              cutoff_hz: float = DEFAULT_RATE_CUTOFF_HZ) -> np.ndarray:
+              cutoff_hz: float = DEFAULT_RATE_CUTOFF_HZ, lowpass_order: int = DEFAULT_LOWPASS_ORDER,
+              lowpass_type: str = DEFAULT_LOWPASS_TYPE, savgol_order: int = DEFAULT_SAVGOL_ORDER) -> np.ndarray:
     """Filtered time derivative of ``data`` (one row per sensor, or one row);
     same shape as ``data``, unit/s.
 
     ``rate_filter``: ``boxcar`` averages the derivative over ``smoothing_s``
     (NaN samples left out of each mean, so a bad sample only blanks its
-    neighbourhood); ``savgol`` is the Savitzky-Golay derivative (order 2) over
-    ``smoothing_s``; ``lowpass`` filters the slip with a zero-phase Butterworth
-    of order 4 at ``cutoff_hz`` and then differentiates.  The last two bridge
-    NaN gaps for the filter and blank them again afterwards."""
+    neighbourhood); ``savgol`` is the Savitzky-Golay derivative of polynomial
+    order ``savgol_order`` over ``smoothing_s``; ``lowpass`` filters the slip
+    with a ``lowpass_type`` (Butterworth or Bessel, the Bessel normalised to
+    -3 dB at the cutoff) low-pass of order ``lowpass_order`` at ``cutoff_hz``,
+    run forwards and backwards (zero phase, -6 dB at the cutoff), and then
+    differentiates.  The last two bridge NaN gaps for the filter and blank them
+    again afterwards."""
     t = np.asarray(time, dtype=float).ravel()
     d = np.asarray(data, dtype=float)
     if d.shape[-1] != t.size:
@@ -139,19 +158,29 @@ def slip_rate(time, data, smoothing_s: float = DEFAULT_RATE_SMOOTHING_S, rate_fi
         nyquist = 0.5 / dt
         if not (math.isfinite(cutoff_hz) and 0 < cutoff_hz < nyquist):
             raise ValueError(f"the cutoff must be between 0 and half the sampling rate ({nyquist:g} Hz)")
-        sos = butter(LOWPASS_ORDER, cutoff_hz, fs=1.0 / dt, output="sos")
+        order = _filter_order(lowpass_order, 1, "the low-pass order")
+        if lowpass_type not in LOWPASS_TYPES:
+            raise ValueError(f"unknown low-pass type {lowpass_type!r}; use one of {LOWPASS_TYPES}")
+        if lowpass_type == "bessel":
+            sos = bessel(order, cutoff_hz, fs=1.0 / dt, output="sos", norm="mag")
+        else:
+            sos = butter(order, cutoff_hz, fs=1.0 / dt, output="sos")
         filled = _fill_gaps(t, d)
         finite = np.isfinite(filled).all(axis=-1, keepdims=True)
-        smooth = sosfiltfilt(sos, np.where(finite, filled, 0.0), axis=-1) if t.size > 3 * (2 * LOWPASS_ORDER + 1) \
+        smooth = sosfiltfilt(sos, np.where(finite, filled, 0.0), axis=-1) if t.size > 3 * (2 * order + 1) \
             else filled
         rate = np.gradient(np.where(finite, smooth, np.nan), t, axis=-1)
         return np.where(np.isfinite(d), rate, np.nan)
     if rate_filter == "savgol":
-        k = max(smoothing_samples(smoothing_s, dt), SAVGOL_ORDER + 3)
+        order = _filter_order(savgol_order, 1, "the Savitzky-Golay order")
+        k = smoothing_samples(smoothing_s, dt)
+        if k < order + 2:
+            raise ValueError(f"the Savitzky-Golay window must span at least {order + 2} samples "
+                             f"({(order + 2) * dt * 1e3:g} ms) for order {order}")
         if k > t.size:
             return np.gradient(d, t, axis=-1)
         filled = _fill_gaps(t, d)
-        rate = savgol_filter(filled, k, SAVGOL_ORDER, deriv=1, delta=dt, axis=-1, mode="interp")
+        rate = savgol_filter(filled, k, order, deriv=1, delta=dt, axis=-1, mode="interp")
         return np.where(np.isfinite(d), rate, np.nan)
     rate = np.gradient(d, t, axis=-1)
     k = smoothing_samples(smoothing_s, dt)
@@ -333,6 +362,9 @@ class SlipAnalysis:
     rate: np.ndarray = field(repr=False, default=None)
     rate_filter: str = DEFAULT_RATE_FILTER
     rate_cutoff_hz: float = DEFAULT_RATE_CUTOFF_HZ
+    rate_lowpass_order: int = DEFAULT_LOWPASS_ORDER
+    rate_lowpass_type: str = DEFAULT_LOWPASS_TYPE
+    rate_savgol_order: int = DEFAULT_SAVGOL_ORDER
 
     @property
     def t_i(self) -> np.ndarray:
@@ -350,6 +382,9 @@ class SlipAnalysis:
             "x_mm": [float(x.x_mm) for x in s],
             "rate_filter": self.rate_filter,
             "rate_cutoff_hz": float(self.rate_cutoff_hz),
+            "rate_lowpass_order": int(self.rate_lowpass_order),
+            "rate_lowpass_type": self.rate_lowpass_type,
+            "rate_savgol_order": int(self.rate_savgol_order),
             "rate_smoothing_s": float(self.rate_smoothing_s),
             "search_halfwidth_s": float(self.search_halfwidth_s),
             "rate_snr": float(self.rate_snr),
@@ -397,6 +432,9 @@ def analyze_slip(time, data, event_time: float, start_s: float, end_s: float, *,
                  fit_before_s=None, fit_after_s=None,
                  rate_filter: str = DEFAULT_RATE_FILTER,
                  rate_cutoff_hz: float = DEFAULT_RATE_CUTOFF_HZ,
+                 rate_lowpass_order: int = DEFAULT_LOWPASS_ORDER,
+                 rate_lowpass_type: str = DEFAULT_LOWPASS_TYPE,
+                 rate_savgol_order: int = DEFAULT_SAVGOL_ORDER,
                  rate_smoothing_s: float = DEFAULT_RATE_SMOOTHING_S,
                  search_halfwidth_s: float = DEFAULT_SEARCH_HALFWIDTH_S,
                  rate_snr: float = DEFAULT_RATE_SNR,
@@ -450,7 +488,8 @@ def analyze_slip(time, data, event_time: float, start_s: float, end_s: float, *,
     befores = [check_window(w, "fit_before_s") for w in _per_sensor(fit_before_s, n_ch, "fit_before_s", default_before)]
     afters = [check_window(w, "fit_after_s") for w in _per_sensor(fit_after_s, n_ch, "fit_after_s", default_after)]
 
-    rate = slip_rate(t, d, rate_smoothing_s, rate_filter, rate_cutoff_hz)
+    rate = slip_rate(t, d, rate_smoothing_s, rate_filter, rate_cutoff_hz, rate_lowpass_order, rate_lowpass_type,
+                     rate_savgol_order)
     t_ref = reference_time(t, rate, event_time, reference_halfwidth_s)
     sensors = []
     for i in range(n_ch):
@@ -501,7 +540,9 @@ def analyze_slip(time, data, event_time: float, start_s: float, end_s: float, *,
                                   before, after, peak_rate, rate_noise, flags))
     return SlipAnalysis(event_time, float(start_s), float(end_s), rate_smoothing_s, search_halfwidth_s,
                         rate_snr, reference_halfwidth_s, float(t_ref), sensors, time=t, rate=rate,
-                        rate_filter=rate_filter, rate_cutoff_hz=rate_cutoff_hz)
+                        rate_filter=rate_filter, rate_cutoff_hz=rate_cutoff_hz,
+                        rate_lowpass_order=int(rate_lowpass_order), rate_lowpass_type=str(rate_lowpass_type),
+                        rate_savgol_order=int(rate_savgol_order))
 
 
 # --------------------------------------------------------------- saved records
@@ -517,7 +558,8 @@ def restore_inputs(record, channels: Sequence[str]) -> Optional[dict]:
 
     Keys: ``methods``, ``t_shift_s``, ``fit_before_s``, ``fit_after_s``,
     ``rate_filter`` (``boxcar`` for records made before there was a choice),
-    ``rate_cutoff_hz``, ``rate_smoothing_s``, ``search_halfwidth_s``, ``rate_snr``,
+    ``rate_cutoff_hz``, ``rate_lowpass_order``, ``rate_lowpass_type``,
+    ``rate_savgol_order``, ``rate_smoothing_s``, ``search_halfwidth_s``, ``rate_snr``,
     ``reference_halfwidth_s``.  Arrays that
     an HDF5 round trip turned into numpy arrays are accepted.
     """
@@ -545,6 +587,9 @@ def restore_inputs(record, channels: Sequence[str]) -> Optional[dict]:
             "fit_after_s": [tuple(r) for r in after.tolist()],
             "rate_filter": _text_value(record.get("rate_filter", LEGACY_RATE_FILTER)),
             "rate_cutoff_hz": float(record.get("rate_cutoff_hz", DEFAULT_RATE_CUTOFF_HZ)),
+            "rate_lowpass_order": int(np.asarray(record.get("rate_lowpass_order", DEFAULT_LOWPASS_ORDER)).ravel()[0]),
+            "rate_lowpass_type": _text_value(record.get("rate_lowpass_type", DEFAULT_LOWPASS_TYPE)),
+            "rate_savgol_order": int(np.asarray(record.get("rate_savgol_order", DEFAULT_SAVGOL_ORDER)).ravel()[0]),
             "rate_smoothing_s": float(record.get("rate_smoothing_s", DEFAULT_RATE_SMOOTHING_S)),
             "search_halfwidth_s": float(record.get("search_halfwidth_s", DEFAULT_SEARCH_HALFWIDTH_S)),
             "rate_snr": float(record.get("rate_snr", DEFAULT_RATE_SNR)),
@@ -552,7 +597,7 @@ def restore_inputs(record, channels: Sequence[str]) -> Optional[dict]:
         }
         for w in out["fit_before_s"] + out["fit_after_s"]:
             check_window(w)
-        if out["rate_filter"] not in RATE_FILTERS:
+        if out["rate_filter"] not in RATE_FILTERS or out["rate_lowpass_type"] not in LOWPASS_TYPES:
             return None
         return out
     except (KeyError, TypeError, ValueError, AttributeError):
@@ -561,7 +606,8 @@ def restore_inputs(record, channels: Sequence[str]) -> Optional[dict]:
 
 __all__ = [
     "RESULT_VERSION", "METHODS", "METHOD_MAX_RATE", "METHOD_MANUAL",
-    "RATE_FILTERS", "DEFAULT_RATE_FILTER", "DEFAULT_RATE_CUTOFF_HZ",
+    "RATE_FILTERS", "DEFAULT_RATE_FILTER", "DEFAULT_RATE_CUTOFF_HZ", "LOWPASS_TYPES", "DEFAULT_LOWPASS_TYPE",
+    "DEFAULT_LOWPASS_ORDER", "DEFAULT_SAVGOL_ORDER", "MAX_FILTER_ORDER",
     "DEFAULT_RATE_SMOOTHING_S", "DEFAULT_SEARCH_HALFWIDTH_S", "DEFAULT_RATE_SNR", "DEFAULT_REFERENCE_HALFWIDTH_S",
     "FIT_FRACTIONS", "MIN_FIT_SAMPLES", "sampling_interval", "slip_rate", "default_fit_windows",
     "check_window", "window_mask", "reference_time", "RatePick", "pick_max_rate", "LineFit", "fit_line", "SensorSlip",

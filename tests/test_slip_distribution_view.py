@@ -1,4 +1,5 @@
 """Headless-Tk tests for the Slip Distribution view (coseismic slip per sensor)."""
+import functools
 import math
 
 import numpy as np
@@ -51,7 +52,8 @@ def test_menu_and_defaults(slip_app, view):
     assert (view.reference_var.get(), view.smoothing_var.get(), view.search_var.get(), view.snr_var.get()) == \
         ("500", "10", "50", "5")
     assert view.rate_filter() == "lowpass" and view.cutoff_var.get() == "50"
-    assert str(view.cutoff_entry.cget("state")) == "normal" and str(view.smoothing_entry.cget("state")) == "disabled"
+    assert (view.lowpass_type(), view.lowpass_order_var.get()) == ("butterworth", "4")
+    assert (view.savgol_window_var.get(), view.savgol_order_var.get()) == ("20", "2")
     slips = [s.coseismic_slip for s in view.result.sensors]
     np.testing.assert_allclose(slips, truth["slips_um"], atol=0.2)
     assert len(view.table.get_children()) == 8
@@ -384,7 +386,7 @@ def test_zoom_buttons(slip_app, view):
 # ------------------------------------------------- slip profile and front (item 3)
 def test_profile_and_front_defaults(slip_app, view):
     truth = slip_app.slip_truth[EVENT]
-    assert view.profile_model_combobox.get() == "EAZ" and view.weighted_var.get() is False
+    assert view.profile_model() == "eaz" and view.weighted_var.get() is False
     assert view.profile_use == [True] * 8 and view.front_mode_combobox.get() == "bilateral"
     assert view.front_use_auto is True and view.front_use == [True] * 8
     fit = view.profile_fit
@@ -410,13 +412,11 @@ def test_profile_and_front_defaults(slip_app, view):
 
 
 def test_profile_model_switch_and_weighting(slip_app, view):
-    view.profile_model_combobox.set("quadratic")
-    view.on_profile_settings()
+    view.select_profile_model("quadratic")
     fit = view.profile_fit
     assert fit.model == "quadratic" and set(fit.params) == {"c0", "c1", "c2"} and fit.r2 > 0.999
     assert fit.peak_x_mm == pytest.approx(279.0, abs=5.0)
-    view.profile_model_combobox.set("EAZ-asymmetric")
-    view.on_profile_settings()
+    view.select_profile_model("eaz_asymmetric")
     assert view.profile_fit.model == "eaz_asymmetric" and len(view.profile_fit.params) == 6
     view.weighted_var.set(True)
     view.on_profile_settings()
@@ -502,8 +502,7 @@ def test_patch_edges_are_saved_at_the_experiment_level(slip_app, view):
 
 
 def test_fit_settings_are_saved_and_restored(slip_app, view, tmp_path, app_from_file):
-    view.profile_model_combobox.set("quadratic")
-    view.on_profile_settings()
+    view.select_profile_model("quadratic")
     view.set_profile_use(1, False)
     view.set_front_use(6, False)
     view.front_mode_combobox.set("single")
@@ -523,20 +522,18 @@ def test_fit_settings_are_saved_and_restored(slip_app, view, tmp_path, app_from_
     app2 = app_from_file(path)
     v2 = SlipDistributionView(app2, 0, EVENT)
     try:
-        assert v2.profile_model_combobox.get() == "quadratic" and v2.profile_use[1] is False
+        assert v2.profile_model() == "quadratic" and v2.profile_use[1] is False
         assert v2.front_mode_combobox.get() == "single" and v2.front_use[6] is False and v2.front_use_auto is False
         assert v2.patch_x_mm == (120.0, 380.0)                 # from the record: the experiment has none
         assert "matches the saved record" in v2.status_var.get()
-        v2.profile_model_combobox.set("EAZ")
-        v2.on_profile_settings()
+        v2.select_profile_model("eaz")
         assert "differs from the saved record" in v2.status_var.get()
     finally:
         v2.on_close()
 
 
 def test_fit_choices_carry_to_an_event_without_a_record(slip_app, view):
-    view.profile_model_combobox.set("quadratic")
-    view.on_profile_settings()
+    view.select_profile_model("quadratic")
     view.front_mode_combobox.set("single")
     view.on_front_settings()
     view.set_profile_use(0, False)
@@ -645,8 +642,7 @@ def test_experiment_edges_win_over_a_record_and_do_not_make_it_differ(slip_app):
             v.on_close()
     v = SlipDistributionView(slip_app, 0, EVENT)
     try:
-        v.profile_model_combobox.set("quadratic")            # the fit settings still count
-        v.on_profile_settings()
+        v.select_profile_model("quadratic")            # the fit settings still count
         assert "differs from the saved record" in v.status_var.get()
     finally:
         v.on_close()
@@ -766,9 +762,8 @@ def test_fault_panels_fit_each_event_with_a_patch_drawn(slip_app, view):
 
 
 def test_profile_legend_leaves_the_points_visible(slip_app, view):
-    for model in ("EAZ", "quadratic", "EAZ-asymmetric"):
-        view.profile_model_combobox.set(model)
-        view.on_profile_settings()
+    for model in ("eaz", "quadratic", "eaz_asymmetric"):
+        view.select_profile_model(model)
         view.canvas.draw()
         box = view.ax_profile.get_legend().get_window_extent()
         xs, ys = view.point_artists["profile"].get_data()
@@ -801,8 +796,7 @@ def test_quadratic_profile_is_zero_outside_its_tips(slip_app):
     add_slip_array(run["events"][2], slips_um=[0.0, 0.0, 31.7, 82.9, 100.0, 82.9, 31.7, 0.0], noise_um=0.05)
     v = SlipDistributionView(slip_app, 0, 2)
     try:
-        v.profile_model_combobox.set("quadratic")
-        v.on_profile_settings()
+        v.select_profile_model("quadratic")
         fit = v.profile_fit                               # 100 um at 279 mm, zero 150 mm either side
         assert fit.valid and fit.tips_mm == (pytest.approx(129.0, abs=5.0), pytest.approx(429.0, abs=5.0))
         xx, yy = v.profile_curve.get_data()
@@ -865,13 +859,13 @@ def test_status_names_an_entry_that_was_not_applied(slip_app, view):
     assert view.save()
     view.smoothing_var.set("-1")
     view.schedule(view.on_settings_edited, now=True)
-    assert view.status_var.get() == "not recomputed: the rate filter window must be >= 0"
+    assert view.status_var.get() == "not recomputed: the moving average window must be >= 0"
     for change in (lambda: (view.weighted_var.set(True), view.on_profile_settings()),
                    lambda: (view.weighted_var.set(False), view.on_profile_settings()),
                    lambda: view.step_sensor(+1)):
         change()
         status = view.status_var.get()
-        assert status.endswith(" | entry not applied: the rate filter window must be >= 0") and "matches" not in status
+        assert status.endswith(" | entry not applied: the moving average window must be >= 0") and "matches" not in status
     view.smoothing_var.set("10")                          # the applied value again
     view.schedule(view.on_settings_edited, now=True)
     assert view.status_var.get().endswith(" | matches the saved record")
@@ -987,18 +981,19 @@ def test_front_fit_gets_the_sampling_interval(slip_app):
 
 
 def test_rate_filter_choice_is_applied_and_saved(slip_app, view):
-    view.rate_filter_combobox.set("Savitzky-Golay")
-    view.on_rate_filter_selected()
-    assert view.result.rate_filter == "savgol"
-    assert str(view.smoothing_entry.cget("state")) == "normal" and str(view.cutoff_entry.cget("state")) == "disabled"
-    view.smoothing_var.set("20")
+    view.select_rate_filter("savgol")
+    view.on_filter_choice()
+    assert view.result.rate_filter == "savgol" and view.result.rate_smoothing_s == pytest.approx(0.020)
+    view.savgol_window_var.set("30")
+    view.savgol_order_var.set("3")
     view.schedule(view.on_settings_edited, now=True)
-    assert view.result.rate_smoothing_s == pytest.approx(0.020)
+    assert view.result.rate_smoothing_s == pytest.approx(0.030) and view.result.rate_savgol_order == 3
     assert view.save()
     rec = view.event["slip_analysis"]
-    assert rec["rate_filter"] == "savgol" and rec["rate_smoothing_s"] == pytest.approx(0.020)
-    view.rate_filter_combobox.set("low-pass (Butterworth)")
-    view.on_rate_filter_selected()
+    assert rec["rate_filter"] == "savgol" and rec["rate_smoothing_s"] == pytest.approx(0.030)
+    assert rec["rate_filter_tabs"]["boxcar_window_s"] == pytest.approx(0.010)
+    view.select_rate_filter("lowpass")
+    view.on_filter_choice()
     assert "differs from the saved record" in view.status_var.get()
     view.cutoff_var.set("5000")                           # above half the sampling rate
     view.schedule(view.on_settings_edited, now=True)
@@ -1006,7 +1001,8 @@ def test_rate_filter_choice_is_applied_and_saved(slip_app, view):
     view.on_close()
     v2 = SlipDistributionView(slip_app, 0, EVENT)
     try:
-        assert v2.rate_filter() == "savgol" and v2.smoothing_var.get() == "20"
+        assert v2.rate_filter() == "savgol" and v2.savgol_window_var.get() == "30"
+        assert v2.savgol_order_var.get() == "3" and v2.smoothing_var.get() == "10"
         assert "matches the saved record" in v2.status_var.get()
     finally:
         v2.on_close()
@@ -1026,3 +1022,102 @@ def test_a_drag_starts_from_the_windows_shown_after_a_failed_recompute(slip_app,
     view.search_var.set("50")                             # fixed: everything applies
     view.schedule(view.on_settings_edited, now=True)
     assert view.result.sensors[0].fit_after_s == (2.0, 4.5)
+
+
+def test_a_typed_parameter_holds_and_the_rest_are_fitted(slip_app, view):
+    v = view.param_vars["eaz"]
+    fitted = view.profile_fit.params
+    assert float(v["lambda"]["value"].get()) == pytest.approx(fitted["lambda"], rel=1e-5)   # fitted values shown
+    v["lambda"]["value"].set("0.5")
+    view.schedule(functools.partial(view.on_param_value_edited, "eaz", "lambda"), now=True)
+    fit = view.profile_fit
+    assert v["lambda"]["fit"].get() is False and fit.fixed == ["lambda"] and fit.params["lambda"] == 0.5
+    assert "lambda = 0.5 (held)" in view.profile_text_var.get()
+    assert fit.params["a"] > 300
+    v["a"]["max"].set("300")                               # a bound on a free parameter
+    view.schedule(functools.partial(view.on_param_bounds_edited, "eaz", "a"), now=True)
+    assert view.profile_fit.params["a"] == pytest.approx(300.0) and "a" in view.profile_fit.at_bounds
+    v["lambda"]["fit"].set(True)                           # ticked again: fitted
+    view.on_param_fit_toggled("eaz", "lambda")
+    assert view.profile_fit.fixed == []
+    v["xc"]["fit"].set(False)                             # unticked: held at the value shown
+    view.on_param_fit_toggled("eaz", "xc")
+    assert view.profile_fit.fixed == ["xc"] and view.profile_fit.params["xc"] == pytest.approx(float(v["xc"]["value"].get()))
+    assert view.save()
+    rec = view.event["slip_analysis"]["profile"]
+    assert rec["fixed"] == ["xc"] and rec["settings"]["eaz"]["a"]["max"] == 300.0
+    assert rec["settings"]["eaz"]["xc"]["fit"] is False and math.isnan(rec["settings"]["eaz"]["D"]["value"])
+    view.reset_profile_params("eaz")
+    assert view.profile_fit.fixed == [] and v["a"]["max"].get() == ""
+    assert "differs from the saved record" in view.status_var.get()
+    view.on_close()
+    v2 = SlipDistributionView(slip_app, 0, EVENT)
+    try:
+        assert v2.param_vars["eaz"]["xc"]["fit"].get() is False and v2.param_vars["eaz"]["a"]["max"].get() == "300"
+        assert v2.profile_fit.fixed == ["xc"] and "matches the saved record" in v2.status_var.get()
+    finally:
+        v2.on_close()
+
+
+def test_profile_tabs_keep_their_own_settings_and_report_bad_values(slip_app, view):
+    view.param_vars["quadratic"]["c2"]["value"].set("-0.002")
+    view.schedule(functools.partial(view.on_param_value_edited, "quadratic", "c2"), now=True)
+    assert view.profile_model() == "eaz" and view.profile_fit.fixed == []      # another tab: not fitted yet
+    view.select_profile_model("quadratic")
+    assert view.profile_fit.fixed == ["c2"] and view.profile_fit.params["c2"] == -0.002
+    view.select_profile_model("eaz")
+    v = view.param_vars["eaz"]["lambda"]
+    v["value"].set("1.5")
+    view.schedule(functools.partial(view.on_param_value_edited, "eaz", "lambda"), now=True)
+    assert not view.profile_fit.valid and "lambda must be" in view.profile_text_var.get()
+    v["value"].set("")                                    # cleared: fitted again
+    view.schedule(functools.partial(view.on_param_value_edited, "eaz", "lambda"), now=True)
+    assert view.profile_fit.valid and v["fit"].get() is True
+    view.param_vars["eaz"]["a"]["max"].set("abc")
+    assert not view.save() and "a max" in view.status_var.get()
+
+
+def test_the_profile_is_cut_at_the_fault_ends(slip_app, view):
+    view.ends_lo_var.set("100")
+    view.ends_hi_var.set("460")
+    view.schedule(view.on_ends_edited, now=True)
+    assert view.fault_ends == (100.0, 460.0) and view.ends_note_var.get() == "fault ends not saved to the experiment"
+    fit = view.profile_fit
+    xx, _ = view.profile_curve.get_data()
+    assert xx.min() == pytest.approx(100.0) and xx.max() == pytest.approx(460.0)
+    reached = view.end_slips()
+    assert set(reached) == {"minus", "plus"}            # the synthetic rupture runs past both ends
+    assert reached["plus"][1] == pytest.approx(float(fit.evaluate([460.0])[0]))
+    text = view.profile_text_var.get()
+    assert "the -x fault end (" in text and "the +x fault end (" in text
+    assert all(100 <= t <= 460 for t in view.pinned_tips())
+    labels = [line.get_label() for line in view.ax_profile.lines]
+    assert "fault end" in labels
+    assert view.save()
+    rec = view.event["slip_analysis"]
+    assert rec["fault_ends_x_mm"] == [100.0, 460.0] and rec["profile"]["end_slip_um"][1] == pytest.approx(reached["plus"][1])
+    assert view.save_fault() and slip_app.data_manager.get_data("fault/ends_x_mm") == [100.0, 460.0]
+    assert view.ends_note_var.get() == "fault ends saved in the experiment"
+    view.on_close()
+    v2 = SlipDistributionView(slip_app, 0, 0)               # another event opens with the experiment's ends
+    try:
+        assert v2.fault_ends == (100.0, 460.0) and v2.ends_lo_var.get() == "100"
+    finally:
+        v2.on_close()
+
+
+def test_filter_tab_options(slip_app, view):
+    view.lowpass_type_combobox.set("Bessel")
+    view.on_filter_choice()
+    assert view.result.rate_lowpass_type == "bessel"
+    view.lowpass_order_var.set("2")
+    view.schedule(view.on_settings_edited, now=True)
+    assert view.result.rate_lowpass_order == 2
+    view.lowpass_order_var.set("2.5")
+    view.schedule(view.on_settings_edited, now=True)
+    assert "whole number" in view.status_var.get()
+    view.lowpass_order_var.set("2")
+    view.select_rate_filter("savgol")
+    view.savgol_window_var.set("1")                       # 1 ms is 1 sample at 1 kHz: too short for order 2
+    view.schedule(view.on_settings_edited, now=True)
+    assert "Savitzky-Golay window must span" in view.status_var.get()

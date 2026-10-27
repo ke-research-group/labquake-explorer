@@ -86,7 +86,9 @@ the fault in mm (in either order), in the frame of the sensor positions. The
 Slip Distribution view draws it and can save it there; a preprocessing notebook
 can set it with `experiment(..., fault={'patch_x_mm': [x0, x1]})`. A value that
 does not give two finite, different edges is not drawn, and the view says it is
-unusable.
+unusable. `fault['ends_x_mm'] = [from, to]` gives where the fault (the sample)
+ends, in the same frame; the view cuts the slip profile there, so a rupture
+whose fitted tip lies beyond an end is reported with its slip at that end.
 
 A **channel array** (`labquake_explorer/data/channels.py`) is a dict with
 `data` shaped `(n_channels, n)`, `channels` naming the rows, `unit`, and an
@@ -157,7 +159,7 @@ entry per sensor, in the order of `channels`, except `patch_x_mm`
 | `event_time`, `start_s`, `end_s` | the event time and the extraction window the default fit windows came from |
 | `time_method` | `max_rate` (largest filtered slip rate) or `manual` (set by hand) |
 | `t_shift_s` | `t_i - event_time` |
-| `rate_filter`, `rate_cutoff_hz`, `rate_smoothing_s`, `search_halfwidth_s`, `rate_snr`, `reference_halfwidth_s` | `max_rate` settings: the slip-rate filter, `lowpass` (the default: the slip through a zero-phase 4th-order Butterworth at `rate_cutoff_hz`, default 50, then the derivative), `savgol` (Savitzky-Golay derivative, order 2, over the window `rate_smoothing_s`, default 0.01) or `boxcar` (the derivative averaged over `rate_smoothing_s`; records without `rate_filter` were made with it); NaN gaps are bridged for the filter and blanked again; search half-width around the reference time (0.05), flag threshold in units of the rate noise (5), half-width around the event time in which the reference time is found (0.5) |
+| `rate_filter`, `rate_cutoff_hz`, `rate_lowpass_type`, `rate_lowpass_order`, `rate_savgol_order`, `rate_smoothing_s`, `search_halfwidth_s`, `rate_snr`, `reference_halfwidth_s` | `max_rate` settings: the slip-rate filter (the view's filter tab shown), `lowpass` (the default: the slip through a `butterworth` (default) or `bessel` low-pass of order `rate_lowpass_order` (4) at `rate_cutoff_hz` (50), run forwards and backwards for zero phase, then the derivative), `savgol` (Savitzky-Golay derivative of polynomial order `rate_savgol_order` (2) over the window `rate_smoothing_s`; the view's default 0.02) or `boxcar` (the derivative averaged over `rate_smoothing_s`, default 0.01; records without `rate_filter` were made with it); `rate_smoothing_s` is the window of the filter used; NaN gaps are bridged for the filter and blanked again; search half-width around the reference time (0.05), flag threshold in units of the rate noise (5), half-width around the event time in which the reference time is found (0.5) |
 | `t_ref_shift_s` | reference time minus event time: the peak of the mean slip rate of all sensors within `event_time +- reference_halfwidth_s`; each sensor's `max_rate` pick is searched within `search_halfwidth_s` of it |
 | `fit_before_s`, `fit_after_s` | `[start, end]` of the two fit windows, relative to `event_time` (moving `t_i` leaves them in place); defaults 75 %..25 % of the negative side and 25 %..75 % of the positive side of the extraction window |
 | `same_windows` | the view applies a window edit to every sensor |
@@ -167,8 +169,9 @@ entry per sensor, in the order of `channels`, except `patch_x_mm`
 | `peak_rate_um_s` | filtered slip rate at `t_i` |
 | `rate_noise_um_s` | standard deviation of the filtered slip rate in the before window; a `max_rate` peak below `rate_snr` times this is flagged `weak rate peak` |
 | `flags` | one text per sensor, `"; "`-joined: `pick at search edge`, `weak rate peak`, `no rate peak`, `before/after window clipped` (the window runs past the data), `before/after window has gaps` (less than half of its samples are finite), `before/after window reaches t_i` (`t_i` lies inside the window), `before/after fit invalid` |
+| `rate_filter_tabs`, `fault_ends_x_mm` | the windows of both windowed filter tabs (`savgol_window_s`, `boxcar_window_s`), whichever is used; the fault ends the profile was cut at (NaN when none; the experiment's `fault['ends_x_mm']` wins when the view opens) |
 | `patch_x_mm` | the bare PMMA patch edges drawn, `[from, to]` (NaN when none). An event opens with the experiment's `fault['patch_x_mm']` (see Run layout), else with this copy; edges typed in the view and not saved to the experiment stay as it moves between events. The copy counts towards "differs from the saved record" only while the experiment has no edges |
-| `profile` | slip profile fit (`labquake_explorer/analysis/slip_profile.py`): `model` (`quadratic`, `eaz` or `eaz_asymmetric`), `params`, `valid`, `reason`, `n` (the sensors fitted: those in `use` with a finite slip and, when weighted, a positive `sigma`), `weighted`, `r2`, `rms_um`, `tips_mm` (where the fitted profile reaches zero), `peak_x_mm`, `peak_um`, `at_bounds`, `unresolved` (the parameters the sensors do not pin down, and `tips` when a rupture edge is only bracketed), `ranges` (name to `[lo, hi]`, the values that fit equally well where known, NaN for an open end; `tip_minus`/`tip_plus` are the brackets of free edges, and an EAZ `D` that moves with a free `lambda` has a range without being listed), and `use` (the sensors chosen) |
+| `profile` | slip profile fit (`labquake_explorer/analysis/slip_profile.py`): `model` (`quadratic`, `eaz` or `eaz_asymmetric`), `params`, `valid`, `reason`, `n` (the sensors fitted: those in `use` with a finite slip and, when weighted, a positive `sigma`), `weighted`, `r2`, `rms_um`, `tips_mm` (where the fitted profile reaches zero), `peak_x_mm`, `peak_um`, `at_bounds`, `unresolved` (the parameters the sensors do not pin down, and `tips` when a rupture edge is only bracketed), `ranges` (name to `[lo, hi]`, the values that fit equally well where known, NaN for an open end; `tip_minus`/`tip_plus` are the brackets of free edges, and an EAZ `D` that moves with a free `lambda` has a range without being listed), `fixed` (the parameters held at the user's values), `end_slip_um` (the profile at the two fault ends where it reaches them, else NaN), `settings` (every model tab's parameters: per model and name, `fit` false for a held one, `value` the held value, `min`/`max` the user's bounds, NaN for automatic), and `use` (the sensors chosen) |
 | `front` | rupture-front fit of `t_shift_s` (`t_i - event_time`) against `x`: `mode` (`single` or `bilateral`, below), `valid`, `reason`, `split_x_mm` and `t0_s` (bilateral: the apex and its time relative to `event_time`; NaN when there is none), `segments` (`x_from`, `x_to`, `n`, `slope_s_per_mm`, `intercept_s` at x = 0 relative to `event_time`, `velocity_m_s` positive towards +x and infinite for a flat line, `r2`, `resolved` false when the front crosses the segment within one sample, and `min_speed_m_s`, the speed of crossing it in one sample: the lower bound of an unresolved one), `use` and `use_auto` (while true, `use` follows the pick flags: the sensors whose `t_i` is doubtful, flagged `pick at search edge`, `weak rate peak` or `no rate peak`, are left out) |
 
 Profile models, with `x` in mm: `quadratic` is `max(0, c0 + c1 x + c2 x^2)`,
@@ -194,9 +197,14 @@ position, at least four sensors and two on each side; with fewer sensors, two
 lines through the earliest one; one line when both sides run the same way.
 
 The view opens with `eaz`, unweighted, and `bilateral`; an event without a
-record keeps the current model, weighting and mode, and uses every sensor with
-`use_auto` true; a record without `profile` or `front` is read as those
-defaults.
+record keeps the current model, weighting, mode and every tab's held values and
+bounds, and uses every sensor with `use_auto` true; a record without `profile`
+or `front` is read as those defaults, with every parameter fitted within the
+automatic bounds. Each model has its own tab: a value typed for a parameter
+holds it there (`fit_profile(..., fixed=...)`) and the others are fitted, a
+bound typed replaces the automatic one (`bounds=...`), and with every
+parameter held the profile is drawn without a fit. Held parameters count as
+resolved.
 
 ### `arrivals` (Pick Arrivals, per record, version 1)
 

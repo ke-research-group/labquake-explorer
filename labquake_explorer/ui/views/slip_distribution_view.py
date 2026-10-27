@@ -15,19 +15,27 @@ windows, and makes that sensor manual.  The windows are times relative to the
 event time, so they stay put when ``t_i`` moves.  The same values can be typed
 in the entries.  With "same windows for all sensors" a window edit applies to
 every sensor.
-Everything recomputes as soon as a value changes.
+Everything recomputes as soon as a value changes.  The slip-rate filter is
+the one of the tab shown (low-pass, Butterworth or Bessel of a chosen order and
+cutoff; Savitzky-Golay of a chosen window and order; moving average).
 
 The two panels on the right show the result along the fault: the coseismic
 slip against ``x`` with error bars of each sensor's noise and a profile fit
 (``quadratic`` with values below zero masked to zero, or the earthquake arrest
 zone model of Ke et al. 2021, symmetric ``EAZ`` or ``EAZ-asymmetric``; see
 :mod:`labquake_explorer.analysis.slip_profile`), and the event times ``t_i``
-against ``x`` with the apparent velocity of the rupture front.  A left click
+against ``x`` with the apparent velocity of the rupture front.  Each profile
+model has a tab with its parameters: a value typed there holds the parameter,
+the 'fit' tick lets the fit choose it again, and min/max replace the automatic
+bounds; the tab shown is the model fitted.  A left click
 on a point selects its sensor; a zoom of these two panels stays until another
 event or field is loaded.  The bare PMMA patch is drawn on both panels; its
 edges are typed in and saved for the whole experiment
 (``data['fault']['patch_x_mm']``), where preprocessing can set them too.
 Edges typed and not saved there stay while the view moves between events.
+The fault ends (``data['fault']['ends_x_mm']``) are typed and saved the same
+way: the profile is cut there, and where its tip lies beyond an end the text
+gives the slip at that end instead of a rupture tip.
 
 The sensors do not always pin every profile parameter (``ProfileFit.unresolved``):
 an unresolved parameter is listed under "not resolved by the sensors" with the
@@ -50,14 +58,16 @@ on the panel); a flat one (zero slope, infinite velocity) reads
 
 Save stores ``event['slip_analysis']``: the record of
 :meth:`SlipAnalysis.as_dict` plus ``field``, ``unit``, ``same_windows``,
-``patch_x_mm`` (the edges drawn), ``profile`` (the fit record plus ``use``,
-the sensors chosen for it) and ``front`` (the front fit plus ``use`` and
+``rate_filter_tabs``, ``patch_x_mm`` (the edges drawn), ``fault_ends_x_mm``,
+``profile`` (the fit record plus ``use``, the sensors chosen for it,
+``settings``, every tab's holds and bounds, and ``end_slip_um``) and ``front`` (the front fit plus ``use`` and
 ``use_auto``: while the front's sensor choice has not been edited it follows
 the pick flags, leaving out the sensors whose ``t_i`` is doubtful: pick at
 the search edge, weak or no rate peak).
 """
 from __future__ import annotations
 
+import functools
 import math
 import tkinter as tk
 from tkinter import font as tkfont
@@ -79,12 +89,17 @@ LIVE_DELAY_MS = 400                    # recompute this long after the last keys
 HANDLE_PICK_PX = 6                     # a press this close (pixels) to t_i or a window edge grabs it
 ZOOM_HALF_S = 0.2                      # "Zoom to t_i" shows t_i +- this
 METHOD_LABELS = {cs.METHOD_MAX_RATE: "max slip rate", cs.METHOD_MANUAL: "manual"}
-RATE_FILTER_LABELS = {"lowpass": "low-pass (Butterworth)", "savgol": "Savitzky-Golay", "boxcar": "moving average"}
+RATE_FILTER_LABELS = {"lowpass": "Low-pass", "savgol": "Savitzky-Golay", "boxcar": "Moving average"}   # the tabs
+LOWPASS_LABELS = {"butterworth": "Butterworth", "bessel": "Bessel"}
+DEFAULT_SAVGOL_WINDOW_S = 0.020        # the Savitzky-Golay tab's window (the moving average's: cs default)
 BEFORE_COLOR, AFTER_COLOR, TI_COLOR = "#1f77b4", "#ff7f0e", "#d62728"
 PROFILE_LABELS = dict(sprof.MODEL_LABELS)      # model key -> combobox text
 DEFAULT_PROFILE_MODEL = "eaz"
 DEFAULT_FRONT_MODE = "bilateral"
 FAULT_KEY, PATCH_KEY = "fault", "patch_x_mm"   # experiment level: data['fault']['patch_x_mm']
+ENDS_KEY = "ends_x_mm"                         # data['fault']['ends_x_mm']: where the fault ends
+RECORD_ENDS_KEY = "fault_ends_x_mm"            # the ends a slip_analysis record was drawn with
+END_COLOR = "#606060"
 T_I_FLAGS = (cs.FLAG_EDGE, cs.FLAG_WEAK, cs.FLAG_NO_PEAK)   # the pick flags that make t_i doubtful
 PATCH_COLOR, POINT_COLOR, FRONT_COLOR, FLAG_COLOR = "#c08000", "#1f77b4", "#2ca02c", "#9467bd"
 EDGE_COLOR = "#404040"                 # rupture edges: pinned ones as markers, free ones as their bracket
@@ -246,6 +261,34 @@ def apex_text(fit: sprof.FrontFit) -> Optional[str]:
     return f"the two lines meet at {at}"
 
 
+def _float_or_nan(value) -> float:
+    """A saved number (also a 1-element array), or NaN."""
+    try:
+        return float(np.asarray(value, dtype=float).ravel()[0])
+    except (TypeError, ValueError, IndexError):
+        return float("nan")
+
+
+def _text_float(text: str) -> float:
+    """The number typed in an entry, or NaN when it is blank or not a number."""
+    try:
+        return float(str(text).strip())
+    except ValueError:
+        return float("nan")
+
+
+def _parse_blank(text: str, name: str) -> float:
+    """A number, or NaN for a blank entry."""
+    return float("nan") if not str(text).strip() else _parse(text, name)
+
+
+def _parse_int(text: str, name: str) -> int:
+    value = _parse(text, name)
+    if value != int(value):
+        raise ValueError(f"{name}: enter a whole number")
+    return int(value)
+
+
 def slip_fields(event) -> list:
     """Channel arrays of an event aligned with its time axis and in micrometres
     (``slip`` first): the fields this view can analyse."""
@@ -296,6 +339,8 @@ class SlipDistributionView(EventView):
         self.front_use_auto = True
         self.patch_x_mm: Optional[tuple] = None
         self._patch_draft = False      # patch_x_mm was typed here and not saved to the experiment
+        self.fault_ends: Optional[tuple] = None
+        self._ends_draft = False       # fault_ends was typed here and not saved to the experiment
         self.point_artists: dict = {}
         self.patch_artists: list = []
         self.profile_errorbar = None
@@ -364,29 +409,52 @@ class SlipDistributionView(EventView):
         self.reference_var = tk.StringVar(master=self,
                                           value=_text(cs.DEFAULT_REFERENCE_HALFWIDTH_S * 1e3))
         self.smoothing_var = tk.StringVar(master=self, value=_text(cs.DEFAULT_RATE_SMOOTHING_S * 1e3))
+        self.savgol_window_var = tk.StringVar(master=self, value=_text(DEFAULT_SAVGOL_WINDOW_S * 1e3))
+        self.savgol_order_var = tk.StringVar(master=self, value=str(cs.DEFAULT_SAVGOL_ORDER))
         self.cutoff_var = tk.StringVar(master=self, value=_text(cs.DEFAULT_RATE_CUTOFF_HZ))
+        self.lowpass_order_var = tk.StringVar(master=self, value=str(cs.DEFAULT_LOWPASS_ORDER))
         self.search_var = tk.StringVar(master=self, value=_text(cs.DEFAULT_SEARCH_HALFWIDTH_S * 1e3))
         self.snr_var = tk.StringVar(master=self, value=_text(cs.DEFAULT_RATE_SNR))
         for var in self.settings_vars():
             self._shown[str(var)] = var.get()
-        ttk.Label(frame, text="Rate filter:").grid(row=0, column=0, padx=4, pady=2, sticky="e")
-        self.rate_filter_combobox = ttk.Combobox(frame, width=20, state="readonly",
-                                                 values=[RATE_FILTER_LABELS[f] for f in cs.RATE_FILTERS])
-        self.rate_filter_combobox.set(RATE_FILTER_LABELS[cs.DEFAULT_RATE_FILTER])
-        self.rate_filter_combobox.grid(row=0, column=1, padx=4, pady=2, sticky="w")
-        self.rate_filter_combobox.bind("<<ComboboxSelected>>", self.on_rate_filter_selected)
-        self.cutoff_entry = self._entry(frame, "Cutoff (Hz):", self.cutoff_var, 1, self.on_settings_edited)
-        self.smoothing_entry = self._entry(frame, "Window (ms):", self.smoothing_var, 2, self.on_settings_edited)
-        self._entry(frame, "Reference +- (ms):", self.reference_var, 3, self.on_settings_edited)
-        self._entry(frame, "Search +- (ms):", self.search_var, 4, self.on_settings_edited)
-        self._entry(frame, "Flag below (x rate noise):", self.snr_var, 5, self.on_settings_edited)
-        ttk.Label(frame, text="low-pass: the slip, zero phase, before the\nderivative; the others: over the window.\n"
-                              "reference: peak of the mean slip rate of\nall sensors near the event time; each\n"
+        ttk.Label(frame, text="Slip-rate filter (the tab shown is used):", foreground="#606060").grid(
+            row=0, column=0, columnspan=2, padx=4, sticky="w")
+        self.rate_filter_notebook = ttk.Notebook(frame)
+        self.rate_filter_notebook.grid(row=1, column=0, columnspan=2, padx=4, pady=2, sticky="ew")
+        tabs = {key: ttk.Frame(self.rate_filter_notebook) for key in cs.RATE_FILTERS}
+        tab = tabs["lowpass"]
+        ttk.Label(tab, text="Type:").grid(row=0, column=0, padx=4, pady=2, sticky="e")
+        self.lowpass_type_combobox = ttk.Combobox(tab, width=11, state="readonly",
+                                                  values=[LOWPASS_LABELS[t] for t in cs.LOWPASS_TYPES])
+        self.lowpass_type_combobox.set(LOWPASS_LABELS[cs.DEFAULT_LOWPASS_TYPE])
+        self.lowpass_type_combobox.grid(row=0, column=1, padx=4, pady=2, sticky="w")
+        self.lowpass_type_combobox.bind("<<ComboboxSelected>>", lambda e: self.on_filter_choice())
+        self.cutoff_entry = self._entry(tab, "Cutoff (Hz):", self.cutoff_var, 1, self.on_settings_edited)
+        self._entry(tab, "Order:", self.lowpass_order_var, 2, self.on_settings_edited, name="low-pass order")
+        ttk.Label(tab, text="on the slip, forwards and backwards:\nzero phase, -6 dB at the cutoff",
+                  foreground="#606060", justify="left").grid(row=3, column=0, columnspan=2, padx=4, sticky="w")
+        tab = tabs["savgol"]
+        self._entry(tab, "Window (ms):", self.savgol_window_var, 0, self.on_settings_edited, name="savgol window")
+        self._entry(tab, "Polynomial order:", self.savgol_order_var, 1, self.on_settings_edited, name="savgol order")
+        ttk.Label(tab, text="derivative of the local polynomial", foreground="#606060").grid(
+            row=2, column=0, columnspan=2, padx=4, sticky="w")
+        tab = tabs["boxcar"]
+        self.smoothing_entry = self._entry(tab, "Window (ms):", self.smoothing_var, 0, self.on_settings_edited,
+                                           name="moving average window")
+        ttk.Label(tab, text="the derivative averaged over the window", foreground="#606060").grid(
+            row=1, column=0, columnspan=2, padx=4, sticky="w")
+        for key in cs.RATE_FILTERS:
+            self.rate_filter_notebook.add(tabs[key], text=RATE_FILTER_LABELS[key])
+        self.rate_filter_notebook.select(cs.RATE_FILTERS.index(cs.DEFAULT_RATE_FILTER))
+        self.rate_filter_notebook.bind("<<NotebookTabChanged>>", lambda e: self.on_filter_choice())
+        self._entry(frame, "Reference +- (ms):", self.reference_var, 2, self.on_settings_edited)
+        self._entry(frame, "Search +- (ms):", self.search_var, 3, self.on_settings_edited)
+        self._entry(frame, "Flag below (x rate noise):", self.snr_var, 4, self.on_settings_edited)
+        ttk.Label(frame, text="reference: peak of the mean slip rate of\nall sensors near the event time; each\n"
                               "sensor is searched around it", foreground="#606060", justify="left").grid(
-            row=6, column=0, columnspan=2, padx=4, sticky="w")
+            row=5, column=0, columnspan=2, padx=4, sticky="w")
         ttk.Button(frame, text="Re-pick all sensors", command=self.repick_all).grid(
-            row=7, column=0, columnspan=2, padx=4, pady=2, sticky="w")
-        self.show_rate_filter_entries()
+            row=6, column=0, columnspan=2, padx=4, pady=2, sticky="w")
 
         frame = ttk.Frame(left)
         frame.pack(fill="x", pady=4)
@@ -428,33 +496,71 @@ class SlipDistributionView(EventView):
         self.table.bind("<<TreeviewSelect>>", self.on_table_select)
 
     def _build_fit_frames(self, master) -> None:
-        frame = ttk.LabelFrame(master, text="Bare PMMA patch (experiment)")
+        frame = ttk.LabelFrame(master, text="Fault (experiment)")
         frame.pack(fill="x", pady=(0, 4))
         self.patch_lo_var = tk.StringVar(master=self, value="")
         self.patch_hi_var = tk.StringVar(master=self, value="")
-        self._entry(frame, "From x (mm):", self.patch_lo_var, 0, self.on_patch_edited)
-        self._entry(frame, "To x (mm):", self.patch_hi_var, 1, self.on_patch_edited)
-        ttk.Button(frame, text="Save to experiment", command=self.save_patch).grid(
-            row=2, column=0, columnspan=2, padx=4, pady=2, sticky="w")
+        self.ends_lo_var = tk.StringVar(master=self, value="")
+        self.ends_hi_var = tk.StringVar(master=self, value="")
+        for column, text in ((1, "from x (mm)"), (2, "to x (mm)")):
+            ttk.Label(frame, text=text, foreground="#606060").grid(row=0, column=column, padx=4, sticky="w")
+        ttk.Label(frame, text="Fault ends:").grid(row=1, column=0, padx=4, pady=2, sticky="e")
+        self._entry_only(frame, self.ends_lo_var, 1, 1, "ends from", self.on_ends_edited, width=7)
+        self._entry_only(frame, self.ends_hi_var, 1, 2, "ends to", self.on_ends_edited, width=7)
+        ttk.Label(frame, text="Bare PMMA patch:").grid(row=2, column=0, padx=4, pady=2, sticky="e")
+        self._entry_only(frame, self.patch_lo_var, 2, 1, "patch from", self.on_patch_edited, width=7)
+        self._entry_only(frame, self.patch_hi_var, 2, 2, "patch to", self.on_patch_edited, width=7)
+        ttk.Button(frame, text="Save to experiment", command=self.save_fault).grid(
+            row=3, column=0, columnspan=3, padx=4, pady=2, sticky="w")
+        self.ends_note_var = tk.StringVar(master=self, value="")
+        ttk.Label(frame, textvariable=self.ends_note_var, foreground="#606060", wraplength=TEXT_WRAP_PX,
+                  justify="left").grid(row=4, column=0, columnspan=3, padx=4, sticky="w")
         self.patch_note_var = tk.StringVar(master=self, value="")
         ttk.Label(frame, textvariable=self.patch_note_var, foreground="#606060", wraplength=TEXT_WRAP_PX,
-                  justify="left").grid(row=3, column=0, columnspan=2, padx=4, sticky="w")
+                  justify="left").grid(row=5, column=0, columnspan=3, padx=4, sticky="w")
 
         frame = ttk.LabelFrame(master, text="Slip profile")
         frame.pack(fill="x", pady=4)
-        ttk.Label(frame, text="Model:").grid(row=0, column=0, padx=4, pady=2, sticky="e")
-        self.profile_model_combobox = ttk.Combobox(frame, width=15, state="readonly",
-                                                   values=[PROFILE_LABELS[m] for m in sprof.MODELS])
-        self.profile_model_combobox.set(PROFILE_LABELS[DEFAULT_PROFILE_MODEL])
-        self.profile_model_combobox.grid(row=0, column=1, padx=4, pady=2, sticky="w")
-        self.profile_model_combobox.bind("<<ComboboxSelected>>", lambda e: self.on_profile_settings())
+        ttk.Label(frame, text="the tab shown is fitted; a typed value holds,\n"
+                              "'fit' frees it; blank bounds are automatic", foreground="#606060",
+                  justify="left").grid(row=0, column=0, columnspan=2, padx=4, sticky="w")
+        self.profile_notebook = ttk.Notebook(frame)
+        self.profile_notebook.grid(row=1, column=0, columnspan=2, padx=4, pady=2, sticky="ew")
+        self.param_vars = {}
+        for model in sprof.MODELS:
+            tab = ttk.Frame(self.profile_notebook)
+            for column, text in enumerate(("", "value", "fit", "min", "max")):
+                ttk.Label(tab, text=text, foreground="#606060").grid(row=0, column=column, padx=2, sticky="w")
+            self.param_vars[model] = {}
+            row = 0
+            for row, name in enumerate(sprof.PARAMETERS[model], start=1):
+                label, unit, _ = self._param_format(name)
+                ttk.Label(tab, text=f"{label} ({unit})" if unit else label).grid(row=row, column=0, padx=2, sticky="e")
+                v = {"value": tk.StringVar(master=self, value=""), "fit": tk.BooleanVar(master=self, value=True),
+                     "min": tk.StringVar(master=self, value=""), "max": tk.StringVar(master=self, value="")}
+                self.param_vars[model][name] = v
+                on_value = functools.partial(self.on_param_value_edited, model, name)
+                on_bounds = functools.partial(self.on_param_bounds_edited, model, name)
+                self._entry_only(tab, v["value"], row, 1, f"{model} {name} value", on_value, width=9)
+                ttk.Checkbutton(tab, variable=v["fit"], command=functools.partial(self.on_param_fit_toggled, model,
+                                                                                    name)).grid(row=row, column=2)
+                self._entry_only(tab, v["min"], row, 3, f"{model} {name} min", on_bounds, width=7)
+                self._entry_only(tab, v["max"], row, 4, f"{model} {name} max", on_bounds, width=7)
+                for key in ("value", "min", "max"):
+                    self._shown[str(v[key])] = ""
+            ttk.Button(tab, text="Fit all, automatic bounds", command=functools.partial(self.reset_profile_params,
+                                                                                         model)).grid(
+                row=row + 1, column=0, columnspan=5, padx=2, pady=2, sticky="w")
+            self.profile_notebook.add(tab, text=PROFILE_LABELS[model])
+        self.profile_notebook.select(sprof.MODELS.index(DEFAULT_PROFILE_MODEL))
+        self.profile_notebook.bind("<<NotebookTabChanged>>", lambda e: self.on_profile_tab_changed())
         self.weighted_var = tk.BooleanVar(master=self, value=False)
         ttk.Checkbutton(frame, text="weight by 1/sigma^2", variable=self.weighted_var,
-                        command=self.on_profile_settings).grid(row=1, column=0, columnspan=2, padx=4, pady=2, sticky="w")
-        self.profile_use_mb = self._use_menu(frame, 2)
+                        command=self.on_profile_settings).grid(row=2, column=0, columnspan=2, padx=4, pady=2, sticky="w")
+        self.profile_use_mb = self._use_menu(frame, 3)
         self.profile_text_var = tk.StringVar(master=self, value="")
         ttk.Label(frame, textvariable=self.profile_text_var, wraplength=TEXT_WRAP_PX, justify="left").grid(
-            row=3, column=0, columnspan=2, padx=4, pady=2, sticky="w")
+            row=4, column=0, columnspan=2, padx=4, pady=2, sticky="w")
         try:                                             # the font the texts are packed into lines with
             self._text_font = tkfont.nametofont("TkDefaultFont")
         except tk.TclError:
@@ -495,9 +601,9 @@ class SlipDistributionView(EventView):
             if bool(var.get()) != bool(flag):
                 var.set(int(bool(flag)))
 
-    def _entry(self, master, label, var, row, callback, width=9):
+    def _entry(self, master, label, var, row, callback, width=9, name=None):
         ttk.Label(master, text=label).grid(row=row, column=0, padx=4, pady=2, sticky="e")
-        return self._entry_only(master, var, row, 1, label, callback, width)
+        return self._entry_only(master, var, row, 1, name or label, callback, width)
 
     def _entry_only(self, master, var, row, column, name, callback, width=9):
         entry = ttk.Entry(master, textvariable=var, width=width)
@@ -604,10 +710,7 @@ class SlipDistributionView(EventView):
             self.fit_before = list(inputs["fit_before_s"])
             self.fit_after = list(inputs["fit_after_s"])
             self._show(self.reference_var, _text(inputs["reference_halfwidth_s"] * 1e3))
-            self._show(self.smoothing_var, _text(inputs["rate_smoothing_s"] * 1e3))
-            self._show(self.cutoff_var, _text(inputs["rate_cutoff_hz"]))
-            self.rate_filter_combobox.set(RATE_FILTER_LABELS[inputs["rate_filter"]])
-            self.show_rate_filter_entries()
+            self.restore_filter_tabs(inputs, record)
             self._show(self.search_var, _text(inputs["search_halfwidth_s"] * 1e3))
             self._show(self.snr_var, _text(inputs["rate_snr"]))
             self.same_windows_var.set(bool(np.asarray(record.get("same_windows", True)).ravel()[0]))
@@ -637,8 +740,9 @@ class SlipDistributionView(EventView):
         front = record.get("front") if isinstance(record, dict) else None
         if isinstance(profile, dict):
             model = str(profile.get("model", DEFAULT_PROFILE_MODEL))
-            self.profile_model_combobox.set(PROFILE_LABELS[model if model in sprof.MODELS else DEFAULT_PROFILE_MODEL])
+            self.profile_notebook.select(sprof.MODELS.index(model if model in sprof.MODELS else DEFAULT_PROFILE_MODEL))
             self.weighted_var.set(bool(np.asarray(profile.get("weighted", False)).ravel()[0]))
+            self.restore_profile_params(profile.get("settings"))
         self.profile_use = _bools(profile.get("use") if isinstance(profile, dict) else None, n, True)
         if isinstance(front, dict):
             mode = str(front.get("mode", DEFAULT_FRONT_MODE))
@@ -655,9 +759,68 @@ class SlipDistributionView(EventView):
                 found = _patch_pair(record.get(PATCH_KEY))
             if found is not None:
                 patch = found
+        ends = self.fault_ends
+        if not self._ends_draft:
+            found = self.experiment_ends()
+            if found is None and isinstance(record, dict):
+                found = _patch_pair(record.get(RECORD_ENDS_KEY))
+            if found is not None:
+                ends = found
         self._fill_use_menu(self.profile_use_mb, self.profile_use, self.set_profile_use)
         self._fill_use_menu(self.front_use_mb, self.front_use, self.set_front_use)
         self.show_patch(patch)
+        self.show_ends(ends)
+
+    def restore_profile_params(self, settings) -> None:
+        """Every model tab's holds and bounds from a record's ``profile.settings``;
+        what it lacks is fitted, within the automatic bounds."""
+        settings = settings if isinstance(settings, dict) else {}
+        for model, params in self.param_vars.items():
+            saved = settings.get(model) if isinstance(settings.get(model), dict) else {}
+            for name, v in params.items():
+                entry = saved.get(name) if isinstance(saved.get(name), dict) else {}
+                held = _float_or_nan(entry.get("value"))
+                fit = bool(np.asarray(entry.get("fit", True)).ravel()[0]) or not math.isfinite(held)
+                v["fit"].set(fit)
+                self._show(v["value"], "" if fit else _text(held))
+                for key in ("min", "max"):
+                    self._show(v[key], _text(_float_or_nan(entry.get(key))))
+
+    def profile_settings(self) -> dict:
+        """Every model tab's holds and bounds, as stored in ``profile.settings``."""
+        out = {}
+        for model, params in self.param_vars.items():
+            out[model] = {}
+            for name, v in params.items():
+                fit = bool(v["fit"].get())
+                out[model][name] = {"fit": fit, "value": float("nan") if fit else _text_float(v["value"].get()),
+                                    "min": _text_float(v["min"].get()), "max": _text_float(v["max"].get())}
+        return out
+
+    def restore_filter_tabs(self, inputs: dict, record: dict) -> None:
+        """Every filter tab's values from a record: the analysis keys give the filter
+        used, ``rate_filter_tabs`` the window of the other windowed filter."""
+        rate_filter = inputs["rate_filter"]
+        windows = record.get("rate_filter_tabs") if isinstance(record.get("rate_filter_tabs"), dict) else {}
+
+        def window(key, default):
+            try:
+                value = float(np.asarray(windows.get(key, default)).ravel()[0])
+            except (TypeError, ValueError, IndexError):
+                value = default
+            return value if math.isfinite(value) else default
+
+        savgol = inputs["rate_smoothing_s"] if rate_filter == "savgol" else window("savgol_window_s",
+                                                                                   DEFAULT_SAVGOL_WINDOW_S)
+        boxcar = inputs["rate_smoothing_s"] if rate_filter == "boxcar" else window("boxcar_window_s",
+                                                                                   cs.DEFAULT_RATE_SMOOTHING_S)
+        self._show(self.savgol_window_var, _text(savgol * 1e3))
+        self._show(self.smoothing_var, _text(boxcar * 1e3))
+        self._show(self.savgol_order_var, str(inputs["rate_savgol_order"]))
+        self._show(self.cutoff_var, _text(inputs["rate_cutoff_hz"]))
+        self._show(self.lowpass_order_var, str(inputs["rate_lowpass_order"]))
+        self.lowpass_type_combobox.set(LOWPASS_LABELS[inputs["rate_lowpass_type"]])
+        self.select_rate_filter(rate_filter)
 
     def show_patch(self, patch: Optional[tuple]) -> None:
         """Make ``patch`` the edges drawn, put them in the entries and update the note."""
@@ -685,41 +848,68 @@ class SlipDistributionView(EventView):
 
     # ----------------------------------------------------------- settings
     def settings_vars(self) -> tuple:
-        return self.reference_var, self.smoothing_var, self.cutoff_var, self.search_var, self.snr_var
+        return (self.reference_var, self.smoothing_var, self.savgol_window_var, self.savgol_order_var,
+                self.cutoff_var, self.lowpass_order_var, self.search_var, self.snr_var)
 
     def rate_filter(self) -> str:
-        label = self.rate_filter_combobox.get()
-        return next((k for k, v in RATE_FILTER_LABELS.items() if v == label), cs.DEFAULT_RATE_FILTER)
+        """The filter of the tab shown."""
+        try:
+            return cs.RATE_FILTERS[self.rate_filter_notebook.index("current")]
+        except (tk.TclError, IndexError):
+            return cs.DEFAULT_RATE_FILTER
 
-    def show_rate_filter_entries(self) -> None:
-        """The cutoff is for the low-pass, the window for the other two."""
-        lowpass = self.rate_filter() == "lowpass"
-        self.cutoff_entry.config(state="normal" if lowpass else "disabled")
-        self.smoothing_entry.config(state="disabled" if lowpass else "normal")
+    def select_rate_filter(self, rate_filter: str) -> None:
+        """Show the tab of ``rate_filter`` (the analysis follows on the next recompute)."""
+        self.rate_filter_notebook.select(cs.RATE_FILTERS.index(rate_filter))
 
-    def on_rate_filter_selected(self, event=None) -> None:
+    def lowpass_type(self) -> str:
+        label = self.lowpass_type_combobox.get()
+        return next((k for k, v in LOWPASS_LABELS.items() if v == label), cs.DEFAULT_LOWPASS_TYPE)
+
+    def on_filter_choice(self) -> None:
+        """Another filter tab or low-pass type: recompute, unless the result already
+        has it (a tab selected while restoring a record)."""
         self.flush_pending()
-        self.show_rate_filter_entries()
+        r = self.result
+        if r is not None and not self._stale and r.rate_filter == self.rate_filter() and \
+                r.rate_lowpass_type == self.lowpass_type():
+            return
         self.recompute()
 
     def read_settings(self) -> dict:
         reference = _parse(self.reference_var.get(), "reference half-width (ms)", 1e-3)
-        smoothing = _parse(self.smoothing_var.get(), "rate filter window (ms)", 1e-3)
-        cutoff = _parse(self.cutoff_var.get(), "rate filter cutoff (Hz)")
+        boxcar = _parse(self.smoothing_var.get(), "moving average window (ms)", 1e-3)
+        savgol = _parse(self.savgol_window_var.get(), "Savitzky-Golay window (ms)", 1e-3)
+        savgol_order = _parse_int(self.savgol_order_var.get(), "Savitzky-Golay order")
+        cutoff = _parse(self.cutoff_var.get(), "low-pass cutoff (Hz)")
+        lowpass_order = _parse_int(self.lowpass_order_var.get(), "low-pass order")
         search = _parse(self.search_var.get(), "search half-width (ms)", 1e-3)
         snr = _parse(self.snr_var.get(), "flag threshold")
         if reference <= 0:
             raise ValueError("the reference half-width must be > 0")
-        if smoothing < 0:
-            raise ValueError("the rate filter window must be >= 0")
+        if boxcar < 0:
+            raise ValueError("the moving average window must be >= 0")
+        if savgol <= 0:
+            raise ValueError("the Savitzky-Golay window must be > 0")
         if cutoff <= 0:
-            raise ValueError("the rate filter cutoff must be > 0")
+            raise ValueError("the low-pass cutoff must be > 0")
+        for order, name in ((savgol_order, "Savitzky-Golay order"), (lowpass_order, "low-pass order")):
+            if not 1 <= order <= cs.MAX_FILTER_ORDER:
+                raise ValueError(f"the {name} must be from 1 to {cs.MAX_FILTER_ORDER}")
         if search <= 0:
             raise ValueError("the search half-width must be > 0")
         if snr < 0:
             raise ValueError("the flag threshold must be >= 0")
-        return {"rate_filter": self.rate_filter(), "rate_cutoff_hz": cutoff, "rate_smoothing_s": smoothing,
+        rate_filter = self.rate_filter()
+        return {"rate_filter": rate_filter, "rate_cutoff_hz": cutoff, "rate_lowpass_order": lowpass_order,
+                "rate_lowpass_type": self.lowpass_type(), "rate_savgol_order": savgol_order,
+                "rate_smoothing_s": savgol if rate_filter == "savgol" else boxcar,
                 "search_halfwidth_s": search, "rate_snr": snr, "reference_halfwidth_s": reference}
+
+    def filter_windows(self) -> dict:
+        """The windows of the two windowed filters, whichever tab is shown (s)."""
+        return {"savgol_window_s": _parse(self.savgol_window_var.get(), "Savitzky-Golay window (ms)", 1e-3),
+                "boxcar_window_s": _parse(self.smoothing_var.get(), "moving average window (ms)", 1e-3)}
 
     def schedule(self, callback, now: bool = False) -> None:
         """Run ``callback`` at once, or once the keys have been quiet for ``LIVE_DELAY_MS``."""
@@ -940,8 +1130,101 @@ class SlipDistributionView(EventView):
 
     # ------------------------------------------------------- profile and front
     def profile_model(self) -> str:
-        label = self.profile_model_combobox.get()
-        return next((k for k, v in PROFILE_LABELS.items() if v == label), DEFAULT_PROFILE_MODEL)
+        """The model of the tab shown."""
+        try:
+            return sprof.MODELS[self.profile_notebook.index("current")]
+        except (tk.TclError, IndexError):
+            return DEFAULT_PROFILE_MODEL
+
+    def select_profile_model(self, model: str) -> None:
+        """Show ``model``'s tab and fit it."""
+        self.profile_notebook.select(sprof.MODELS.index(model))
+        self.refit()
+
+    def on_profile_tab_changed(self) -> None:
+        self.flush_pending()
+        if self.profile_fit is None or self.profile_fit.model != self.profile_model():
+            self.refit()
+
+    def read_profile_constraints(self, model: Optional[str] = None) -> tuple:
+        """``(fixed, bounds)`` of a model's tab: the held values (no 'fit' tick) and
+        the bounds typed (NaN for a blank end).  ValueError when an entry is unusable."""
+        fixed, bounds = {}, {}
+        for name, v in self.param_vars[model or self.profile_model()].items():
+            label = self._param_format(name)[0]
+            if not v["fit"].get():
+                fixed[name] = _parse(v["value"].get(), f"{label} value")
+            lo, hi = (_parse_blank(v[key].get(), f"{label} {key}") for key in ("min", "max"))
+            if math.isfinite(lo) or math.isfinite(hi):
+                bounds[name] = (lo, hi)
+        return fixed, bounds
+
+    def on_param_value_edited(self, model: str, name: str) -> None:
+        """A typed value holds the parameter there; clearing it lets the fit choose again."""
+        v = self.param_vars[model][name]
+        if self._syncing or not self._edited(v["value"]):
+            return
+        text = v["value"].get().strip()
+        if text:
+            try:
+                _parse(text, f"{self._param_format(name)[0]} value")
+            except ValueError as e:
+                self.status_var.set(str(e))
+                return
+        v["fit"].set(not text)
+        self._shown[str(v["value"])] = v["value"].get()
+        self.on_param_changed(model)
+
+    def on_param_fit_toggled(self, model: str, name: str) -> None:
+        """Ticked: the fit chooses; unticked: the parameter holds the value shown."""
+        self.flush_pending()
+        v = self.param_vars[model][name]
+        if not v["fit"].get():
+            try:
+                _parse(v["value"].get(), f"{self._param_format(name)[0]} value")
+            except ValueError:
+                v["fit"].set(True)
+                self.status_var.set(f"type a value for {self._param_format(name)[0]} to hold it at")
+                return
+        self.on_param_changed(model)
+
+    def on_param_bounds_edited(self, model: str, name: str) -> None:
+        v = self.param_vars[model][name]
+        if self._syncing or not self._edited(v["min"], v["max"]):
+            return
+        try:
+            for key in ("min", "max"):
+                _parse_blank(v[key].get(), f"{self._param_format(name)[0]} {key}")
+        except ValueError as e:
+            self.status_var.set(str(e))
+            return
+        for key in ("min", "max"):
+            self._shown[str(v[key])] = v[key].get()
+        self.on_param_changed(model)
+
+    def reset_profile_params(self, model: str) -> None:
+        """Every parameter of ``model`` fitted again, within the automatic bounds."""
+        self.flush_pending()
+        for v in self.param_vars[model].values():
+            v["fit"].set(True)
+            self._show(v["min"], "")
+            self._show(v["max"], "")
+        self.on_param_changed(model)
+
+    def on_param_changed(self, model: str) -> None:
+        if model == self.profile_model():
+            self.refit()
+        else:
+            self.update_status()
+
+    def show_profile_params(self) -> None:
+        """The fitted values in the value entries of the free parameters of the tab shown."""
+        fit = self.profile_fit
+        if fit is None or not fit.valid:
+            return
+        for name, v in self.param_vars[fit.model].items():
+            if v["fit"].get() and name in fit.params:
+                self._show(v["value"], _text(fit.params[name]))
 
     def front_mode(self) -> str:
         mode = self.front_mode_combobox.get()
@@ -954,8 +1237,16 @@ class SlipDistributionView(EventView):
         sensors = self.result.sensors
         slip = np.array([s.coseismic_slip for s in sensors])
         sigma = np.array([s.noise for s in sensors])
-        self.profile_fit = sprof.fit_profile(self.x_mm, slip, sigma, model=self.profile_model(),
-                                             weighted=bool(self.weighted_var.get()), use=self.profile_use)
+        model = self.profile_model()
+        try:
+            fixed, bounds = self.read_profile_constraints(model)
+            self.profile_fit = sprof.fit_profile(self.x_mm, slip, sigma, model=model,
+                                                 weighted=bool(self.weighted_var.get()), use=self.profile_use,
+                                                 fixed=fixed, bounds=bounds)
+        except ValueError as e:                          # a parameter entry that cannot be used
+            self.profile_fit = sprof.ProfileFit(model, {name: float("nan") for name in sprof.PARAMETERS[model]},
+                                                False, str(e), 0, bool(self.weighted_var.get()))
+        self.show_profile_params()
         if self.front_use_auto:
             self.front_use = [not doubtful_t_i(s) for s in sensors]
             self._sync_use_menu(self.front_use_mb, self.front_use)
@@ -1023,6 +1314,8 @@ class SlipDistributionView(EventView):
         the parameter has one (it moves with an unresolved one)."""
         label, unit, digits = self._param_format(name)
         text = f"{label} = {fit.params[name]:.{digits}g}" + (f" {unit}" if unit else "")
+        if name in fit.fixed:
+            text += " (held)"
         if name in fit.ranges:
             lo, hi = (float(v) for v in fit.ranges[name])
             text += f" ({_range_text(lo, hi, digits)} fit equally)"
@@ -1050,12 +1343,24 @@ class SlipDistributionView(EventView):
         if fit.model == "quadratic" and math.isfinite(fit.peak) and not unresolved:
             lines.append(f"peak {fit.peak:.3g} {u} at x = {fit.peak_x_mm:.4g} mm")
         brackets = tip_brackets(fit)
+        reached = self.end_slips(fit)
+
+        def edge(side, label, tip) -> str:
+            if side in reached:
+                x_end, value = reached[side]
+                return f"the {label} fault end ({value:.3g} {u} at {x_end:.4g} mm)"
+            return f"{tip:.4g} mm"
+
         if not brackets:
             if all(math.isfinite(v) for v in fit.tips_mm):
-                lines.append(f"rupture from {fit.tips_mm[0]:.4g} to {fit.tips_mm[1]:.4g} mm")
+                (s_lo, l_lo), (s_hi, l_hi) = SIDES
+                lines.append(f"rupture from {edge(s_lo, l_lo, fit.tips_mm[0])} to {edge(s_hi, l_hi, fit.tips_mm[1])}")
         else:                                            # the pinned edge of a pair with a free one
-            lines.extend(f"{side_label} edge at {tip:.4g} mm" for (side, side_label), tip in zip(SIDES, fit.tips_mm)
+            lines.extend(f"{side_label} edge at {edge(side, side_label, tip)}"
+                         for (side, side_label), tip in zip(SIDES, fit.tips_mm)
                          if side not in brackets and math.isfinite(tip))
+            lines.extend(f"slip at the {side_label} fault end: {reached[side][1]:.3g} {u}"
+                         for side, side_label in SIDES if side in brackets and side in reached)
         free = []
         named = [self._param_format(name)[0] for name in unresolved if name not in fit.ranges]
         if named:
@@ -1202,6 +1507,140 @@ class SlipDistributionView(EventView):
         self.canvas.draw_idle()
         self.update_status()
 
+    # ------------------------------------------------------------ fault ends
+    def experiment_ends_value(self):
+        """``data['fault']['ends_x_mm']`` as stored, or None when there is none."""
+        data = self.data_manager.data if isinstance(self.data_manager.data, dict) else {}
+        fault = data.get(FAULT_KEY)
+        return fault.get(ENDS_KEY) if isinstance(fault, dict) else None
+
+    def experiment_ends(self) -> Optional[tuple]:
+        return _patch_pair(self.experiment_ends_value())
+
+    def show_ends(self, ends: Optional[tuple]) -> None:
+        self.fault_ends = ends
+        self._show(self.ends_lo_var, _text(ends[0]) if ends else "")
+        self._show(self.ends_hi_var, _text(ends[1]) if ends else "")
+        self.update_ends_note()
+
+    def read_ends(self) -> Optional[tuple]:
+        """The fault ends in the entries: None when both are blank, ValueError when
+        unusable; an entry not edited gives the end in use at full precision."""
+        lo_text, hi_text = self.ends_lo_var.get().strip(), self.ends_hi_var.get().strip()
+        if not lo_text and not hi_text:
+            return None
+        applied = self.fault_ends
+        lo = applied[0] if applied and not self._edited(self.ends_lo_var) else _parse(lo_text, "fault end from (mm)")
+        hi = applied[1] if applied and not self._edited(self.ends_hi_var) else _parse(hi_text, "fault end to (mm)")
+        if lo >= hi:
+            raise ValueError("the fault ends must have from < to")
+        return lo, hi
+
+    def on_ends_edited(self) -> None:
+        if self._syncing:
+            return
+        if not self._edited(self.ends_lo_var, self.ends_hi_var):
+            self.update_status()
+            return
+        try:
+            ends = self.read_ends()
+        except ValueError as e:
+            self.status_var.set(str(e))
+            return
+        for var in (self.ends_lo_var, self.ends_hi_var):
+            self._shown[str(var)] = var.get()
+        self.fault_ends = ends
+        self._ends_draft = ends is not None
+        self.update_ends_note()
+        if self.profile_fit is not None:
+            self.profile_text_var.set(self.profile_text())
+        self.plot_fault()
+        self.canvas.draw_idle()
+        self.update_status()
+
+    def update_ends_note(self) -> None:
+        saved, value = self.experiment_ends(), self.experiment_ends_value()
+        if self.fault_ends is None:
+            note = "no fault ends: the profile is drawn whole" if saved is None else ""
+        elif saved == self.fault_ends:
+            note = "fault ends saved in the experiment"
+        else:
+            note = "fault ends not saved to the experiment"
+        if saved is None and value is not None:
+            note += f"; experiment fault ends unusable: {_value_text(value)}"
+        self.ends_note_var.set(note)
+
+    def save_ends(self) -> bool:
+        """Store the fault ends for the whole experiment (``data['fault']['ends_x_mm']``)
+        and show them in the other open windows that hold none typed there."""
+        try:
+            ends = self.read_ends()
+        except ValueError as e:
+            self.status_var.set(str(e))
+            return False
+        if ends is None:
+            self.status_var.set("type both fault ends first")
+            return False
+        self.data_manager.set_data(f"{FAULT_KEY}/{ENDS_KEY}", [float(ends[0]), float(ends[1])], add_key=True)
+        for var in (self.ends_lo_var, self.ends_hi_var):
+            self._shown[str(var)] = var.get()
+        self.fault_ends = ends
+        self._ends_draft = False
+        self.app.refresh_tree()
+        self.update_ends_note()
+        self.plot_fault()
+        self.canvas.draw_idle()
+        for view in list(getattr(self.app, "child_windows", [])):
+            if view is not self and isinstance(view, SlipDistributionView) and view.winfo_exists():
+                view.on_experiment_ends_saved()
+        self.status_var.set("fault ends saved in the experiment")
+        return True
+
+    def on_experiment_ends_saved(self) -> None:
+        self.flush_pending()
+        if self._ends_draft:
+            self.update_ends_note()
+            return
+        self.show_ends(self.experiment_ends())
+        if self.profile_fit is not None:
+            self.profile_text_var.set(self.profile_text())
+        self.plot_fault()
+        self.canvas.draw_idle()
+        self.update_status()
+
+    def save_fault(self) -> bool:
+        """The Save to experiment button: the fault ends and the patch edges typed."""
+        self.flush_pending()
+        typed_ends = bool(self.ends_lo_var.get().strip() or self.ends_hi_var.get().strip())
+        typed_patch = bool(self.patch_lo_var.get().strip() or self.patch_hi_var.get().strip())
+        if not (typed_ends or typed_patch):
+            self.status_var.set("type the fault ends or the patch edges first")
+            return False
+        ok = (not typed_ends or self.save_ends()) and (not typed_patch or self.save_patch())
+        if ok and typed_ends and typed_patch:
+            self.status_var.set("fault ends and patch edges saved in the experiment")
+        return ok
+
+    def end_slips(self, fit: Optional[sprof.ProfileFit] = None) -> dict:
+        """``side -> (x of the fault end, slip there)`` for the fault ends that the
+        fitted profile reaches (slip > 0 there: its tip lies beyond the end)."""
+        fit = fit or self.profile_fit
+        if fit is None or not fit.valid or self.fault_ends is None:
+            return {}
+        out = {}
+        for (side, _), x_end in zip(SIDES, self.fault_ends):
+            value = float(fit.evaluate(np.array([x_end], dtype=float))[0])
+            if value > 0:
+                out[side] = (float(x_end), value)
+        return out
+
+    def _draw_ends(self, ax) -> None:
+        if self.fault_ends is None:
+            return
+        for i, x in enumerate(self.fault_ends):
+            self.patch_artists.append(ax.axvline(x, color=END_COLOR, ls="-.", lw=1.0, zorder=1,
+                                                 label="fault end" if i == 0 and ax is self.ax_profile else "_end"))
+
     def _draw_patch(self, ax) -> None:
         if self.patch_x_mm is None:
             return
@@ -1216,7 +1655,9 @@ class SlipDistributionView(EventView):
         if fit is None or not fit.valid:
             return []
         brackets = tip_brackets(fit)
-        return [float(t) for (side, _), t in zip(SIDES, fit.tips_mm) if side not in brackets and math.isfinite(t)]
+        lo, hi = self.fault_ends or (-math.inf, math.inf)          # a tip beyond a fault end is not a tip
+        return [float(t) for (side, _), t in zip(SIDES, fit.tips_mm)
+                if side not in brackets and math.isfinite(t) and lo <= t <= hi]
 
     def _x_range(self) -> tuple:
         """x-limits of the fault panels: the sensors with a margin, the patch, and
@@ -1229,7 +1670,10 @@ class SlipDistributionView(EventView):
         lo, hi = min(0.0, float(x.min()) - 0.1 * span), float(x.max()) + 0.1 * span
         if self.patch_x_mm is not None:
             lo, hi = min(lo, self.patch_x_mm[0]), max(hi, self.patch_x_mm[1])
+        fault_lo, fault_hi = self.fault_ends or (-math.inf, math.inf)
         ends = self.pinned_tips() + [v for bracket in tip_brackets(self.profile_fit).values() for v in bracket]
+        if self.fault_ends is not None:
+            ends = [min(max(v, fault_lo), fault_hi) for v in ends if math.isfinite(v)] + list(self.fault_ends)
         for tip in ends:
             if math.isfinite(tip) and float(x.min()) - span <= tip <= float(x.max()) + span:
                 lo, hi = min(lo, tip - 0.05 * span), max(hi, tip + 0.05 * span)
@@ -1242,6 +1686,8 @@ class SlipDistributionView(EventView):
         for i, (side, (b_lo, b_hi)) in enumerate(tip_brackets(self.profile_fit).items()):
             start = b_lo if math.isfinite(b_lo) else lo - far
             stop = b_hi if math.isfinite(b_hi) else hi + far
+            if self.fault_ends is not None:              # no edge beyond the fault
+                start, stop = (min(max(v, self.fault_ends[0]), self.fault_ends[1]) for v in (start, stop))
             ax.plot([start, stop], [0.0, 0.0], "-", color=EDGE_COLOR, lw=6, alpha=0.35, solid_capstyle="butt",
                     zorder=2, label="rupture edge, not resolved" if i == 0 else "_edge_" + side)
             ends = [v for v in (b_lo, b_hi) if math.isfinite(v)]
@@ -1264,6 +1710,7 @@ class SlipDistributionView(EventView):
         lo, hi = self._x_range()
         self._profile_xlim = (lo, hi)
         self._draw_patch(ax)
+        self._draw_ends(ax)
         ax.axhline(0.0, color="#b0b0b0", lw=0.6, zorder=1)
         self.profile_errorbar = ax.errorbar(x, y, yerr=np.where(np.isfinite(sigma), sigma, 0.0), fmt="none",
                                             ecolor=POINT_COLOR, elinewidth=1.0, capsize=3, zorder=3)
@@ -1276,9 +1723,16 @@ class SlipDistributionView(EventView):
         ax.plot([x[k]], [y[k]], "o", mfc="none", mec=TI_COLOR, mew=1.6, ms=12, zorder=6)
         fit = self.profile_fit
         if fit is not None and fit.valid:
-            xx = np.linspace(lo, hi, 600)
+            c_lo, c_hi = (max(lo, self.fault_ends[0]), min(hi, self.fault_ends[1])) if self.fault_ends else (lo, hi)
+            xx = np.linspace(c_lo, c_hi, 600)                # cut at the fault ends
             self.profile_curve, = ax.plot(xx, fit.evaluate(xx), "-", color="k", lw=1.4, zorder=2,
                                           label=PROFILE_LABELS.get(fit.model, fit.model))
+            for side, (x_end, value) in self.end_slips(fit).items():
+                if lo <= x_end <= hi:
+                    ax.plot([x_end], [value], "s", mfc="white", mec="k", ms=6, zorder=6)
+                    ax.annotate(f"{value:.3g} {self.unit}", (x_end, value), textcoords="offset points",
+                                xytext=(4 if side == "minus" else -4, 6), ha="left" if side == "minus" else "right",
+                                fontsize=7)
             self._draw_brackets(ax, lo, hi)
             tips = self.pinned_tips()                    # markers only where the sensors pin a tip
             inside = [t for t in tips if lo <= t <= hi]
@@ -1314,6 +1768,7 @@ class SlipDistributionView(EventView):
         x = self.x_mm
         t_ms = np.array([1e3 * s.t_shift_s for s in sensors])
         self._draw_patch(ax)
+        self._draw_ends(ax)
         self.point_artists["front"], = ax.plot(x, t_ms, "o", color=FRONT_COLOR, ms=6, picker=5, zorder=4, label="t_i")
         doubtful = np.array([doubtful_t_i(s) for s in sensors])
         if np.any(doubtful):
@@ -1621,11 +2076,19 @@ class SlipDistributionView(EventView):
             return None
         rec = self.result.as_dict()
         rec.update({"field": self.field, "unit": self.unit, "same_windows": bool(self.same_windows_var.get())})
+        try:
+            rec["rate_filter_tabs"] = self.filter_windows()
+        except ValueError:
+            pass
         rec[PATCH_KEY] = [float(v) for v in self.patch_x_mm] if self.patch_x_mm else [float("nan")] * 2
         if self.profile_fit is not None:
             profile = self.profile_fit.as_dict()
             profile["use"] = [bool(v) for v in self.profile_use]
+            profile["settings"] = self.profile_settings()
+            reached = self.end_slips()
+            profile["end_slip_um"] = [reached[side][1] if side in reached else float("nan") for side, _ in SIDES]
             rec["profile"] = profile
+        rec[RECORD_ENDS_KEY] = [float(v) for v in self.fault_ends] if self.fault_ends else [float("nan")] * 2
         if self.front_fit is not None:
             front = self.front_fit.as_dict()
             front["use"] = [bool(v) for v in self.front_use]
@@ -1640,6 +2103,8 @@ class SlipDistributionView(EventView):
             _parse(self.t_shift_var.get(), "t_i - event time (ms)")
             self.read_windows()
             self.read_patch()
+            self.read_ends()
+            self.read_profile_constraints()
         except ValueError as e:
             return str(e)
         return None
@@ -1674,6 +2139,9 @@ class SlipDistributionView(EventView):
                 and np.allclose(inputs["fit_after_s"], rec["fit_after_s"])
                 and inputs["rate_filter"] == rec["rate_filter"]
                 and math.isclose(inputs["rate_cutoff_hz"], rec["rate_cutoff_hz"])
+                and inputs["rate_lowpass_order"] == rec["rate_lowpass_order"]
+                and inputs["rate_lowpass_type"] == rec["rate_lowpass_type"]
+                and inputs["rate_savgol_order"] == rec["rate_savgol_order"]
                 and math.isclose(inputs["rate_smoothing_s"], rec["rate_smoothing_s"])
                 and math.isclose(inputs["search_halfwidth_s"], rec["search_halfwidth_s"])
                 and math.isclose(inputs["rate_snr"], rec["rate_snr"])
@@ -1705,9 +2173,33 @@ class SlipDistributionView(EventView):
             return False
         if not saved_auto and _bools(front.get("use"), n, True) != rec["front"]["use"]:
             return False
+        if not self._profile_settings_match(profile.get("settings"), rec["profile"]["settings"],
+                                            rec["profile"]["model"]):
+            return False
+        if self.experiment_ends() is None and _patch_pair(saved.get(RECORD_ENDS_KEY)) != _patch_pair(rec[RECORD_ENDS_KEY]):
+            return False
         if self.experiment_patch() is not None:
             return True
         return _patch_pair(saved.get(PATCH_KEY)) == _patch_pair(rec[PATCH_KEY])
+
+    @staticmethod
+    def _profile_settings_match(saved, current: dict, model: str) -> bool:
+        """The holds and bounds of the model fitted equal the saved ones (none saved:
+        everything fitted within the automatic bounds)."""
+        saved = saved.get(model) if isinstance(saved, dict) and isinstance(saved.get(model), dict) else {}
+
+        def same(a, b) -> bool:
+            return (math.isnan(a) and math.isnan(b)) or math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-12)
+
+        for name, cur in current[model].items():
+            old = saved.get(name) if isinstance(saved.get(name), dict) else {}
+            held = _float_or_nan(old.get("value"))
+            fit = bool(np.asarray(old.get("fit", True)).ravel()[0]) or not math.isfinite(held)
+            if fit != cur["fit"] or (not fit and not same(held, cur["value"])):
+                return False
+            if not all(same(_float_or_nan(old.get(key)), cur[key]) for key in ("min", "max")):
+                return False
+        return True
 
     def update_status(self) -> None:
         if self.result is None:

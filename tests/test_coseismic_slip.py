@@ -281,3 +281,28 @@ def test_rate_filter_gaps_and_validation():
     assert rec["rate_filter"] == cs.DEFAULT_RATE_FILTER == "lowpass" and rec["rate_cutoff_hz"] == 50.0
     del rec["rate_filter"], rec["rate_cutoff_hz"]                   # made before there was a choice
     assert cs.restore_inputs(rec, rec["channels"])["rate_filter"] == "boxcar"
+
+
+def test_lowpass_type_and_orders():
+    t = np.arange(0.0, 2.0, 0.0005)
+    rng = np.random.default_rng(1)
+    d = 10.0 / (1.0 + np.exp(-(t - 1.0) / 0.005)) + rng.normal(0, 0.2, t.size)
+    rates = {kind: cs.slip_rate(t, d, rate_filter="lowpass", cutoff_hz=50.0, lowpass_type=kind)
+             for kind in cs.LOWPASS_TYPES}
+    for rate in rates.values():
+        assert abs(t[np.argmax(rate)] - 1.0) < 0.003
+    assert not np.allclose(rates["butterworth"], rates["bessel"])
+    gentle = cs.slip_rate(t, d, rate_filter="lowpass", cutoff_hz=50.0, lowpass_order=1)
+    assert np.std(gentle[:1000]) > np.std(rates["butterworth"][:1000])     # order 1 rolls off less
+    with pytest.raises(ValueError, match="whole number from 1 to"):
+        cs.slip_rate(t, d, rate_filter="lowpass", lowpass_order=0)
+    with pytest.raises(ValueError, match="unknown low-pass type"):
+        cs.slip_rate(t, d, rate_filter="lowpass", lowpass_type="chebyshev")
+    cubic = cs.slip_rate(t, d, 0.02, "savgol", savgol_order=3)
+    assert abs(t[np.argmax(cubic)] - 1.0) < 0.003
+    with pytest.raises(ValueError, match="window must span"):
+        cs.slip_rate(t, d, 0.001, "savgol", savgol_order=3)
+    event, _ = make_event()
+    rec = run(event, rate_lowpass_type="bessel", rate_lowpass_order=2).as_dict()
+    inputs = cs.restore_inputs(rec, rec["channels"])
+    assert (inputs["rate_lowpass_type"], inputs["rate_lowpass_order"], inputs["rate_savgol_order"]) == ("bessel", 2, 2)
