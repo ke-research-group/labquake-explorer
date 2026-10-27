@@ -141,10 +141,13 @@ def test_typing_event_time_and_windows(slip_app, view):
     view.same_windows_var.set(True)
     view.on_same_windows_toggled()
     assert all(w == (1.25, 2.0) for w in view.fit_after)
-    # bad values are reported, nothing changes
+    # a before window that reaches past t_i is fitted and flagged; one past the after window is refused
     view.before_end_var.set("0.5")
     view.schedule(view.on_window_edited, now=True)
-    assert "before window must end" in view.status_var.get() and view.fit_before[0] == (-2.0, -0.5)
+    assert all(cs.FLAG_BEFORE_OVERLAP in s.flags for s in view.result.sensors)
+    view.before_end_var.set("1.5")
+    view.schedule(view.on_window_edited, now=True)
+    assert "before window must end" in view.status_var.get() and view.fit_before[0] == (-2.0, 0.5)
     view.before_end_var.set("abc")
     view.schedule(view.on_window_edited, now=True)
     assert "enter a number" in view.status_var.get()
@@ -208,26 +211,35 @@ def test_dragging_event_time_and_windows(slip_app, view):
     state = view.drag_to(ti + 0.010)
     assert state["t_i"] == pytest.approx(ti + 0.010)
     assert float(view.t_shift_var.get()) == pytest.approx((ti + 0.010) * 1e3, abs=1e-3)
-    assert view.handles["before_end"].get_xdata()[0] == pytest.approx(ti + 0.010 - 1.25)   # windows follow t_i
+    # t_i moves alone: the windows stay where they are
+    assert state["before"] == (-3.75, -1.25) and state["after"] == (1.25, 3.75)
+    assert [view.handles[k].get_xdata()[0] for k in ("before_start", "before_end", "after_start", "after_end")] == \
+        [-3.75, -1.25, 1.25, 3.75]
     view.end_drag()
     assert view.methods[3] == cs.METHOD_MANUAL and view.result.sensors[3].t_shift_s == pytest.approx(ti + 0.010)
+    assert view.fit_before[3] == (-3.75, -1.25) and view.fit_after[3] == (1.25, 3.75)
     # a window edge cannot cross t_i, the body slides as one
     ti = view.result.sensors[3].t_shift_s
-    view.begin_drag("before_end", ti - 1.25)
+    view.begin_drag("before_end", -1.25)
     state = view.drag_to(ti + 0.5)
-    assert state["before"][1] == 0.0
+    assert state["before"][1] == pytest.approx(ti)
     view.end_drag()
-    assert all(w[1] == 0.0 for w in view.fit_before)
-    view.begin_drag("after", ti + 2.0)
-    state = view.drag_to(ti + 2.0 - 5.0)
-    assert state["after"][0] == 0.0 and state["after"][1] == pytest.approx(3.75 - 1.25)
+    assert all(w[1] == pytest.approx(ti) for w in view.fit_before)
+    view.begin_drag("after", 2.0)
+    state = view.drag_to(2.0 - 5.0)
+    assert state["after"] == (pytest.approx(ti), pytest.approx(ti + 2.5))
     view.end_drag()
-    assert view.fit_after[0] == (0.0, pytest.approx(2.5))
+    assert view.fit_after[0] == (pytest.approx(ti), pytest.approx(ti + 2.5))
     # a click without a move changes nothing
     before = list(view.fit_before)
     view.begin_drag("before_start", -3.0)
     view.end_drag()
     assert view.fit_before == before
+    # t_i stays between the windows
+    view.begin_drag("t_i", ti)
+    assert view.drag_to(-2.0)["t_i"] == pytest.approx(view.fit_before[3][1])
+    assert view.drag_to(5.0)["t_i"] == pytest.approx(view.fit_after[3][0])
+    view.end_drag()
 
 
 def test_mouse_events_grab_handles_and_bodies(slip_app, view):
@@ -251,13 +263,13 @@ def test_mouse_events_grab_handles_and_bodies(slip_app, view):
     assert view._drag is None and view.methods[4] == cs.METHOD_MANUAL
     assert view.t_shift[4] == pytest.approx(ti + 0.5, abs=0.02)
     ti = view.t_shift[4]
-    view.on_press(mouse("button_press_event", ti + 1.25, dx_px=-3))
+    view.on_press(mouse("button_press_event", 1.25, dx_px=-3))
     assert view._drag["what"] == "after_start"
-    view.on_release(mouse("button_release_event", ti + 1.25))
-    view.on_press(mouse("button_press_event", ti - 2.0))
+    view.on_release(mouse("button_release_event", 1.25))
+    view.on_press(mouse("button_press_event", -2.0))
     assert view._drag["what"] == "before"
-    view.on_release(mouse("button_release_event", ti - 2.0))
-    view.on_press(mouse("button_press_event", ti + 0.6))   # between the windows: nothing
+    view.on_release(mouse("button_release_event", -2.0))
+    view.on_press(mouse("button_press_event", (ti + 1.25) / 2))   # between t_i and the after window: nothing
     assert view._drag is None
     view.toolbar.zoom()
     view.on_press(mouse("button_press_event", ti))
@@ -304,9 +316,9 @@ def test_real_mouse_drags_event_time_edges_and_windows(slip_app, view):
     assert view.methods[4] == cs.METHOD_MANUAL and view.t_shift[4] == pytest.approx(ti + 0.5, abs=0.05)
     assert all(w == (1.25, 3.0) for w in view.fit_after)
     ti = view.t_shift[4]
-    tk_drag(widget, *tk_xy(view, ti - 3.75, y), *tk_xy(view, ti - 3.0, y))
+    tk_drag(widget, *tk_xy(view, -3.75, y), *tk_xy(view, -3.0, y))
     assert all(w[0] == pytest.approx(-3.0, abs=0.05) and w[1] == -1.25 for w in view.fit_before)
-    tk_drag(widget, *tk_xy(view, ti + 2.0, y), *tk_xy(view, ti + 1.5, y))
+    tk_drag(widget, *tk_xy(view, 2.0, y), *tk_xy(view, 1.5, y))
     assert all(w == (pytest.approx(0.75, abs=0.05), pytest.approx(2.5, abs=0.05)) for w in view.fit_after)
     assert view.methods[4] == cs.METHOD_MANUAL and view.t_shift[4] == ti
 
@@ -321,7 +333,7 @@ def test_save_and_reopen_restore_everything(slip_app, view):
     assert view.save()
     rec = slip_app.data_manager.get_data(f"runs/[0]/events/[{EVENT}]/slip_analysis")
     assert rec is view.event["slip_analysis"]
-    assert rec["version"] == 1 and rec["field"] == "slip" and rec["unit"] == "um" and rec["same_windows"] is False
+    assert rec["version"] == 2 and rec["field"] == "slip" and rec["unit"] == "um" and rec["same_windows"] is False
     assert rec["time_method"][5] == "manual" and rec["fit_before_s"][5] == [-3.0, -1.0]
     assert rec["fit_before_s"][0] == [-3.75, -1.25] and rec["rate_snr"] == 3.0
     assert "matches the saved record" in view.status_var.get()

@@ -18,10 +18,11 @@ own event time ``t_i``, chosen by one of two methods:
 
 The coseismic slip of a sensor is the difference at ``t_i`` between two
 straight lines: one fitted to the slip over ``fit_before_s`` and one over
-``fit_after_s``, both windows given in seconds relative to ``t_i``.  The
-default windows come from the event's extraction window ``[start_s, end_s]``
-(``start_s < 0 < end_s``): before from 75 % to 25 % of the negative side,
-after from 25 % to 75 % of the positive side.  The noise of a sensor is the
+``fit_after_s``, both windows given in seconds relative to the event time, so
+that moving ``t_i`` leaves them in place.  The default windows come from the
+event's extraction window ``[start_s, end_s]`` (``start_s < 0 < end_s``):
+before from 75 % to 25 % of the negative side, after from 25 % to 75 % of the
+positive side.  The noise of a sensor is the
 standard deviation of the residuals of its before-window line, the noise level
 of one sample (the error bar the Slip Distribution view draws).
 
@@ -31,7 +32,9 @@ standard deviation of the smoothed rate in the before window) for automatic
 picks, ``no rate peak`` when the search found no finite rate,
 ``before window clipped`` / ``after window clipped`` when a window reaches past
 the record, ``before window has gaps`` / ``after window has gaps`` when NaN
-samples leave less than half of a window, and ``before fit invalid`` /
+samples leave less than half of a window, ``before window reaches t_i`` /
+``after window reaches t_i`` when ``t_i`` lies inside a window (the line then
+takes in the slip it should measure), and ``before fit invalid`` /
 ``after fit invalid`` when a window holds fewer than ``MIN_FIT_SAMPLES``
 samples.
 
@@ -47,7 +50,7 @@ from typing import Optional, Sequence
 import numpy as np
 from scipy.ndimage import uniform_filter1d
 
-RESULT_VERSION = 1
+RESULT_VERSION = 2                    # 2: fit windows relative to the event time (1: to t_i)
 METHOD_MAX_RATE = "max_rate"
 METHOD_MANUAL = "manual"
 METHODS = (METHOD_MAX_RATE, METHOD_MANUAL)
@@ -69,6 +72,8 @@ FLAG_BEFORE_INVALID = "before fit invalid"
 FLAG_AFTER_INVALID = "after fit invalid"
 FLAG_BEFORE_GAPS = "before window has gaps"
 FLAG_AFTER_GAPS = "after window has gaps"
+FLAG_BEFORE_OVERLAP = "before window reaches t_i"
+FLAG_AFTER_OVERLAP = "after window reaches t_i"
 GAP_FRACTION = 0.5                    # flag a window whose finite samples are fewer than this share
 
 
@@ -112,7 +117,7 @@ def slip_rate(time, data, smoothing_s: float = DEFAULT_RATE_SMOOTHING_S) -> np.n
 
 
 def default_fit_windows(start_s: float, end_s: float, fractions=FIT_FRACTIONS) -> tuple[tuple, tuple]:
-    """``(before, after)`` windows relative to ``t_i`` from an extraction window
+    """``(before, after)`` windows relative to the event time from an extraction window
     ``[start_s, end_s]``: before = (hi * start_s, lo * start_s), after =
     (lo * end_s, hi * end_s) with ``fractions = (lo, hi)``."""
     start_s, end_s = float(start_s), float(end_s)
@@ -181,13 +186,15 @@ def pick_max_rate(time, rate_row, t_ref: float, halfwidth_s: float) -> Optional[
 
 @dataclass(frozen=True)
 class LineFit:
-    """``y = slope * (t - t_i) + value`` over one window."""
+    """``y = slope * (t - t_i) + value`` over one window.  ``window`` and ``used``
+    are relative to the origin the window was given against (the event time in
+    :func:`analyze_slip`); :meth:`at` takes times relative to ``t_i``."""
     slope: float                     # unit/s
     value: float                     # the line at t_i
     n: int                           # samples used
     rms: float                       # residual standard deviation (ddof = 2)
-    window: tuple                    # requested window, relative to t_i
-    used: tuple                      # span of the samples used, relative to t_i
+    window: tuple                    # requested window, relative to the origin
+    used: tuple                      # span of the samples used, relative to the origin
     clipped: bool                    # the requested window reaches past the record
     valid: bool
     gaps: bool = False               # NaN samples leave less than GAP_FRACTION of the window
@@ -205,14 +212,16 @@ def window_mask(time, t_i: float, window, dt: Optional[float] = None) -> np.ndar
     return (t >= t_i + a - eps) & (t <= t_i + b + eps)
 
 
-def fit_line(time, values, t_i: float, window) -> LineFit:
-    """Least-squares line over ``[t_i + window[0], t_i + window[1]]``."""
+def fit_line(time, values, t_i: float, window, origin: Optional[float] = None) -> LineFit:
+    """Least-squares line over ``[origin + window[0], origin + window[1]]``
+    (``origin`` defaults to ``t_i``), as ``slope * (t - t_i) + value``."""
     a, b = check_window(window)
+    origin = float(t_i if origin is None else origin)
     t = np.asarray(time, dtype=float).ravel()
     y = np.asarray(values, dtype=float).ravel()
     dt = sampling_interval(t)
-    clipped = bool(t_i + a < t[0] - 0.5 * dt or t_i + b > t[-1] + 0.5 * dt)
-    in_window = window_mask(t, t_i, (a, b), dt)
+    clipped = bool(origin + a < t[0] - 0.5 * dt or origin + b > t[-1] + 0.5 * dt)
+    in_window = window_mask(t, origin, (a, b), dt)
     sel = in_window & np.isfinite(y)
     n = int(np.count_nonzero(sel))
     gaps = bool(n < GAP_FRACTION * np.count_nonzero(in_window))
@@ -224,7 +233,8 @@ def fit_line(time, values, t_i: float, window) -> LineFit:
     slope, value = np.polyfit(tt, yy, 1)
     resid = yy - (slope * tt + value)
     rms = float(np.sqrt(np.sum(resid ** 2) / (n - 2))) if n > 2 else nan
-    return LineFit(float(slope), float(value), n, rms, (a, b), (float(tt[0]), float(tt[-1])), clipped, True, gaps)
+    used = (float(tt[0] + t_i - origin), float(tt[-1] + t_i - origin))
+    return LineFit(float(slope), float(value), n, rms, (a, b), used, clipped, True, gaps)
 
 
 # ------------------------------------------------------------------ per sensor
@@ -343,7 +353,7 @@ def analyze_slip(time, data, event_time: float, start_s: float, end_s: float, *,
     ``manual`` sensor takes ``t_shift_s`` (relative to ``event_time``) and
     falls back to ``max_rate`` when that shift is missing or not finite.
     ``fit_before_s`` / ``fit_after_s`` are one pair for every sensor or one
-    pair per sensor, relative to ``t_i``; by default they follow from
+    pair per sensor, relative to ``event_time``; by default they follow from
     ``[start_s, end_s]`` (:func:`default_fit_windows`).  ``t_ref`` is searched
     within ``event_time +- reference_halfwidth_s``.
     """
@@ -406,9 +416,9 @@ def analyze_slip(time, data, event_time: float, start_s: float, end_s: float, *,
                 t_i = pick.time
                 if pick.at_edge:
                     flags.append(FLAG_EDGE)
-        before = fit_line(t, d[i], t_i, befores[i])
-        after = fit_line(t, d[i], t_i, afters[i])
-        in_before = window_mask(t, t_i, befores[i]) & np.isfinite(rate[i])
+        before = fit_line(t, d[i], t_i, befores[i], event_time)
+        after = fit_line(t, d[i], t_i, afters[i], event_time)
+        in_before = window_mask(t, event_time, befores[i]) & np.isfinite(rate[i])
         rate_noise = float(np.std(rate[i][in_before])) if np.count_nonzero(in_before) >= MIN_FIT_SAMPLES else float("nan")
         peak_rate = float(np.interp(t_i, t, rate[i])) if np.all(np.isfinite(rate[i])) else (
             pick.peak_rate if pick is not None else float("nan"))
@@ -418,6 +428,10 @@ def analyze_slip(time, data, event_time: float, start_s: float, end_s: float, *,
             flags.append(FLAG_BEFORE_CLIPPED)
         if after.clipped:
             flags.append(FLAG_AFTER_CLIPPED)
+        if event_time + befores[i][1] > t_i:
+            flags.append(FLAG_BEFORE_OVERLAP)
+        if event_time + afters[i][0] < t_i:
+            flags.append(FLAG_AFTER_OVERLAP)
         if before.gaps:
             flags.append(FLAG_BEFORE_GAPS)
         if after.gaps:
@@ -455,6 +469,10 @@ def restore_inputs(record, channels: Sequence[str]) -> Optional[dict]:
         after = np.asarray(record["fit_after_s"], dtype=float).reshape(n, 2)
         if len(methods) != n or len(shifts) != n or any(m not in METHODS for m in methods):
             return None
+        if int(np.asarray(record.get("version", 1)).ravel()[0]) < 2:
+            # version 1 gave the windows relative to t_i: move them to the event time
+            shift = np.nan_to_num(np.asarray(shifts, dtype=float))[:, None]
+            before, after = before + shift, after + shift
         out = {
             "methods": methods,
             "t_shift_s": shifts,

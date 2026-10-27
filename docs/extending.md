@@ -142,7 +142,7 @@ them and `delta_x`/`-delta_y` from version 3. "Apply to All Events" turns
 the current picks into times relative to the event, places them on every
 event of the run and saves each result.
 
-### `slip_analysis` (SlipDistributionView, version 1)
+### `slip_analysis` (SlipDistributionView, version 2)
 
 Coseismic slip of every sensor of a slip channel array (`field`, normally
 `slip`), each sensor with its own event time `t_i`
@@ -152,21 +152,21 @@ entry per sensor, in the order of `channels`, except `patch_x_mm`
 
 | key | meaning |
 |---|---|
-| `version` | 1 |
+| `version` | 2 (version 1 gave the fit windows relative to `t_i`; they are moved to the event time when read) |
 | `field`, `unit`, `channels`, `x_mm` | the channel array analysed, its unit (um), its rows and the sensor positions along the fault |
 | `event_time`, `start_s`, `end_s` | the event time and the extraction window the default fit windows came from |
 | `time_method` | `max_rate` (largest smoothed slip rate) or `manual` (set by hand) |
 | `t_shift_s` | `t_i - event_time` |
 | `rate_smoothing_s`, `search_halfwidth_s`, `rate_snr`, `reference_halfwidth_s` | `max_rate` settings: boxcar on the slip rate (default 0.0025; NaN samples are left out of each mean), search half-width around the reference time (0.05), flag threshold in units of the rate noise (5), half-width around the event time in which the reference time is found (0.5) |
 | `t_ref_shift_s` | reference time minus event time: the peak of the mean slip rate of all sensors within `event_time +- reference_halfwidth_s`; each sensor's `max_rate` pick is searched within `search_halfwidth_s` of it |
-| `fit_before_s`, `fit_after_s` | `[start, end]` of the two fit windows, relative to `t_i`; defaults 75 %..25 % of the negative side and 25 %..75 % of the positive side of the extraction window |
+| `fit_before_s`, `fit_after_s` | `[start, end]` of the two fit windows, relative to `event_time` (moving `t_i` leaves them in place); defaults 75 %..25 % of the negative side and 25 %..75 % of the positive side of the extraction window |
 | `same_windows` | the view applies a window edit to every sensor |
 | `before_line`, `after_line` | `[slope (um/s), value at t_i (um)]` of the two least-squares lines |
 | `coseismic_slip_um` | after-line minus before-line at `t_i` |
 | `noise_um` | standard deviation of the residuals of the before-window line (two degrees of freedom removed): the sensor's per-sample noise, used as the error bar of the slip |
 | `peak_rate_um_s` | smoothed slip rate at `t_i` |
 | `rate_noise_um_s` | standard deviation of the smoothed slip rate in the before window; a `max_rate` peak below `rate_snr` times this is flagged `weak rate peak` |
-| `flags` | one text per sensor, `"; "`-joined: `pick at search edge`, `weak rate peak`, `no rate peak`, `before/after window clipped` (the window runs past the data), `before/after window has gaps` (less than half of its samples are finite), `before/after fit invalid` |
+| `flags` | one text per sensor, `"; "`-joined: `pick at search edge`, `weak rate peak`, `no rate peak`, `before/after window clipped` (the window runs past the data), `before/after window has gaps` (less than half of its samples are finite), `before/after window reaches t_i` (`t_i` lies inside the window), `before/after fit invalid` |
 | `patch_x_mm` | the bare PMMA patch edges drawn, `[from, to]` (NaN when none). An event opens with the experiment's `fault['patch_x_mm']` (see Run layout), else with this copy; edges typed in the view and not saved to the experiment stay as it moves between events. The copy counts towards "differs from the saved record" only while the experiment has no edges |
 | `profile` | slip profile fit (`labquake_explorer/analysis/slip_profile.py`): `model` (`quadratic`, `eaz` or `eaz_asymmetric`), `params`, `valid`, `reason`, `n` (the sensors fitted: those in `use` with a finite slip and, when weighted, a positive `sigma`), `weighted`, `r2`, `rms_um`, `tips_mm` (where the fitted profile reaches zero), `peak_x_mm`, `peak_um`, `at_bounds`, `unresolved` (the parameters the sensors do not pin down, and `tips` when a rupture edge is only bracketed), `ranges` (name to `[lo, hi]`, the values that fit equally well where known, NaN for an open end; `tip_minus`/`tip_plus` are the brackets of free edges, and an EAZ `D` that moves with a free `lambda` has a range without being listed), and `use` (the sensors chosen) |
 | `front` | rupture-front fit of `t_shift_s` (`t_i - event_time`) against `x`: `mode` (`single` or `bilateral`, below), `valid`, `reason`, `split_x_mm` and `t0_s` (bilateral: the apex and its time relative to `event_time`; NaN when there is none), `segments` (`x_from`, `x_to`, `n`, `slope_s_per_mm`, `intercept_s` at x = 0 relative to `event_time`, `velocity_m_s` positive towards +x and infinite for a flat line, `r2`, `resolved` false when the front crosses the segment within one sample, and `min_speed_m_s`, the speed of crossing it in one sample: the lower bound of an unresolved one), `use` and `use_auto` (while true, `use` follows the pick flags: the sensors whose `t_i` is doubtful, flagged `pick at search edge`, `weak rate peak` or `no rate peak`, are left out) |

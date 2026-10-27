@@ -10,9 +10,11 @@ of two lines fitted before and after it (see
 The trace panel shows the selected sensor: its slip, the two fit windows, the
 lines extrapolated to ``t_i`` and, on the right axis, the smoothed slip rate
 used for the automatic pick.  ``t_i`` and the four window edges can be dragged
-(or a window by its body); dragging ``t_i`` makes that sensor manual.  The same
-values can be typed in the entries.  With "same windows for all sensors" a
-window edit applies to every sensor, relative to each one's ``t_i``.
+(or a window by its body); dragging ``t_i`` moves it alone, between the
+windows, and makes that sensor manual.  The windows are times relative to the
+event time, so they stay put when ``t_i`` moves.  The same values can be typed
+in the entries.  With "same windows for all sensors" a window edit applies to
+every sensor.
 Everything recomputes as soon as a value changes.
 
 The two panels on the right show the result along the fault: the coseismic
@@ -345,7 +347,7 @@ class SlipDistributionView(EventView):
         ttk.Label(frame, text="Fit after (s):").grid(row=4, column=0, padx=4, pady=2, sticky="e")
         self._entry_only(frame, self.after_start_var, 4, 1, "after start", self.on_window_edited)
         self._entry_only(frame, self.after_end_var, 4, 2, "after end", self.on_window_edited)
-        ttk.Label(frame, text="windows are relative to t_i", foreground="#606060").grid(
+        ttk.Label(frame, text="windows are relative to the event time", foreground="#606060").grid(
             row=5, column=0, columnspan=3, padx=4, sticky="w")
         self.same_windows_var = tk.BooleanVar(master=self, value=True)
         ttk.Checkbutton(frame, text="same windows for all sensors", variable=self.same_windows_var,
@@ -867,10 +869,8 @@ class SlipDistributionView(EventView):
 
     @staticmethod
     def check_sides(before, after) -> None:
-        if before[1] > 0.0:
-            raise ValueError("the before window must end at or before t_i (end <= 0)")
-        if after[0] < 0.0:
-            raise ValueError("the after window must start at or after t_i (start >= 0)")
+        if before[1] > after[0]:
+            raise ValueError("the before window must end at or before the after window starts")
 
     def set_windows(self, before, after) -> None:
         """Windows of the selected sensor, or of every sensor with "same windows"."""
@@ -1364,17 +1364,17 @@ class SlipDistributionView(EventView):
         ti = s.t_shift_s
         (b0, b1), (a0, a1) = s.fit_before_s, s.fit_after_s
         ax.plot(t_rel, y, color="#4d4d4d", lw=0.8, label=s.channel, zorder=2)
-        self.spans["before"] = ax.axvspan(ti + b0, ti + b1, color=BEFORE_COLOR, alpha=0.12, zorder=0)
-        self.spans["after"] = ax.axvspan(ti + a0, ti + a1, color=AFTER_COLOR, alpha=0.12, zorder=0)
+        self.spans["before"] = ax.axvspan(b0, b1, color=BEFORE_COLOR, alpha=0.12, zorder=0)
+        self.spans["after"] = ax.axvspan(a0, a1, color=AFTER_COLOR, alpha=0.12, zorder=0)
         if s.before.valid:
-            tb = np.linspace(ti + b0, ti, 50)
+            tb = np.linspace(min(b0, ti), ti, 50)
             ax.plot(tb, s.before.at(tb - ti), "--", color=BEFORE_COLOR, lw=1.4, label="fit before", zorder=3)
         if s.after.valid:
-            ta = np.linspace(ti, ti + a1, 50)
+            ta = np.linspace(ti, max(a1, ti), 50)
             ax.plot(ta, s.after.at(ta - ti), "--", color=AFTER_COLOR, lw=1.4, label="fit after", zorder=3)
         self.handles["t_i"] = ax.axvline(ti, color=TI_COLOR, lw=1.8, label="t_i", zorder=5)
-        for name, x, color in (("before_start", ti + b0, BEFORE_COLOR), ("before_end", ti + b1, BEFORE_COLOR),
-                               ("after_start", ti + a0, AFTER_COLOR), ("after_end", ti + a1, AFTER_COLOR)):
+        for name, x, color in (("before_start", b0, BEFORE_COLOR), ("before_end", b1, BEFORE_COLOR),
+                               ("after_start", a0, AFTER_COLOR), ("after_end", a1, AFTER_COLOR)):
             self.handles[name] = ax.axvline(x, color=color, lw=1.2, label="_" + name, zorder=5)
         if s.before.valid and s.after.valid:
             ax.plot([ti, ti], [s.before.value, s.after.value], "-", color="k", lw=2.2, zorder=6,
@@ -1495,10 +1495,9 @@ class SlipDistributionView(EventView):
             self.begin_drag(name, x_data)
             return
         s = self.current()
-        x = x_data - s.t_shift_s
-        if s.fit_before_s[0] <= x <= s.fit_before_s[1]:
+        if s.fit_before_s[0] <= x_data <= s.fit_before_s[1]:
             self.begin_drag("before", x_data)
-        elif s.fit_after_s[0] <= x <= s.fit_after_s[1]:
+        elif s.fit_after_s[0] <= x_data <= s.fit_after_s[1]:
             self.begin_drag("after", x_data)
 
     def begin_drag(self, what: str, x: float) -> None:
@@ -1513,28 +1512,29 @@ class SlipDistributionView(EventView):
 
     def drag_to(self, x: float) -> dict:
         """Move the grabbed handle (or window) to ``x`` (s from the event time);
-        the entries and the handles follow, the analysis waits for the release."""
+        the entries and the handles follow, the analysis waits for the release.
+        ``t_i`` moves alone and stays between the windows; the windows stay off
+        this sensor's ``t_i``."""
         d = self._drag
         dt = cs.sampling_interval(self.time)
         ti = d["t_i"]
         (b0, b1), (a0, a1) = d["before"], d["after"]
         what = d["what"]
-        rel = x - ti
         if what == "t_i":
-            ti = x
+            ti = min(max(x, b1), a0)
         elif what == "before_start":
-            b0 = min(rel, b1 - dt)
+            b0 = min(x, b1 - dt)
         elif what == "before_end":
-            b1 = min(max(rel, b0 + dt), 0.0)
+            b1 = min(max(x, b0 + dt), ti)
         elif what == "after_start":
-            a0 = max(min(rel, a1 - dt), 0.0)
+            a0 = max(min(x, a1 - dt), ti)
         elif what == "after_end":
-            a1 = max(rel, a0 + dt)
+            a1 = max(x, a0 + dt)
         elif what == "before":
-            shift = min(x - d["x0"], -b1)
+            shift = min(x - d["x0"], ti - b1)
             b0, b1 = b0 + shift, b1 + shift
         elif what == "after":
-            shift = max(x - d["x0"], -a0)
+            shift = max(x - d["x0"], ti - a0)
             a0, a1 = a0 + shift, a1 + shift
         state = {"t_i": ti, "before": (b0, b1), "after": (a0, a1)}
         d["state"] = state
@@ -1548,11 +1548,10 @@ class SlipDistributionView(EventView):
             self._show(self.after_end_var, _text(round(a1, 6)))
         finally:
             self._syncing = False
-        positions = {"t_i": ti, "before_start": ti + b0, "before_end": ti + b1,
-                     "after_start": ti + a0, "after_end": ti + a1}
+        positions = {"t_i": ti, "before_start": b0, "before_end": b1, "after_start": a0, "after_end": a1}
         for name, line in self.handles.items():
             line.set_xdata([positions[name], positions[name]])
-        for name, (lo, hi) in (("before", (ti + b0, ti + b1)), ("after", (ti + a0, ti + a1))):
+        for name, (lo, hi) in (("before", (b0, b1)), ("after", (a0, a1))):
             patch = self.spans.get(name)
             if patch is not None:
                 patch.set_x(lo)

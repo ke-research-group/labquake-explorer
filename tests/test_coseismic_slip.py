@@ -218,3 +218,31 @@ def test_record_is_json_like_and_round_trips(tmp_path):
     assert cs.restore_inputs(loaded, rec["channels"][:-1]) is None
     assert cs.restore_inputs({"channels": rec["channels"]}, rec["channels"]) is None
     assert cs.restore_inputs(None, rec["channels"]) is None
+
+
+def test_windows_are_relative_to_the_event_time():
+    event, truth = make_event()
+    base = run(event, fit_before_s=(-2.0, -0.5), fit_after_s=(0.5, 2.0))
+    moved = run(event, methods="manual", t_shift_s=[s.t_shift_s + 0.1 for s in base.sensors],
+                fit_before_s=(-2.0, -0.5), fit_after_s=(0.5, 2.0))
+    for a, b in zip(base.sensors, moved.sensors):
+        assert b.fit_before_s == a.fit_before_s == (-2.0, -0.5)       # the windows stay put
+        assert b.before.n == a.before.n and b.before.used == a.before.used
+        assert b.before.slope == pytest.approx(a.before.slope)          # the same lines, evaluated at the new t_i
+        assert b.before.value == pytest.approx(a.before.value + 0.1 * a.before.slope)
+        assert b.after.value == pytest.approx(a.after.value + 0.1 * a.after.slope)
+    # a window that reaches past t_i is fitted and flagged
+    late = run(event, fit_before_s=(-2.0, 1.0), fit_after_s=(-0.5, 2.0))
+    assert all(cs.FLAG_BEFORE_OVERLAP in s.flags and cs.FLAG_AFTER_OVERLAP in s.flags for s in late.sensors)
+    assert not any(cs.FLAG_BEFORE_OVERLAP in s.flags for s in base.sensors)
+
+
+def test_version_1_records_had_windows_relative_to_t_i():
+    event, truth = make_event()
+    rec = run(event, methods="manual", t_shift_s=0.02).as_dict()
+    rec["version"] = 1
+    rec["fit_before_s"] = [[-3.75, -1.25]] * 8          # relative to t_i, as version 1 stored them
+    inputs = cs.restore_inputs(rec, rec["channels"])
+    assert all(w == pytest.approx((-3.73, -1.23)) for w in inputs["fit_before_s"])
+    rec["version"] = 2
+    assert cs.restore_inputs(rec, rec["channels"])["fit_before_s"][0] == (-3.75, -1.25)
