@@ -74,7 +74,7 @@ import numpy as np
 from scipy.optimize import least_squares
 
 MODELS = ("quadratic", "eaz", "eaz_asymmetric")
-MODEL_LABELS = {"quadratic": "quadratic", "eaz": "EAZ", "eaz_asymmetric": "EAZ-asymmetric"}
+MODEL_LABELS = {"quadratic": "Quadratic", "eaz": "EAZ", "eaz_asymmetric": "EAZ-asymmetric"}
 PARAMETERS = {
     "quadratic": ("c0", "c1", "c2"),
     "eaz": ("D", "xc", "a", "lambda"),
