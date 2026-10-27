@@ -288,6 +288,7 @@ class SlipDistributionView(EventView):
         self._pending = None
         self._syncing = False
         self._shown: dict = {}         # entry variable name -> the text the view last put there
+        self._stale = False            # the last recompute failed: the result lags the inputs
         self.profile_fit: Optional[sprof.ProfileFit] = None
         self.front_fit: Optional[sprof.FrontFit] = None
         self.profile_use: list = []
@@ -765,10 +766,12 @@ class SlipDistributionView(EventView):
                                      t_shift_s=self.t_shift, fit_before_s=self.fit_before,
                                      fit_after_s=self.fit_after, **settings)
         except ValueError as e:
-            self.status_var.set(str(e))
+            self.status_var.set(f"not recomputed: {e}")      # the plot still shows the last result
+            self._stale = True
             return False
         for var in self.settings_vars():
             self._shown[str(var)] = var.get()
+        self._stale = False
         self.result = result
         self.methods = [s.method for s in result.sensors]
         self.t_shift = [s.t_shift_s for s in result.sensors]
@@ -918,14 +921,13 @@ class SlipDistributionView(EventView):
     def on_same_windows_toggled(self) -> None:
         self.flush_pending()
         if self.same_windows_var.get() and self.result is not None:
-            s = self.current()
-            self.set_windows(s.fit_before_s, s.fit_after_s)
+            self.set_windows(self.fit_before[self.sensor], self.fit_after[self.sensor])
         else:
             self.update_status()
 
     def on_settings_edited(self) -> None:
-        # with no result (a bad value stopped the last recompute) any value is worth a try
-        if self.result is None or self._edited(*self.settings_vars()):
+        # after a recompute that failed (no result, or one that lags the inputs) any value is worth a try
+        if self.result is None or self._stale or self._edited(*self.settings_vars()):
             self.recompute()
         else:
             self.update_status()
@@ -1536,9 +1538,12 @@ class SlipDistributionView(EventView):
             self.begin_drag("after", x_data)
 
     def begin_drag(self, what: str, x: float) -> None:
-        s = self.current()
-        self._drag = {"what": what, "x0": float(x), "t_i": s.t_shift_s,
-                      "before": tuple(s.fit_before_s), "after": tuple(s.fit_after_s), "moved": False}
+        """Start from the view's own values, the ones the handles show: after a
+        recompute that failed they differ from the last result's."""
+        i = self.sensor
+        ti = self.t_shift[i] if math.isfinite(self.t_shift[i]) else self.current().t_shift_s
+        self._drag = {"what": what, "x0": float(x), "t_i": float(ti),
+                      "before": tuple(self.fit_before[i]), "after": tuple(self.fit_after[i]), "moved": False}
 
     def on_motion(self, event) -> None:
         if self._drag is None or not self._in_trace(event):

@@ -865,7 +865,7 @@ def test_status_names_an_entry_that_was_not_applied(slip_app, view):
     assert view.save()
     view.smoothing_var.set("-1")
     view.schedule(view.on_settings_edited, now=True)
-    assert view.status_var.get() == "the rate filter window must be >= 0"
+    assert view.status_var.get() == "not recomputed: the rate filter window must be >= 0"
     for change in (lambda: (view.weighted_var.set(True), view.on_profile_settings()),
                    lambda: (view.weighted_var.set(False), view.on_profile_settings()),
                    lambda: view.step_sensor(+1)):
@@ -1010,3 +1010,19 @@ def test_rate_filter_choice_is_applied_and_saved(slip_app, view):
         assert "matches the saved record" in v2.status_var.get()
     finally:
         v2.on_close()
+
+
+def test_a_drag_starts_from_the_windows_shown_after_a_failed_recompute(slip_app, view):
+    view.search_var.set("abc")                            # an entry that cannot be applied
+    view.begin_drag("after_start", 1.25)
+    view.drag_to(2.0)
+    view.end_drag()
+    assert view.status_var.get().startswith("not recomputed: search half-width")
+    assert view.fit_after[0] == (2.0, 3.75) and view.result.sensors[0].fit_after_s == (1.25, 3.75)
+    view.begin_drag("after_end", 3.75)                    # the other edge keeps the start just dragged
+    view.drag_to(4.5)
+    view.end_drag()
+    assert view.fit_after[0] == (2.0, 4.5) and view.handles["after_start"].get_xdata()[0] == 2.0
+    view.search_var.set("50")                             # fixed: everything applies
+    view.schedule(view.on_settings_edited, now=True)
+    assert view.result.sensors[0].fit_after_s == (2.0, 4.5)
