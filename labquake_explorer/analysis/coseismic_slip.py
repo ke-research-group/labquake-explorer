@@ -5,10 +5,12 @@ pair of fit windows for every sensor cuts the coseismic step short far from
 the nucleation and mixes afterslip in near it, so every sensor ``i`` gets its
 own event time ``t_i``, chosen by one of two methods:
 
-* ``max_rate``: the time of the largest smoothed slip rate.  The rate is the
-  time derivative of the slip, smoothed by a centred boxcar of
-  ``rate_smoothing_s`` (NaN samples are left out of the average, so a bad
-  sample only blanks its neighbourhood).  A reference time ``t_ref`` comes
+* ``max_rate``: the time of the largest filtered slip rate.  The rate is the
+  time derivative of the slip, filtered by ``rate_filter`` (:func:`slip_rate`):
+  ``lowpass``, a zero-phase Butterworth low-pass of the slip at
+  ``rate_cutoff_hz`` before the derivative (the default); ``savgol``, the
+  Savitzky-Golay derivative over ``rate_smoothing_s``; ``boxcar``, the
+  derivative averaged over ``rate_smoothing_s``.  A reference time ``t_ref`` comes
   first, at the peak of the mean rate of all sensors within
   ``event_time +- reference_halfwidth_s`` (narrow enough to keep the
   neighbouring events out); each sensor is then searched within
@@ -49,13 +51,20 @@ from typing import Optional, Sequence
 
 import numpy as np
 from scipy.ndimage import uniform_filter1d
+from scipy.signal import butter, savgol_filter, sosfiltfilt
 
 RESULT_VERSION = 2                    # 2: fit windows relative to the event time (1: to t_i)
 METHOD_MAX_RATE = "max_rate"
 METHOD_MANUAL = "manual"
 METHODS = (METHOD_MAX_RATE, METHOD_MANUAL)
 
-DEFAULT_RATE_SMOOTHING_S = 0.0025     # boxcar on the slip rate
+RATE_FILTERS = ("lowpass", "savgol", "boxcar")
+DEFAULT_RATE_FILTER = "lowpass"
+DEFAULT_RATE_CUTOFF_HZ = 50.0         # lowpass: corner frequency of the slip's low-pass
+DEFAULT_RATE_SMOOTHING_S = 0.010      # savgol and boxcar: the window
+LOWPASS_ORDER = 4                     # of the Butterworth, run forwards and backwards
+SAVGOL_ORDER = 2
+LEGACY_RATE_FILTER = "boxcar"         # records without rate_filter were made with it
 DEFAULT_SEARCH_HALFWIDTH_S = 0.05     # each sensor is searched within t_ref +- this
 DEFAULT_RATE_SNR = 5.0                # flag a pick whose peak rate is below this x the rate noise
 DEFAULT_REFERENCE_HALFWIDTH_S = 0.5   # t_ref is searched within event_time +- this
@@ -96,14 +105,54 @@ def smoothing_samples(smoothing_s: float, dt: float) -> int:
     return k if k % 2 == 1 else k + 1
 
 
-def slip_rate(time, data, smoothing_s: float = DEFAULT_RATE_SMOOTHING_S) -> np.ndarray:
-    """Time derivative of ``data`` (one row per sensor, or one row), smoothed by
-    a centred boxcar of ``smoothing_s``; same shape as ``data``, unit/s."""
+def _fill_gaps(t: np.ndarray, d: np.ndarray) -> np.ndarray:
+    """``d`` with its NaN samples interpolated linearly along each row (a row
+    without two finite samples stays as it is)."""
+    out = np.array(d, dtype=float, copy=True)
+    for row in out.reshape(-1, t.size):
+        finite = np.isfinite(row)
+        if 2 <= np.count_nonzero(finite) < row.size:
+            row[~finite] = np.interp(t[~finite], t[finite], row[finite])
+    return out
+
+
+def slip_rate(time, data, smoothing_s: float = DEFAULT_RATE_SMOOTHING_S, rate_filter: str = "boxcar",
+              cutoff_hz: float = DEFAULT_RATE_CUTOFF_HZ) -> np.ndarray:
+    """Filtered time derivative of ``data`` (one row per sensor, or one row);
+    same shape as ``data``, unit/s.
+
+    ``rate_filter``: ``boxcar`` averages the derivative over ``smoothing_s``
+    (NaN samples left out of each mean, so a bad sample only blanks its
+    neighbourhood); ``savgol`` is the Savitzky-Golay derivative (order 2) over
+    ``smoothing_s``; ``lowpass`` filters the slip with a zero-phase Butterworth
+    of order 4 at ``cutoff_hz`` and then differentiates.  The last two bridge
+    NaN gaps for the filter and blank them again afterwards."""
     t = np.asarray(time, dtype=float).ravel()
     d = np.asarray(data, dtype=float)
     if d.shape[-1] != t.size:
         raise ValueError("data and time must have the same number of samples")
     dt = sampling_interval(t)
+    if rate_filter not in RATE_FILTERS:
+        raise ValueError(f"unknown rate filter {rate_filter!r}; use one of {RATE_FILTERS}")
+    if rate_filter == "lowpass":
+        cutoff_hz = float(cutoff_hz)
+        nyquist = 0.5 / dt
+        if not (math.isfinite(cutoff_hz) and 0 < cutoff_hz < nyquist):
+            raise ValueError(f"the cutoff must be between 0 and half the sampling rate ({nyquist:g} Hz)")
+        sos = butter(LOWPASS_ORDER, cutoff_hz, fs=1.0 / dt, output="sos")
+        filled = _fill_gaps(t, d)
+        finite = np.isfinite(filled).all(axis=-1, keepdims=True)
+        smooth = sosfiltfilt(sos, np.where(finite, filled, 0.0), axis=-1) if t.size > 3 * (2 * LOWPASS_ORDER + 1) \
+            else filled
+        rate = np.gradient(np.where(finite, smooth, np.nan), t, axis=-1)
+        return np.where(np.isfinite(d), rate, np.nan)
+    if rate_filter == "savgol":
+        k = max(smoothing_samples(smoothing_s, dt), SAVGOL_ORDER + 3)
+        if k > t.size:
+            return np.gradient(d, t, axis=-1)
+        filled = _fill_gaps(t, d)
+        rate = savgol_filter(filled, k, SAVGOL_ORDER, deriv=1, delta=dt, axis=-1, mode="interp")
+        return np.where(np.isfinite(d), rate, np.nan)
     rate = np.gradient(d, t, axis=-1)
     k = smoothing_samples(smoothing_s, dt)
     if k > 1:
@@ -282,6 +331,8 @@ class SlipAnalysis:
     sensors: list
     time: np.ndarray = field(repr=False, default=None)
     rate: np.ndarray = field(repr=False, default=None)
+    rate_filter: str = DEFAULT_RATE_FILTER
+    rate_cutoff_hz: float = DEFAULT_RATE_CUTOFF_HZ
 
     @property
     def t_i(self) -> np.ndarray:
@@ -297,6 +348,8 @@ class SlipAnalysis:
             "end_s": float(self.end_s),
             "channels": [x.channel for x in s],
             "x_mm": [float(x.x_mm) for x in s],
+            "rate_filter": self.rate_filter,
+            "rate_cutoff_hz": float(self.rate_cutoff_hz),
             "rate_smoothing_s": float(self.rate_smoothing_s),
             "search_halfwidth_s": float(self.search_halfwidth_s),
             "rate_snr": float(self.rate_snr),
@@ -342,6 +395,8 @@ def analyze_slip(time, data, event_time: float, start_s: float, end_s: float, *,
                  channels: Optional[Sequence[str]] = None, x_mm: Optional[Sequence[float]] = None,
                  methods: Optional[Sequence[str]] = None, t_shift_s: Optional[Sequence[float]] = None,
                  fit_before_s=None, fit_after_s=None,
+                 rate_filter: str = DEFAULT_RATE_FILTER,
+                 rate_cutoff_hz: float = DEFAULT_RATE_CUTOFF_HZ,
                  rate_smoothing_s: float = DEFAULT_RATE_SMOOTHING_S,
                  search_halfwidth_s: float = DEFAULT_SEARCH_HALFWIDTH_S,
                  rate_snr: float = DEFAULT_RATE_SNR,
@@ -375,7 +430,9 @@ def analyze_slip(time, data, event_time: float, start_s: float, end_s: float, *,
     if not (math.isfinite(reference_halfwidth_s) and reference_halfwidth_s > 0):
         raise ValueError("the reference half-width must be > 0")
     if not (math.isfinite(rate_smoothing_s) and rate_smoothing_s >= 0):
-        raise ValueError("rate smoothing must be >= 0")
+        raise ValueError("the rate filter window must be >= 0")
+    rate_filter = str(rate_filter)
+    rate_cutoff_hz = float(rate_cutoff_hz)
     if not (math.isfinite(search_halfwidth_s) and search_halfwidth_s > 0):
         raise ValueError("the search half-width must be > 0")
     if not math.isfinite(rate_snr) or rate_snr < 0:
@@ -393,7 +450,7 @@ def analyze_slip(time, data, event_time: float, start_s: float, end_s: float, *,
     befores = [check_window(w, "fit_before_s") for w in _per_sensor(fit_before_s, n_ch, "fit_before_s", default_before)]
     afters = [check_window(w, "fit_after_s") for w in _per_sensor(fit_after_s, n_ch, "fit_after_s", default_after)]
 
-    rate = slip_rate(t, d, rate_smoothing_s)
+    rate = slip_rate(t, d, rate_smoothing_s, rate_filter, rate_cutoff_hz)
     t_ref = reference_time(t, rate, event_time, reference_halfwidth_s)
     sensors = []
     for i in range(n_ch):
@@ -443,16 +500,24 @@ def analyze_slip(time, data, event_time: float, start_s: float, end_s: float, *,
         sensors.append(SensorSlip(str(channels[i]), float(x_mm[i]), method, float(t_i - event_time),
                                   before, after, peak_rate, rate_noise, flags))
     return SlipAnalysis(event_time, float(start_s), float(end_s), rate_smoothing_s, search_halfwidth_s,
-                        rate_snr, reference_halfwidth_s, float(t_ref), sensors, time=t, rate=rate)
+                        rate_snr, reference_halfwidth_s, float(t_ref), sensors, time=t, rate=rate,
+                        rate_filter=rate_filter, rate_cutoff_hz=rate_cutoff_hz)
 
 
 # --------------------------------------------------------------- saved records
+def _text_value(value) -> str:
+    """A saved text, also when an HDF5 round trip made it bytes or a 0-d array."""
+    value = np.asarray(value).ravel()[0] if np.ndim(value) else value
+    return value.decode() if isinstance(value, bytes) else str(value)
+
+
 def restore_inputs(record, channels: Sequence[str]) -> Optional[dict]:
     """The analysis inputs of a saved ``slip_analysis`` record for the given
     channels, or None when the record does not match them or is unreadable.
 
     Keys: ``methods``, ``t_shift_s``, ``fit_before_s``, ``fit_after_s``,
-    ``rate_smoothing_s``, ``search_halfwidth_s``, ``rate_snr``,
+    ``rate_filter`` (``boxcar`` for records made before there was a choice),
+    ``rate_cutoff_hz``, ``rate_smoothing_s``, ``search_halfwidth_s``, ``rate_snr``,
     ``reference_halfwidth_s``.  Arrays that
     an HDF5 round trip turned into numpy arrays are accepted.
     """
@@ -478,6 +543,8 @@ def restore_inputs(record, channels: Sequence[str]) -> Optional[dict]:
             "t_shift_s": shifts,
             "fit_before_s": [tuple(r) for r in before.tolist()],
             "fit_after_s": [tuple(r) for r in after.tolist()],
+            "rate_filter": _text_value(record.get("rate_filter", LEGACY_RATE_FILTER)),
+            "rate_cutoff_hz": float(record.get("rate_cutoff_hz", DEFAULT_RATE_CUTOFF_HZ)),
             "rate_smoothing_s": float(record.get("rate_smoothing_s", DEFAULT_RATE_SMOOTHING_S)),
             "search_halfwidth_s": float(record.get("search_halfwidth_s", DEFAULT_SEARCH_HALFWIDTH_S)),
             "rate_snr": float(record.get("rate_snr", DEFAULT_RATE_SNR)),
@@ -485,6 +552,8 @@ def restore_inputs(record, channels: Sequence[str]) -> Optional[dict]:
         }
         for w in out["fit_before_s"] + out["fit_after_s"]:
             check_window(w)
+        if out["rate_filter"] not in RATE_FILTERS:
+            return None
         return out
     except (KeyError, TypeError, ValueError, AttributeError):
         return None
@@ -492,6 +561,7 @@ def restore_inputs(record, channels: Sequence[str]) -> Optional[dict]:
 
 __all__ = [
     "RESULT_VERSION", "METHODS", "METHOD_MAX_RATE", "METHOD_MANUAL",
+    "RATE_FILTERS", "DEFAULT_RATE_FILTER", "DEFAULT_RATE_CUTOFF_HZ",
     "DEFAULT_RATE_SMOOTHING_S", "DEFAULT_SEARCH_HALFWIDTH_S", "DEFAULT_RATE_SNR", "DEFAULT_REFERENCE_HALFWIDTH_S",
     "FIT_FRACTIONS", "MIN_FIT_SAMPLES", "sampling_interval", "slip_rate", "default_fit_windows",
     "check_window", "window_mask", "reference_time", "RatePick", "pick_max_rate", "LineFit", "fit_line", "SensorSlip",

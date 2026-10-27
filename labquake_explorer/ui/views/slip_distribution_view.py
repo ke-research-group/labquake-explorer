@@ -8,7 +8,7 @@ of two lines fitted before and after it (see
 :mod:`labquake_explorer.analysis.coseismic_slip`).
 
 The trace panel shows the selected sensor: its slip, the two fit windows, the
-lines extrapolated to ``t_i`` and, on the right axis, the smoothed slip rate
+lines extrapolated to ``t_i`` and, on the right axis, the filtered slip rate
 used for the automatic pick.  ``t_i`` and the four window edges can be dragged
 (or a window by its body); dragging ``t_i`` moves it alone, between the
 windows, and makes that sensor manual.  The windows are times relative to the
@@ -79,6 +79,7 @@ LIVE_DELAY_MS = 400                    # recompute this long after the last keys
 HANDLE_PICK_PX = 6                     # a press this close (pixels) to t_i or a window edge grabs it
 ZOOM_HALF_S = 0.2                      # "Zoom to t_i" shows t_i +- this
 METHOD_LABELS = {cs.METHOD_MAX_RATE: "max slip rate", cs.METHOD_MANUAL: "manual"}
+RATE_FILTER_LABELS = {"lowpass": "low-pass (Butterworth)", "savgol": "Savitzky-Golay", "boxcar": "moving average"}
 BEFORE_COLOR, AFTER_COLOR, TI_COLOR = "#1f77b4", "#ff7f0e", "#d62728"
 PROFILE_LABELS = dict(sprof.MODEL_LABELS)      # model key -> combobox text
 DEFAULT_PROFILE_MODEL = "eaz"
@@ -362,19 +363,29 @@ class SlipDistributionView(EventView):
         self.reference_var = tk.StringVar(master=self,
                                           value=_text(cs.DEFAULT_REFERENCE_HALFWIDTH_S * 1e3))
         self.smoothing_var = tk.StringVar(master=self, value=_text(cs.DEFAULT_RATE_SMOOTHING_S * 1e3))
+        self.cutoff_var = tk.StringVar(master=self, value=_text(cs.DEFAULT_RATE_CUTOFF_HZ))
         self.search_var = tk.StringVar(master=self, value=_text(cs.DEFAULT_SEARCH_HALFWIDTH_S * 1e3))
         self.snr_var = tk.StringVar(master=self, value=_text(cs.DEFAULT_RATE_SNR))
-        for var in (self.reference_var, self.smoothing_var, self.search_var, self.snr_var):
+        for var in self.settings_vars():
             self._shown[str(var)] = var.get()
-        self._entry(frame, "Reference +- (ms):", self.reference_var, 0, self.on_settings_edited)
-        self._entry(frame, "Rate smoothing (ms):", self.smoothing_var, 1, self.on_settings_edited)
-        self._entry(frame, "Search +- (ms):", self.search_var, 2, self.on_settings_edited)
-        self._entry(frame, "Flag below (x rate noise):", self.snr_var, 3, self.on_settings_edited)
-        ttk.Label(frame, text="reference: peak of the mean slip rate of\nall sensors near the event time; each\n"
+        ttk.Label(frame, text="Rate filter:").grid(row=0, column=0, padx=4, pady=2, sticky="e")
+        self.rate_filter_combobox = ttk.Combobox(frame, width=20, state="readonly",
+                                                 values=[RATE_FILTER_LABELS[f] for f in cs.RATE_FILTERS])
+        self.rate_filter_combobox.set(RATE_FILTER_LABELS[cs.DEFAULT_RATE_FILTER])
+        self.rate_filter_combobox.grid(row=0, column=1, padx=4, pady=2, sticky="w")
+        self.rate_filter_combobox.bind("<<ComboboxSelected>>", self.on_rate_filter_selected)
+        self.cutoff_entry = self._entry(frame, "Cutoff (Hz):", self.cutoff_var, 1, self.on_settings_edited)
+        self.smoothing_entry = self._entry(frame, "Window (ms):", self.smoothing_var, 2, self.on_settings_edited)
+        self._entry(frame, "Reference +- (ms):", self.reference_var, 3, self.on_settings_edited)
+        self._entry(frame, "Search +- (ms):", self.search_var, 4, self.on_settings_edited)
+        self._entry(frame, "Flag below (x rate noise):", self.snr_var, 5, self.on_settings_edited)
+        ttk.Label(frame, text="low-pass: the slip, zero phase, before the\nderivative; the others: over the window.\n"
+                              "reference: peak of the mean slip rate of\nall sensors near the event time; each\n"
                               "sensor is searched around it", foreground="#606060", justify="left").grid(
-            row=4, column=0, columnspan=2, padx=4, sticky="w")
+            row=6, column=0, columnspan=2, padx=4, sticky="w")
         ttk.Button(frame, text="Re-pick all sensors", command=self.repick_all).grid(
-            row=5, column=0, columnspan=2, padx=4, pady=2, sticky="w")
+            row=7, column=0, columnspan=2, padx=4, pady=2, sticky="w")
+        self.show_rate_filter_entries()
 
         frame = ttk.Frame(left)
         frame.pack(fill="x", pady=4)
@@ -593,6 +604,9 @@ class SlipDistributionView(EventView):
             self.fit_after = list(inputs["fit_after_s"])
             self._show(self.reference_var, _text(inputs["reference_halfwidth_s"] * 1e3))
             self._show(self.smoothing_var, _text(inputs["rate_smoothing_s"] * 1e3))
+            self._show(self.cutoff_var, _text(inputs["rate_cutoff_hz"]))
+            self.rate_filter_combobox.set(RATE_FILTER_LABELS[inputs["rate_filter"]])
+            self.show_rate_filter_entries()
             self._show(self.search_var, _text(inputs["search_halfwidth_s"] * 1e3))
             self._show(self.snr_var, _text(inputs["rate_snr"]))
             self.same_windows_var.set(bool(np.asarray(record.get("same_windows", True)).ravel()[0]))
@@ -669,21 +683,42 @@ class SlipDistributionView(EventView):
         self.canvas.draw_idle()
 
     # ----------------------------------------------------------- settings
+    def settings_vars(self) -> tuple:
+        return self.reference_var, self.smoothing_var, self.cutoff_var, self.search_var, self.snr_var
+
+    def rate_filter(self) -> str:
+        label = self.rate_filter_combobox.get()
+        return next((k for k, v in RATE_FILTER_LABELS.items() if v == label), cs.DEFAULT_RATE_FILTER)
+
+    def show_rate_filter_entries(self) -> None:
+        """The cutoff is for the low-pass, the window for the other two."""
+        lowpass = self.rate_filter() == "lowpass"
+        self.cutoff_entry.config(state="normal" if lowpass else "disabled")
+        self.smoothing_entry.config(state="disabled" if lowpass else "normal")
+
+    def on_rate_filter_selected(self, event=None) -> None:
+        self.flush_pending()
+        self.show_rate_filter_entries()
+        self.recompute()
+
     def read_settings(self) -> dict:
         reference = _parse(self.reference_var.get(), "reference half-width (ms)", 1e-3)
-        smoothing = _parse(self.smoothing_var.get(), "rate smoothing (ms)", 1e-3)
+        smoothing = _parse(self.smoothing_var.get(), "rate filter window (ms)", 1e-3)
+        cutoff = _parse(self.cutoff_var.get(), "rate filter cutoff (Hz)")
         search = _parse(self.search_var.get(), "search half-width (ms)", 1e-3)
         snr = _parse(self.snr_var.get(), "flag threshold")
         if reference <= 0:
             raise ValueError("the reference half-width must be > 0")
         if smoothing < 0:
-            raise ValueError("rate smoothing must be >= 0")
+            raise ValueError("the rate filter window must be >= 0")
+        if cutoff <= 0:
+            raise ValueError("the rate filter cutoff must be > 0")
         if search <= 0:
             raise ValueError("the search half-width must be > 0")
         if snr < 0:
             raise ValueError("the flag threshold must be >= 0")
-        return {"rate_smoothing_s": smoothing, "search_halfwidth_s": search, "rate_snr": snr,
-                "reference_halfwidth_s": reference}
+        return {"rate_filter": self.rate_filter(), "rate_cutoff_hz": cutoff, "rate_smoothing_s": smoothing,
+                "search_halfwidth_s": search, "rate_snr": snr, "reference_halfwidth_s": reference}
 
     def schedule(self, callback, now: bool = False) -> None:
         """Run ``callback`` at once, or once the keys have been quiet for ``LIVE_DELAY_MS``."""
@@ -732,7 +767,7 @@ class SlipDistributionView(EventView):
         except ValueError as e:
             self.status_var.set(str(e))
             return False
-        for var in (self.reference_var, self.smoothing_var, self.search_var, self.snr_var):
+        for var in self.settings_vars():
             self._shown[str(var)] = var.get()
         self.result = result
         self.methods = [s.method for s in result.sensors]
@@ -890,7 +925,7 @@ class SlipDistributionView(EventView):
 
     def on_settings_edited(self) -> None:
         # with no result (a bad value stopped the last recompute) any value is worth a try
-        if self.result is None or self._edited(self.reference_var, self.smoothing_var, self.search_var, self.snr_var):
+        if self.result is None or self._edited(*self.settings_vars()):
             self.recompute()
         else:
             self.update_status()
@@ -1381,7 +1416,7 @@ class SlipDistributionView(EventView):
                     marker="_", markersize=14, markeredgewidth=2.2,
                     label=f"slip {s.coseismic_slip:.3g} {self.unit}")
         rate = self.result.rate[self.sensor]
-        ax_rate.plot(t_rel, rate, color="#9a9a9a", lw=0.6, label="slip rate (smoothed)", zorder=1)
+        ax_rate.plot(t_rel, rate, color="#9a9a9a", lw=0.6, label="slip rate (filtered)", zorder=1)
         if s.method == cs.METHOD_MAX_RATE:
             t_ref = self.result.t_ref - self.t_event
             hw = self.result.search_halfwidth_s
@@ -1632,6 +1667,8 @@ class SlipDistributionView(EventView):
         same = (inputs["methods"] == rec["time_method"]
                 and np.allclose(inputs["fit_before_s"], rec["fit_before_s"])
                 and np.allclose(inputs["fit_after_s"], rec["fit_after_s"])
+                and inputs["rate_filter"] == rec["rate_filter"]
+                and math.isclose(inputs["rate_cutoff_hz"], rec["rate_cutoff_hz"])
                 and math.isclose(inputs["rate_smoothing_s"], rec["rate_smoothing_s"])
                 and math.isclose(inputs["search_halfwidth_s"], rec["search_halfwidth_s"])
                 and math.isclose(inputs["rate_snr"], rec["rate_snr"])

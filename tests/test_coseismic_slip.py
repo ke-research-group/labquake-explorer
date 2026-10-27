@@ -246,3 +246,38 @@ def test_version_1_records_had_windows_relative_to_t_i():
     assert all(w == pytest.approx((-3.73, -1.23)) for w in inputs["fit_before_s"])
     rec["version"] = 2
     assert cs.restore_inputs(rec, rec["channels"])["fit_before_s"][0] == (-3.75, -1.25)
+
+
+@pytest.mark.parametrize("rate_filter, kwargs", [("lowpass", {"rate_cutoff_hz": 50.0}),
+                                                 ("savgol", {"rate_smoothing_s": 0.02}),
+                                                 ("boxcar", {"rate_smoothing_s": 0.01})])
+def test_rate_filters_cut_the_noise_and_keep_the_picks(rate_filter, kwargs):
+    event, truth = make_event(noise_um=0.2, rise_s=0.005)
+    raw = run(event, rate_filter="boxcar", rate_smoothing_s=0.0)
+    out = run(event, rate_filter=rate_filter, **kwargs)
+    assert out.rate_filter == rate_filter
+    noise = np.median([s.rate_noise for s in out.sensors])
+    assert noise < 0.25 * np.median([s.rate_noise for s in raw.sensors])
+    moving = np.array(truth["slips_um"]) > 5.0
+    np.testing.assert_allclose(out.t_i[moving], np.asarray(truth["t_i"])[moving], atol=0.003)
+    rec = out.as_dict()
+    assert rec["rate_filter"] == rate_filter
+    assert cs.restore_inputs(rec, rec["channels"])["rate_filter"] == rate_filter
+
+
+def test_rate_filter_gaps_and_validation():
+    t = np.arange(0.0, 2.0, 0.0005)
+    d = np.where(t > 1.0, 10.0, 0.0) + 0.01 * np.sin(40 * t)
+    d[1000:1010] = np.nan
+    for rate_filter in ("lowpass", "savgol"):
+        rate = cs.slip_rate(t, d, 0.01, rate_filter, 50.0)
+        assert np.all(np.isnan(rate[1000:1010])) and np.all(np.isfinite(np.delete(rate, range(1000, 1010))))
+    with pytest.raises(ValueError, match="half the sampling rate"):
+        cs.slip_rate(t, d, 0.01, "lowpass", 1500.0)
+    with pytest.raises(ValueError, match="unknown rate filter"):
+        cs.slip_rate(t, d, 0.01, "median")
+    event, _ = make_event()
+    rec = run(event).as_dict()
+    assert rec["rate_filter"] == cs.DEFAULT_RATE_FILTER == "lowpass" and rec["rate_cutoff_hz"] == 50.0
+    del rec["rate_filter"], rec["rate_cutoff_hz"]                   # made before there was a choice
+    assert cs.restore_inputs(rec, rec["channels"])["rate_filter"] == "boxcar"

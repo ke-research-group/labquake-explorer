@@ -49,7 +49,9 @@ def test_menu_and_defaults(slip_app, view):
     assert view.fit_before[0] == (-3.75, -1.25) and view.fit_after[0] == (1.25, 3.75)
     assert view.same_windows_var.get() is True
     assert (view.reference_var.get(), view.smoothing_var.get(), view.search_var.get(), view.snr_var.get()) == \
-        ("500", "2.5", "50", "5")
+        ("500", "10", "50", "5")
+    assert view.rate_filter() == "lowpass" and view.cutoff_var.get() == "50"
+    assert str(view.cutoff_entry.cget("state")) == "normal" and str(view.smoothing_entry.cget("state")) == "disabled"
     slips = [s.coseismic_slip for s in view.result.sensors]
     np.testing.assert_allclose(slips, truth["slips_um"], atol=0.2)
     assert len(view.table.get_children()) == 8
@@ -100,9 +102,9 @@ def test_a_failed_switch_keeps_nothing_of_the_previous_event(slip_app, view):
     view.set_event(2)
     assert view.event_idx == 2 and view.result is None
     assert view.table.get_children() == () and not view.ax_trace.lines
-    assert "smoothing" in view.status_var.get()
+    assert "window" in view.status_var.get()
     assert not view.save() and "slip_analysis" not in view.event
-    view.smoothing_var.set("2.5")                         # the same text as before still recomputes
+    view.smoothing_var.set("10")                          # the same text as before still recomputes
     view.schedule(view.on_settings_edited, now=True)
     assert view.result is not None and view.result.event_time == view.t_event
     assert view.save() and "slip_analysis" in view.event
@@ -200,7 +202,7 @@ def test_method_switch_and_repick(slip_app, view):
     assert view.result.search_halfwidth_s == pytest.approx(0.010)
     view.smoothing_var.set("-1")
     view.schedule(view.on_settings_edited, now=True)
-    assert "smoothing" in view.status_var.get()
+    assert "window" in view.status_var.get()
 
 
 def test_dragging_event_time_and_windows(slip_app, view):
@@ -863,14 +865,14 @@ def test_status_names_an_entry_that_was_not_applied(slip_app, view):
     assert view.save()
     view.smoothing_var.set("-1")
     view.schedule(view.on_settings_edited, now=True)
-    assert view.status_var.get() == "rate smoothing must be >= 0"
+    assert view.status_var.get() == "the rate filter window must be >= 0"
     for change in (lambda: (view.weighted_var.set(True), view.on_profile_settings()),
                    lambda: (view.weighted_var.set(False), view.on_profile_settings()),
                    lambda: view.step_sensor(+1)):
         change()
         status = view.status_var.get()
-        assert status.endswith(" | entry not applied: rate smoothing must be >= 0") and "matches" not in status
-    view.smoothing_var.set("2.5")                         # the applied value again
+        assert status.endswith(" | entry not applied: the rate filter window must be >= 0") and "matches" not in status
+    view.smoothing_var.set("10")                          # the applied value again
     view.schedule(view.on_settings_edited, now=True)
     assert view.status_var.get().endswith(" | matches the saved record")
     view.patch_lo_var.set("400")
@@ -982,3 +984,29 @@ def test_front_fit_gets_the_sampling_interval(slip_app):
         assert "faster than" in text or "simultaneous" in text
     finally:
         v.on_close()
+
+
+def test_rate_filter_choice_is_applied_and_saved(slip_app, view):
+    view.rate_filter_combobox.set("Savitzky-Golay")
+    view.on_rate_filter_selected()
+    assert view.result.rate_filter == "savgol"
+    assert str(view.smoothing_entry.cget("state")) == "normal" and str(view.cutoff_entry.cget("state")) == "disabled"
+    view.smoothing_var.set("20")
+    view.schedule(view.on_settings_edited, now=True)
+    assert view.result.rate_smoothing_s == pytest.approx(0.020)
+    assert view.save()
+    rec = view.event["slip_analysis"]
+    assert rec["rate_filter"] == "savgol" and rec["rate_smoothing_s"] == pytest.approx(0.020)
+    view.rate_filter_combobox.set("low-pass (Butterworth)")
+    view.on_rate_filter_selected()
+    assert "differs from the saved record" in view.status_var.get()
+    view.cutoff_var.set("5000")                           # above half the sampling rate
+    view.schedule(view.on_settings_edited, now=True)
+    assert "half the sampling rate" in view.status_var.get()
+    view.on_close()
+    v2 = SlipDistributionView(slip_app, 0, EVENT)
+    try:
+        assert v2.rate_filter() == "savgol" and v2.smoothing_var.get() == "20"
+        assert "matches the saved record" in v2.status_var.get()
+    finally:
+        v2.on_close()
