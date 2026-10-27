@@ -56,7 +56,7 @@ def do_something(app, ctx): ...       # ctx.path, ctx.run_idx, ctx.event_idx, ct
 ## Data rule
 
 Raw extracted data lives at the top level of an event. Each analysis view
-(`event_analysis`, `interevent`, `spectrum`, `source_scaling`) writes only
+(`event_analysis`, `slip_analysis`, `interevent`, `spectrum`, `source_scaling`) writes only
 under its own key, and every saved dict carries a `version` integer, the
 inputs needed to reproduce the numbers, and outputs with units in the key
 names. Cross-view reads go through the other view's key.
@@ -133,6 +133,31 @@ the inter-event and scaling views take `displacement`/`stress_drop` from
 them and `delta_x`/`-delta_y` from version 3. "Apply to All Events" turns
 the current picks into times relative to the event, places them on every
 event of the run and saves each result.
+
+### `slip_analysis` (SlipDistributionView, version 1)
+
+Coseismic slip of every sensor of a slip channel array (`field`, normally
+`slip`), each sensor with its own event time `t_i`
+(`labquake_explorer/analysis/coseismic_slip.py`). Lists hold one entry per
+sensor, in the order of `channels`.
+
+| key | meaning |
+|---|---|
+| `version` | 1 |
+| `field`, `unit`, `channels`, `x_mm` | the channel array analysed, its unit (um), its rows and the sensor positions along the fault |
+| `event_time`, `start_s`, `end_s` | the event time and the extraction window the default fit windows came from |
+| `time_method` | `max_rate` (largest smoothed slip rate) or `manual` (set by hand) |
+| `t_shift_s` | `t_i - event_time` |
+| `rate_smoothing_s`, `search_halfwidth_s`, `rate_snr`, `reference_halfwidth_s` | `max_rate` settings: boxcar on the slip rate (default 0.0025; NaN samples are left out of each mean), search half-width around the reference time (0.05), flag threshold in units of the rate noise (5), half-width around the event time in which the reference time is found (0.5) |
+| `t_ref_shift_s` | reference time minus event time: the peak of the mean slip rate of all sensors within `event_time +- reference_halfwidth_s`; each sensor's `max_rate` pick is searched within `search_halfwidth_s` of it |
+| `fit_before_s`, `fit_after_s` | `[start, end]` of the two fit windows, relative to `t_i`; defaults 75 %..25 % of the negative side and 25 %..75 % of the positive side of the extraction window |
+| `same_windows` | the view applies a window edit to every sensor |
+| `before_line`, `after_line` | `[slope (um/s), value at t_i (um)]` of the two least-squares lines |
+| `coseismic_slip_um` | after-line minus before-line at `t_i` |
+| `noise_um` | standard deviation of the residuals of the before-window line (two degrees of freedom removed): the sensor's per-sample noise, used as the error bar of the slip |
+| `peak_rate_um_s` | smoothed slip rate at `t_i` |
+| `rate_noise_um_s` | standard deviation of the smoothed slip rate in the before window; a `max_rate` peak below `rate_snr` times this is flagged `weak rate peak` |
+| `flags` | one text per sensor, `"; "`-joined: `pick at search edge`, `weak rate peak`, `no rate peak`, `before/after window clipped` (the window runs past the data), `before/after window has gaps` (less than half of its samples are finite), `before/after fit invalid` |
 
 ### `arrivals` (Pick Arrivals, per record, version 1)
 

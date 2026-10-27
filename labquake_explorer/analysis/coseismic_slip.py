@@ -1,0 +1,481 @@
+"""Coseismic slip per sensor, each sensor with its own event time.
+
+A rupture reaches the slip sensors one after another.  One event time and one
+pair of fit windows for every sensor cuts the coseismic step short far from
+the nucleation and mixes afterslip in near it, so every sensor ``i`` gets its
+own event time ``t_i``, chosen by one of two methods:
+
+* ``max_rate``: the time of the largest smoothed slip rate.  The rate is the
+  time derivative of the slip, smoothed by a centred boxcar of
+  ``rate_smoothing_s`` (NaN samples are left out of the average, so a bad
+  sample only blanks its neighbourhood).  A reference time ``t_ref`` comes
+  first, at the peak of the mean rate of all sensors within
+  ``event_time +- reference_halfwidth_s`` (narrow enough to keep the
+  neighbouring events out); each sensor is then searched within
+  ``t_ref +- search_halfwidth_s``.
+* ``manual``: a time set by the user, stored as ``t_shift_s`` relative to the
+  event time (``t_i = event_time + t_shift_s``).
+
+The coseismic slip of a sensor is the difference at ``t_i`` between two
+straight lines: one fitted to the slip over ``fit_before_s`` and one over
+``fit_after_s``, both windows given in seconds relative to ``t_i``.  The
+default windows come from the event's extraction window ``[start_s, end_s]``
+(``start_s < 0 < end_s``): before from 75 % to 25 % of the negative side,
+after from 25 % to 75 % of the positive side.  The noise of a sensor is the
+standard deviation of the residuals of its before-window line, the noise level
+of one sample (the error bar the Slip Distribution view draws).
+
+Flags tell the user which sensors to check: ``pick at search edge`` and
+``weak rate peak`` (peak below ``rate_snr`` times the rate noise, the
+standard deviation of the smoothed rate in the before window) for automatic
+picks, ``no rate peak`` when the search found no finite rate,
+``before window clipped`` / ``after window clipped`` when a window reaches past
+the record, ``before window has gaps`` / ``after window has gaps`` when NaN
+samples leave less than half of a window, and ``before fit invalid`` /
+``after fit invalid`` when a window holds fewer than ``MIN_FIT_SAMPLES``
+samples.
+
+Everything here is pure numerics; :class:`SlipAnalysis.as_dict` gives the
+JSON-like record the Slip Distribution view stores as ``event['slip_analysis']``.
+"""
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from typing import Optional, Sequence
+
+import numpy as np
+from scipy.ndimage import uniform_filter1d
+
+RESULT_VERSION = 1
+METHOD_MAX_RATE = "max_rate"
+METHOD_MANUAL = "manual"
+METHODS = (METHOD_MAX_RATE, METHOD_MANUAL)
+
+DEFAULT_RATE_SMOOTHING_S = 0.0025     # boxcar on the slip rate
+DEFAULT_SEARCH_HALFWIDTH_S = 0.05     # each sensor is searched within t_ref +- this
+DEFAULT_RATE_SNR = 5.0                # flag a pick whose peak rate is below this x the rate noise
+DEFAULT_REFERENCE_HALFWIDTH_S = 0.5   # t_ref is searched within event_time +- this
+FIT_FRACTIONS = (0.25, 0.75)          # default fit windows: 75 %..25 % before, 25 %..75 % after
+MIN_FIT_SAMPLES = 3
+EDGE_TOLERANCE = 1e-6                 # of a sample: a window edge on a sample includes it
+
+FLAG_EDGE = "pick at search edge"
+FLAG_WEAK = "weak rate peak"
+FLAG_NO_PEAK = "no rate peak"
+FLAG_BEFORE_CLIPPED = "before window clipped"
+FLAG_AFTER_CLIPPED = "after window clipped"
+FLAG_BEFORE_INVALID = "before fit invalid"
+FLAG_AFTER_INVALID = "after fit invalid"
+FLAG_BEFORE_GAPS = "before window has gaps"
+FLAG_AFTER_GAPS = "after window has gaps"
+GAP_FRACTION = 0.5                    # flag a window whose finite samples are fewer than this share
+
+
+# ---------------------------------------------------------------------- helpers
+def sampling_interval(time) -> float:
+    """Median sample spacing of a time axis (s)."""
+    t = np.asarray(time, dtype=float).ravel()
+    if t.size < 2:
+        raise ValueError("a time axis needs at least two samples")
+    dt = float(np.median(np.diff(t)))
+    if not (np.isfinite(dt) and dt > 0):
+        raise ValueError("the time axis must increase")
+    return dt
+
+
+def smoothing_samples(smoothing_s: float, dt: float) -> int:
+    """Odd boxcar length (samples) for a smoothing time; 1 means no smoothing."""
+    k = int(round(max(0.0, float(smoothing_s)) / dt))
+    k = max(1, k)
+    return k if k % 2 == 1 else k + 1
+
+
+def slip_rate(time, data, smoothing_s: float = DEFAULT_RATE_SMOOTHING_S) -> np.ndarray:
+    """Time derivative of ``data`` (one row per sensor, or one row), smoothed by
+    a centred boxcar of ``smoothing_s``; same shape as ``data``, unit/s."""
+    t = np.asarray(time, dtype=float).ravel()
+    d = np.asarray(data, dtype=float)
+    if d.shape[-1] != t.size:
+        raise ValueError("data and time must have the same number of samples")
+    dt = sampling_interval(t)
+    rate = np.gradient(d, t, axis=-1)
+    k = smoothing_samples(smoothing_s, dt)
+    if k > 1:
+        # mean of the finite samples in each window: a NaN only blanks its neighbourhood
+        finite = np.isfinite(rate)
+        total = uniform_filter1d(np.where(finite, rate, 0.0), size=k, axis=-1, mode="nearest")
+        count = uniform_filter1d(finite.astype(float), size=k, axis=-1, mode="nearest")
+        with np.errstate(invalid="ignore", divide="ignore"):
+            rate = np.where(count > 0.5 / k, total / np.maximum(count, 1e-300), np.nan)
+    return rate
+
+
+def default_fit_windows(start_s: float, end_s: float, fractions=FIT_FRACTIONS) -> tuple[tuple, tuple]:
+    """``(before, after)`` windows relative to ``t_i`` from an extraction window
+    ``[start_s, end_s]``: before = (hi * start_s, lo * start_s), after =
+    (lo * end_s, hi * end_s) with ``fractions = (lo, hi)``."""
+    start_s, end_s = float(start_s), float(end_s)
+    lo, hi = (float(f) for f in fractions)
+    if not (start_s < 0.0 < end_s):
+        raise ValueError("the extraction window must have start < 0 < end")
+    if not (0.0 <= lo < hi <= 1.0):
+        raise ValueError("fractions must satisfy 0 <= lo < hi <= 1")
+    return (hi * start_s, lo * start_s), (lo * end_s, hi * end_s)
+
+
+def check_window(window, name: str = "window") -> tuple[float, float]:
+    """A (start, end) pair as floats with start < end (ValueError otherwise)."""
+    try:
+        a, b = (float(v) for v in window)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a pair of numbers") from None
+    if not (math.isfinite(a) and math.isfinite(b)) or a >= b:
+        raise ValueError(f"{name} must have start < end")
+    return a, b
+
+
+def reference_time(time, rate, event_time: float,
+                   halfwidth_s: float = DEFAULT_REFERENCE_HALFWIDTH_S) -> float:
+    """Time of the peak of the mean rate of all sensors within
+    ``event_time +- halfwidth_s``; the event time itself when that part of the
+    record holds no finite rate."""
+    t = np.asarray(time, dtype=float).ravel()
+    r = np.asarray(rate, dtype=float)
+    if r.ndim == 1:
+        mean = r
+    else:
+        finite = np.isfinite(r)
+        count = finite.sum(axis=0)
+        total = np.where(finite, r, 0.0).sum(axis=0)
+        mean = np.where(count > 0, total / np.maximum(count, 1), np.nan)
+    inside = (np.abs(t - event_time) <= halfwidth_s) & np.isfinite(mean)
+    if not np.any(inside):
+        return float(event_time)
+    idx = np.flatnonzero(inside)
+    return float(t[idx[int(np.argmax(mean[idx]))]])
+
+
+@dataclass(frozen=True)
+class RatePick:
+    time: float          # absolute time of the peak
+    at_edge: bool        # the peak sits on the first or last sample searched
+    peak_rate: float     # smoothed rate at the peak (unit/s)
+
+
+def pick_max_rate(time, rate_row, t_ref: float, halfwidth_s: float) -> Optional[RatePick]:
+    """Largest smoothed rate within ``t_ref +- halfwidth_s``; None when no finite rate."""
+    t = np.asarray(time, dtype=float).ravel()
+    r = np.asarray(rate_row, dtype=float).ravel()
+    idx = np.flatnonzero(np.abs(t - float(t_ref)) <= float(halfwidth_s))
+    if idx.size == 0:
+        return None
+    values = r[idx]
+    finite = np.isfinite(values)
+    if not np.any(finite):
+        return None
+    j = int(np.argmax(np.where(finite, values, -np.inf)))
+    at_edge = j in (0, idx.size - 1)          # a single searched sample is at both edges
+    return RatePick(float(t[idx[j]]), bool(at_edge), float(values[j]))
+
+
+@dataclass(frozen=True)
+class LineFit:
+    """``y = slope * (t - t_i) + value`` over one window."""
+    slope: float                     # unit/s
+    value: float                     # the line at t_i
+    n: int                           # samples used
+    rms: float                       # residual standard deviation (ddof = 2)
+    window: tuple                    # requested window, relative to t_i
+    used: tuple                      # span of the samples used, relative to t_i
+    clipped: bool                    # the requested window reaches past the record
+    valid: bool
+    gaps: bool = False               # NaN samples leave less than GAP_FRACTION of the window
+
+    def at(self, t_rel) -> np.ndarray:
+        return self.slope * np.asarray(t_rel, dtype=float) + self.value
+
+
+def window_mask(time, t_i: float, window, dt: Optional[float] = None) -> np.ndarray:
+    """Samples inside ``[t_i + window[0], t_i + window[1]]``; an edge that falls on
+    a sample (to ``EDGE_TOLERANCE`` of a sample) includes it."""
+    t = np.asarray(time, dtype=float).ravel()
+    a, b = window
+    eps = EDGE_TOLERANCE * (sampling_interval(t) if dt is None else dt)
+    return (t >= t_i + a - eps) & (t <= t_i + b + eps)
+
+
+def fit_line(time, values, t_i: float, window) -> LineFit:
+    """Least-squares line over ``[t_i + window[0], t_i + window[1]]``."""
+    a, b = check_window(window)
+    t = np.asarray(time, dtype=float).ravel()
+    y = np.asarray(values, dtype=float).ravel()
+    dt = sampling_interval(t)
+    clipped = bool(t_i + a < t[0] - 0.5 * dt or t_i + b > t[-1] + 0.5 * dt)
+    in_window = window_mask(t, t_i, (a, b), dt)
+    sel = in_window & np.isfinite(y)
+    n = int(np.count_nonzero(sel))
+    gaps = bool(n < GAP_FRACTION * np.count_nonzero(in_window))
+    nan = float("nan")
+    if n < MIN_FIT_SAMPLES:
+        return LineFit(nan, nan, n, nan, (a, b), (nan, nan), clipped, False, gaps)
+    tt = t[sel] - t_i
+    yy = y[sel]
+    slope, value = np.polyfit(tt, yy, 1)
+    resid = yy - (slope * tt + value)
+    rms = float(np.sqrt(np.sum(resid ** 2) / (n - 2))) if n > 2 else nan
+    return LineFit(float(slope), float(value), n, rms, (a, b), (float(tt[0]), float(tt[-1])), clipped, True, gaps)
+
+
+# ------------------------------------------------------------------ per sensor
+@dataclass
+class SensorSlip:
+    channel: str
+    x_mm: float
+    method: str
+    t_shift_s: float                 # t_i - event_time
+    before: LineFit
+    after: LineFit
+    peak_rate: float                 # smoothed rate at t_i (unit/s)
+    rate_noise: float                # std of the smoothed rate in the before window
+    flags: list = field(default_factory=list)
+
+    @property
+    def coseismic_slip(self) -> float:
+        if self.before.valid and self.after.valid:
+            return float(self.after.value - self.before.value)
+        return float("nan")
+
+    @property
+    def noise(self) -> float:
+        return float(self.before.rms)
+
+    @property
+    def fit_before_s(self) -> tuple:
+        return self.before.window
+
+    @property
+    def fit_after_s(self) -> tuple:
+        return self.after.window
+
+
+@dataclass
+class SlipAnalysis:
+    event_time: float
+    start_s: float
+    end_s: float
+    rate_smoothing_s: float
+    search_halfwidth_s: float
+    rate_snr: float
+    reference_halfwidth_s: float
+    t_ref: float                     # absolute
+    sensors: list
+    time: np.ndarray = field(repr=False, default=None)
+    rate: np.ndarray = field(repr=False, default=None)
+
+    @property
+    def t_i(self) -> np.ndarray:
+        return np.array([self.event_time + s.t_shift_s for s in self.sensors])
+
+    def as_dict(self) -> dict:
+        """The JSON-like part stored in ``event['slip_analysis']`` (no arrays of samples)."""
+        s = self.sensors
+        return {
+            "version": RESULT_VERSION,
+            "event_time": float(self.event_time),
+            "start_s": float(self.start_s),
+            "end_s": float(self.end_s),
+            "channels": [x.channel for x in s],
+            "x_mm": [float(x.x_mm) for x in s],
+            "rate_smoothing_s": float(self.rate_smoothing_s),
+            "search_halfwidth_s": float(self.search_halfwidth_s),
+            "rate_snr": float(self.rate_snr),
+            "reference_halfwidth_s": float(self.reference_halfwidth_s),
+            "t_ref_shift_s": float(self.t_ref - self.event_time),
+            "rate_noise_um_s": [float(x.rate_noise) for x in s],
+            "time_method": [x.method for x in s],
+            "t_shift_s": [float(x.t_shift_s) for x in s],
+            "fit_before_s": [[float(v) for v in x.fit_before_s] for x in s],
+            "fit_after_s": [[float(v) for v in x.fit_after_s] for x in s],
+            "coseismic_slip_um": [x.coseismic_slip for x in s],
+            "noise_um": [x.noise for x in s],
+            "before_line": [[x.before.slope, x.before.value] for x in s],
+            "after_line": [[x.after.slope, x.after.value] for x in s],
+            "peak_rate_um_s": [float(x.peak_rate) for x in s],
+            "flags": ["; ".join(x.flags) for x in s],
+        }
+
+
+def _per_sensor(value, n: int, name: str, default):
+    """``value`` as a list of length ``n``: None -> default for all, one item for
+    all (a pair counts as one item for windows), or one per sensor."""
+    if value is None:
+        return [default] * n
+    if name.startswith("fit_"):
+        arr = np.asarray(value, dtype=float)
+        if arr.shape == (2,):
+            return [tuple(arr.tolist())] * n
+        if arr.shape == (n, 2):
+            return [tuple(row) for row in arr.tolist()]
+        raise ValueError(f"{name} must be one (start, end) pair or one pair per sensor")
+    if isinstance(value, str) or np.ndim(value) == 0:
+        return [value] * n
+    values = list(value)
+    if len(values) == 1 and n != 1:
+        return values * n
+    if len(values) != n:
+        raise ValueError(f"{name} needs one value per sensor ({n}), got {len(values)}")
+    return values
+
+
+def analyze_slip(time, data, event_time: float, start_s: float, end_s: float, *,
+                 channels: Optional[Sequence[str]] = None, x_mm: Optional[Sequence[float]] = None,
+                 methods: Optional[Sequence[str]] = None, t_shift_s: Optional[Sequence[float]] = None,
+                 fit_before_s=None, fit_after_s=None,
+                 rate_smoothing_s: float = DEFAULT_RATE_SMOOTHING_S,
+                 search_halfwidth_s: float = DEFAULT_SEARCH_HALFWIDTH_S,
+                 rate_snr: float = DEFAULT_RATE_SNR,
+                 reference_halfwidth_s: float = DEFAULT_REFERENCE_HALFWIDTH_S) -> SlipAnalysis:
+    """Event time, line fits and coseismic slip of every sensor.
+
+    ``data`` is ``(n_sensors, n)`` on ``time``.  ``methods`` (one per sensor or
+    one for all, default ``max_rate``) chooses how each ``t_i`` is found; a
+    ``manual`` sensor takes ``t_shift_s`` (relative to ``event_time``) and
+    falls back to ``max_rate`` when that shift is missing or not finite.
+    ``fit_before_s`` / ``fit_after_s`` are one pair for every sensor or one
+    pair per sensor, relative to ``t_i``; by default they follow from
+    ``[start_s, end_s]`` (:func:`default_fit_windows`).  ``t_ref`` is searched
+    within ``event_time +- reference_halfwidth_s``.
+    """
+    t = np.asarray(time, dtype=float).ravel()
+    sampling_interval(t)                      # at least two increasing samples
+    d = np.asarray(data, dtype=float)
+    if d.ndim == 1:
+        d = d[None, :]
+    if d.ndim != 2 or d.shape[1] != t.size:
+        raise ValueError("data must be (n_sensors, n) on the time axis")
+    n_ch = d.shape[0]
+    event_time = float(event_time)
+    if not math.isfinite(event_time):
+        raise ValueError("event_time must be finite")
+    rate_smoothing_s = float(rate_smoothing_s)
+    search_halfwidth_s = float(search_halfwidth_s)
+    rate_snr = float(rate_snr)
+    reference_halfwidth_s = float(reference_halfwidth_s)
+    if not (math.isfinite(reference_halfwidth_s) and reference_halfwidth_s > 0):
+        raise ValueError("the reference half-width must be > 0")
+    if not (math.isfinite(rate_smoothing_s) and rate_smoothing_s >= 0):
+        raise ValueError("rate smoothing must be >= 0")
+    if not (math.isfinite(search_halfwidth_s) and search_halfwidth_s > 0):
+        raise ValueError("the search half-width must be > 0")
+    if not math.isfinite(rate_snr) or rate_snr < 0:
+        raise ValueError("the rate SNR threshold must be >= 0")
+    default_before, default_after = default_fit_windows(start_s, end_s)
+    channels = list(channels) if channels is not None else [str(i) for i in range(n_ch)]
+    x_mm = [float(v) for v in x_mm] if x_mm is not None else [float("nan")] * n_ch
+    if len(channels) != n_ch or len(x_mm) != n_ch:
+        raise ValueError("channels and x_mm need one entry per sensor")
+    methods = [str(m) for m in _per_sensor(methods, n_ch, "methods", METHOD_MAX_RATE)]
+    for m in methods:
+        if m not in METHODS:
+            raise ValueError(f"unknown method {m!r}; use one of {METHODS}")
+    shifts = _per_sensor(t_shift_s, n_ch, "t_shift_s", float("nan"))
+    befores = [check_window(w, "fit_before_s") for w in _per_sensor(fit_before_s, n_ch, "fit_before_s", default_before)]
+    afters = [check_window(w, "fit_after_s") for w in _per_sensor(fit_after_s, n_ch, "fit_after_s", default_after)]
+
+    rate = slip_rate(t, d, rate_smoothing_s)
+    t_ref = reference_time(t, rate, event_time, reference_halfwidth_s)
+    sensors = []
+    for i in range(n_ch):
+        flags: list[str] = []
+        method = methods[i]
+        try:
+            shift = float(shifts[i])
+        except (TypeError, ValueError):
+            shift = float("nan")
+        if method == METHOD_MANUAL and math.isfinite(shift):
+            t_i = event_time + shift
+            pick = None
+        else:
+            method = METHOD_MAX_RATE
+            pick = pick_max_rate(t, rate[i], t_ref, search_halfwidth_s)
+            if pick is None:
+                t_i = t_ref
+                flags.append(FLAG_NO_PEAK)
+            else:
+                t_i = pick.time
+                if pick.at_edge:
+                    flags.append(FLAG_EDGE)
+        before = fit_line(t, d[i], t_i, befores[i])
+        after = fit_line(t, d[i], t_i, afters[i])
+        in_before = window_mask(t, t_i, befores[i]) & np.isfinite(rate[i])
+        rate_noise = float(np.std(rate[i][in_before])) if np.count_nonzero(in_before) >= MIN_FIT_SAMPLES else float("nan")
+        peak_rate = float(np.interp(t_i, t, rate[i])) if np.all(np.isfinite(rate[i])) else (
+            pick.peak_rate if pick is not None else float("nan"))
+        if pick is not None and math.isfinite(rate_noise) and rate_noise > 0 and pick.peak_rate < rate_snr * rate_noise:
+            flags.append(FLAG_WEAK)
+        if before.clipped:
+            flags.append(FLAG_BEFORE_CLIPPED)
+        if after.clipped:
+            flags.append(FLAG_AFTER_CLIPPED)
+        if before.gaps:
+            flags.append(FLAG_BEFORE_GAPS)
+        if after.gaps:
+            flags.append(FLAG_AFTER_GAPS)
+        if not before.valid:
+            flags.append(FLAG_BEFORE_INVALID)
+        if not after.valid:
+            flags.append(FLAG_AFTER_INVALID)
+        sensors.append(SensorSlip(str(channels[i]), float(x_mm[i]), method, float(t_i - event_time),
+                                  before, after, peak_rate, rate_noise, flags))
+    return SlipAnalysis(event_time, float(start_s), float(end_s), rate_smoothing_s, search_halfwidth_s,
+                        rate_snr, reference_halfwidth_s, float(t_ref), sensors, time=t, rate=rate)
+
+
+# --------------------------------------------------------------- saved records
+def restore_inputs(record, channels: Sequence[str]) -> Optional[dict]:
+    """The analysis inputs of a saved ``slip_analysis`` record for the given
+    channels, or None when the record does not match them or is unreadable.
+
+    Keys: ``methods``, ``t_shift_s``, ``fit_before_s``, ``fit_after_s``,
+    ``rate_smoothing_s``, ``search_halfwidth_s``, ``rate_snr``,
+    ``reference_halfwidth_s``.  Arrays that
+    an HDF5 round trip turned into numpy arrays are accepted.
+    """
+    if not isinstance(record, dict):
+        return None
+    try:
+        saved_channels = [c.decode() if isinstance(c, bytes) else str(c) for c in np.asarray(record["channels"]).ravel()]
+        if saved_channels != [str(c) for c in channels]:
+            return None
+        n = len(saved_channels)
+        methods = [m.decode() if isinstance(m, bytes) else str(m) for m in np.asarray(record["time_method"]).ravel()]
+        shifts = [float(v) for v in np.asarray(record["t_shift_s"], dtype=float).ravel()]
+        before = np.asarray(record["fit_before_s"], dtype=float).reshape(n, 2)
+        after = np.asarray(record["fit_after_s"], dtype=float).reshape(n, 2)
+        if len(methods) != n or len(shifts) != n or any(m not in METHODS for m in methods):
+            return None
+        out = {
+            "methods": methods,
+            "t_shift_s": shifts,
+            "fit_before_s": [tuple(r) for r in before.tolist()],
+            "fit_after_s": [tuple(r) for r in after.tolist()],
+            "rate_smoothing_s": float(record.get("rate_smoothing_s", DEFAULT_RATE_SMOOTHING_S)),
+            "search_halfwidth_s": float(record.get("search_halfwidth_s", DEFAULT_SEARCH_HALFWIDTH_S)),
+            "rate_snr": float(record.get("rate_snr", DEFAULT_RATE_SNR)),
+            "reference_halfwidth_s": float(record.get("reference_halfwidth_s", DEFAULT_REFERENCE_HALFWIDTH_S)),
+        }
+        for w in out["fit_before_s"] + out["fit_after_s"]:
+            check_window(w)
+        return out
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+
+
+__all__ = [
+    "RESULT_VERSION", "METHODS", "METHOD_MAX_RATE", "METHOD_MANUAL",
+    "DEFAULT_RATE_SMOOTHING_S", "DEFAULT_SEARCH_HALFWIDTH_S", "DEFAULT_RATE_SNR", "DEFAULT_REFERENCE_HALFWIDTH_S",
+    "FIT_FRACTIONS", "MIN_FIT_SAMPLES", "sampling_interval", "slip_rate", "default_fit_windows",
+    "check_window", "window_mask", "reference_time", "RatePick", "pick_max_rate", "LineFit", "fit_line", "SensorSlip",
+    "SlipAnalysis", "analyze_slip", "restore_inputs",
+]
