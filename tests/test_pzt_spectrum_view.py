@@ -1103,3 +1103,34 @@ def test_coincident_edges_are_told_apart_by_the_drag_direction(brune_app, view):
     assert e["signal_start"] == pytest.approx(-0.2) and e["noise_end"] == pytest.approx(-0.5)
     view.end_drag()
     assert view.record["pre_ms"] == pytest.approx(0.2) and view.record["noise_end_ms"] == -0.5
+
+
+def test_a_noise_window_too_short_to_use_does_not_poison_the_entries(brune_app, view):
+    """An explicit noise window that the analysis cannot use (shorter than a
+    quarter of the signal window) must not be written back as a degenerate
+    pair by the next drag; and a recompute that fails leaves the windows on
+    the top panel, so they can be dragged back."""
+    view.set_channel(BRUNE_CH)
+    view.noise_start_var.set("-1.0"); view.noise_end_var.set("-0.6")
+    view.post_var.set("10")                               # the noise (0.4 ms) is now under a quarter of the window
+    view.schedule_compute(now=True)
+    assert view.window is not None and not view.window.noise_available
+    assert set(view.handles) == {"signal_start", "signal_end"}
+    e = view.current_edges_ms()
+    view.begin_drag("signal_start", e["signal_start"])
+    view.drag_to(0.0)                                     # to the trigger: pre 0
+    view.end_drag()
+    assert (view.noise_start_var.get(), view.noise_end_var.get()) == ("-1.0", "-0.6")   # left as typed
+    assert view.pre_var.get() == "0" and view.record is not None
+    # a recompute that fails (entries that give no window) keeps the top panel and its drags
+    view.noise_end_var.set("-1.0")
+    view.schedule_compute(now=True)
+    assert view.record is None and "noise start must be before noise end" in view.status_var.get()
+    assert view.window is not None and view.ax_time.lines and "not recomputed" in view.ax_spec.get_title()
+    view.begin_drag("signal_end", view.current_edges_ms()["signal_end"])
+    view.drag_to(5.0)
+    view.end_drag()
+    assert view.post_var.get() == "5" and view.record is None      # the noise entries are still wrong
+    view.noise_end_var.set("-0.6")
+    view.schedule_compute(now=True)
+    assert view.record is not None and view.record["post_ms"] == 5.0

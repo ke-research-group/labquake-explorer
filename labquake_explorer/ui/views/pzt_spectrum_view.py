@@ -731,13 +731,14 @@ class PZTSpectrumView(EventView):
             return
         saved = getattr(self, "_saved_for_compare", None)
         if not self.compute():
-            # stale numbers must not survive a failed recompute; the status keeps the reason
+            # stale numbers must not survive a failed recompute; the status keeps the reason.  The
+            # last window stays on the top panel, so the windows can be dragged back to a valid place
             reason = self.status_var.get()
-            self.window = self.spectrum = self.fit = None
+            self.spectrum = self.fit = None
             self.record = None
             self.show_fit(None)
             self.show_source(None)
-            self.plot()
+            self.plot(not_computed=reason)
             self.status_var.set(reason)
             return
         if isinstance(saved, dict):
@@ -1401,9 +1402,10 @@ class PZTSpectrumView(EventView):
         warnings = _warning_texts(sd.get("warnings"))
         self.source_vars["warnings"].set("; ".join(warnings) if warnings else "none")
 
-    def plot(self) -> None:
+    def plot(self, not_computed: Optional[str] = None) -> None:
         """Redraw the three axes from the live window/spectrum (when present)
-        and the current record's binned spectrum and fit."""
+        and the current record's binned spectrum and fit; ``not_computed`` is
+        the reason the last recompute failed, written over the empty spectrum."""
         for ax in self.axes:
             ax.clear()
         self.ax_taper.clear()
@@ -1517,6 +1519,9 @@ class PZTSpectrumView(EventView):
                 label += f" ({rec['field']})"
             self.ax_spec.set_title(f"{self.figure_title()} {label}", fontsize=10)
             self.ax_resid.set_xlim(self.ax_spec.get_xlim())
+        if not_computed:
+            self.ax_time.set_title("windows as last computed: drag them, or fix the entries", fontsize=9)
+            self.ax_spec.set_title(f"{self.figure_title()}: not recomputed - {not_computed}"[:160], fontsize=9)
         self.canvas.draw_idle()
 
     # ------------------------------------------------------ window dragging
@@ -1639,10 +1644,12 @@ class PZTSpectrumView(EventView):
         """Entries and the top panel follow the edges being dragged (no recompute
         yet); with ``noise_entries`` False the noise entries stay blank (automatic)."""
         self.pre_var.set(_text(round(abs(e["signal_start"]), 4)))     # never "-0"
-        self.post_var.set(_text(round(e["signal_end"], 4)))
-        if noise_entries:
-            self.noise_start_var.set(_text(round(e["noise_start"], 4)))
-            self.noise_end_var.set(_text(round(e["noise_end"], 4)))
+        self.post_var.set(_text(round(e["signal_end"], 4) + 0.0))
+        if noise_entries and self.window is not None and self.window.noise_available:
+            # without a usable noise window the edges carry a stand-in (both at the signal start),
+            # which must not become the entries' values
+            self.noise_start_var.set(_text(round(e["noise_start"], 4) + 0.0))
+            self.noise_end_var.set(_text(round(e["noise_end"], 4) + 0.0))
         for name, line in self.handles.items():
             line.set_xdata([e[name], e[name]])
         for patch, a, b in ((self.signal_span, "signal_start", "signal_end"), (self.noise_span, "noise_start", "noise_end")):
