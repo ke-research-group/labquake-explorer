@@ -487,7 +487,7 @@ def test_patch_edges_are_saved_at_the_experiment_level(slip_app, view):
     assert view.patch_x_mm == (150.0, 400.0) and len(view.patch_artists) == 6      # span and edges on both panels
     assert "not saved to the experiment" in view.patch_note_var.get()
     assert view.save_patch()
-    assert slip_app.data_manager.get_data("patch_x_mm") == [150.0, 400.0]
+    assert slip_app.data_manager.get_data("analysis/fault/patch_x_mm") == [150.0, 400.0]
     assert view.patch_note_var.get() == "saved in the experiment"
     view.patch_hi_var.set("100")
     view.schedule(view.on_patch_edited, now=True)
@@ -564,7 +564,7 @@ def test_save_refuses_an_unusable_patch_entry(slip_app, view):
 
 def test_typed_patch_edges_stay_across_events_until_saved(slip_app, view):
     dm = slip_app.data_manager
-    dm.data["patch_x_mm"] = [150.0, 400.0]
+    dm.data["analysis"] = {"fault": {"patch_x_mm": [150.0, 400.0]}}
     view.set_event(2)
     assert view.patch_x_mm == (150.0, 400.0) and view.patch_note_var.get() == "saved in the experiment"
     view.patch_lo_var.set("120")                          # typed, still waiting for the keys to settle
@@ -574,8 +574,8 @@ def test_typed_patch_edges_stay_across_events_until_saved(slip_app, view):
     assert view.patch_note_var.get() == "not saved to the experiment"
     view.set_event(2)
     assert view.patch_x_mm == (120.0, 400.0)
-    assert view.save_patch() and dm.get_data("patch_x_mm") == [120.0, 400.0]
-    dm.data["patch_x_mm"] = [130.0, 390.0]       # changed elsewhere: no typed edges hold it back now
+    assert view.save_patch() and dm.get_data("analysis/fault/patch_x_mm") == [120.0, 400.0]
+    dm.data["analysis"]["fault"]["patch_x_mm"] = [130.0, 390.0]       # changed elsewhere: no typed edges hold it back now
     view.set_event(EVENT)
     assert view.patch_x_mm == (130.0, 390.0) and view.patch_note_var.get() == "saved in the experiment"
 
@@ -603,16 +603,16 @@ def test_each_event_shows_its_record_edges_while_the_experiment_has_none(slip_ap
 
 def test_save_to_experiment_keeps_the_edges_at_full_precision(slip_app):
     dm = slip_app.data_manager
-    dm.data["patch_x_mm"] = [25.4 * 6, 400.0]     # 6 in as a notebook converts it: 152.39999999999998
+    dm.data["analysis"] = {"fault": {"patch_x_mm": [25.4 * 6, 400.0]}}     # 6 in as a notebook converts it: 152.39999999999998
     v = SlipDistributionView(slip_app, 0, 2)
     try:
         assert v.patch_lo_var.get() == "152.4"
         assert v.save_patch()                                # nothing typed: the edges stay as they were
-        assert dm.get_data("patch_x_mm") == [25.4 * 6, 400.0]
+        assert dm.get_data("analysis/fault/patch_x_mm") == [25.4 * 6, 400.0]
         v.patch_hi_var.set("450")                            # one edge typed: the other keeps all its digits
         v.schedule(v.on_patch_edited, now=True)
         assert v.patch_x_mm == (25.4 * 6, 450.0)
-        assert v.save_patch() and dm.get_data("patch_x_mm") == [25.4 * 6, 450.0]
+        assert v.save_patch() and dm.get_data("analysis/fault/patch_x_mm") == [25.4 * 6, 450.0]
     finally:
         v.on_close()
 
@@ -631,7 +631,7 @@ def test_experiment_edges_win_over_a_record_and_do_not_make_it_differ(slip_app):
         assert v.save()                                      # and this one none
     finally:
         v.on_close()
-    slip_app.data_manager.data["patch_x_mm"] = [150.0, 400.0]     # e.g. set later by a notebook
+    slip_app.data_manager.data["analysis"] = {"fault": {"patch_x_mm": [150.0, 400.0]}}     # e.g. set later by a notebook
     for event_idx, record_patch in ((EVENT, [120.0, 380.0]), (2, [math.nan, math.nan])):
         v = SlipDistributionView(slip_app, 0, event_idx)
         try:
@@ -682,7 +682,7 @@ def test_patch_saved_in_one_window_reaches_the_others(slip_app):
     ([150.0, 150.0], None, "experiment patch edges unusable: [150.0, 150.0]"),
 ])
 def test_experiment_patch_in_either_order_or_unusable(slip_app, value, patch, note):
-    slip_app.data_manager.data["patch_x_mm"] = value
+    slip_app.data_manager.data["analysis"] = {"fault": {"patch_x_mm": value}}
     v = SlipDistributionView(slip_app, 0, EVENT)
     try:
         assert v.patch_x_mm == patch and v.patch_note_var.get() == note
@@ -702,7 +702,7 @@ def test_experiment_patch_from_preprocessing_survives_a_file_round_trip(slip_app
     from labquake_explorer.preprocessing.build import experiment
     data = slip_app.data_manager.data
     dm = DataManager()
-    dm.data = experiment(data["name"], data["runs"], patch_x_mm=[150.0, 400.0])
+    dm.data = experiment(data["name"], data["runs"], analysis={"fault": {"patch_x_mm": [150.0, 400.0]}})
     path = tmp_path / f"exp{suffix}"
     dm.save_file(path)
     v = SlipDistributionView(app_from_file(path), 0, EVENT)
@@ -750,7 +750,7 @@ def test_fault_panel_zoom_is_kept_until_another_event(slip_app, view):
 
 
 def test_fault_panels_fit_each_event_with_a_patch_drawn(slip_app, view):
-    slip_app.data_manager.data["patch_x_mm"] = [150.0, 400.0]
+    slip_app.data_manager.data["analysis"] = {"fault": {"patch_x_mm": [150.0, 400.0]}}
     run = slip_app.data_manager.get_data("runs/[0]")
     add_slip_array(run["events"][2], slips_um=[0.02] * 8, noise_um=0.05)
     view.set_event(2)                                     # from about 100 um and 20 ms to almost nothing elsewhere
@@ -1096,7 +1096,7 @@ def test_the_profile_is_cut_at_the_fault_ends(slip_app, view):
     assert view.save()
     rec = view.event["slip_analysis"]
     assert rec["fault_ends_x_mm"] == [100.0, 460.0] and rec["profile"]["end_slip_um"][1] == pytest.approx(reached["plus"][1])
-    assert view.save_fault() and slip_app.data_manager.get_data("fault_ends_x_mm") == [100.0, 460.0]
+    assert view.save_fault() and slip_app.data_manager.get_data("analysis/fault/ends_x_mm") == [100.0, 460.0]
     assert view.ends_note_var.get() == "fault ends saved in the experiment"
     view.on_close()
     v2 = SlipDistributionView(slip_app, 0, 0)               # another event opens with the experiment's ends
@@ -1175,19 +1175,25 @@ def test_saving_keeps_a_text_fault_description(slip_app, view):
     view.schedule(view.on_patch_edited, now=True)
     assert view.save_fault()
     assert dm.data["fault"] == "one-dimensional PMMA fault, 500 mm long"
-    assert dm.data["fault_ends_x_mm"] == [0.0, 500.0] and dm.data["patch_x_mm"] == [190.0, 315.0]
+    assert dm.data["analysis"]["fault"] == {"ends_x_mm": [0.0, 500.0], "patch_x_mm": [190.0, 315.0]}
+    assert "patch_x_mm" not in dm.data and "fault_ends_x_mm" not in dm.data
 
 
-def test_edges_kept_in_an_earlier_fault_dict_are_read_and_moved(slip_app):
+@pytest.mark.parametrize("layout", ["fault dict", "top level"])
+def test_edges_kept_where_earlier_files_put_them_are_read_and_moved(slip_app, layout):
     dm = slip_app.data_manager
-    dm.data["fault"] = {"patch_x_mm": [150.0, 400.0], "ends_x_mm": [0.0, 500.0]}
+    if layout == "fault dict":
+        dm.data["fault"] = {"patch_x_mm": [150.0, 400.0], "ends_x_mm": [0.0, 500.0]}
+    else:
+        dm.data["patch_x_mm"], dm.data["fault_ends_x_mm"] = [150.0, 400.0], [0.0, 500.0]
     v = SlipDistributionView(slip_app, 0, EVENT)
     try:
         assert v.patch_x_mm == (150.0, 400.0) and v.fault_ends == (0.0, 500.0)
         v.patch_hi_var.set("410")
         v.schedule(v.on_patch_edited, now=True)
-        assert v.save_patch() and dm.data["patch_x_mm"] == [150.0, 410.0]
-        assert dm.data["fault"] == {"ends_x_mm": [0.0, 500.0]}          # the patch moved out of it
-        assert v.save_ends() and "fault" not in dm.data
+        assert v.save_patch() and dm.data["analysis"]["fault"]["patch_x_mm"] == [150.0, 410.0]
+        assert "patch_x_mm" not in dm.data and dm.data.get("fault") != {"patch_x_mm": [150.0, 400.0], "ends_x_mm": [0.0, 500.0]}
+        assert v.save_ends() and "fault" not in dm.data and "fault_ends_x_mm" not in dm.data
+        assert dm.data["analysis"]["fault"] == {"patch_x_mm": [150.0, 410.0], "ends_x_mm": [0.0, 500.0]}
     finally:
         v.on_close()
