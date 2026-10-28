@@ -34,9 +34,9 @@ bounds; the tab shown is the model fitted.  A left click
 on a point selects its sensor; a zoom of these two panels stays until another
 event or field is loaded.  The bare PMMA patch is drawn on both panels; its
 edges are typed in and saved for the whole experiment
-(``data['fault']['patch_x_mm']``), where preprocessing can set them too.
+(``data['patch_x_mm']``), where preprocessing can set them too.
 Edges typed and not saved there stay while the view moves between events.
-The fault ends (``data['fault']['ends_x_mm']``) are typed and saved the same
+The fault ends (``data['fault_ends_x_mm']``) are typed and saved the same
 way: the profile is cut there, and where its tip lies beyond an end the text
 gives the slip at that end instead of a rupture tip.
 
@@ -103,9 +103,9 @@ BEFORE_COLOR, AFTER_COLOR, TI_COLOR = "#1f77b4", "#ff7f0e", "#d62728"
 PROFILE_LABELS = dict(sprof.MODEL_LABELS)      # model key -> combobox text
 DEFAULT_PROFILE_MODEL = "eaz"
 DEFAULT_FRONT_MODE = "bilateral"
-FAULT_KEY, PATCH_KEY = "fault", "patch_x_mm"   # experiment level: data['fault']['patch_x_mm']
-ENDS_KEY = "ends_x_mm"                         # data['fault']['ends_x_mm']: where the fault ends
-RECORD_ENDS_KEY = "fault_ends_x_mm"            # the ends a slip_analysis record was drawn with
+PATCH_KEY = "patch_x_mm"                       # data['patch_x_mm'] and in a slip_analysis record
+RECORD_ENDS_KEY = "fault_ends_x_mm"            # data['fault_ends_x_mm']: where the fault ends; also in a record
+LEGACY_FAULT_KEY, LEGACY_ENDS_KEY = "fault", "ends_x_mm"     # read: data['fault'] = {'patch_x_mm', 'ends_x_mm'}
 END_COLOR = "#606060"
 T_I_FLAGS = (cs.FLAG_EDGE, cs.FLAG_WEAK, cs.FLAG_NO_PEAK)   # the pick flags that make t_i doubtful
 PATCH_COLOR, POINT_COLOR, FRONT_COLOR, FLAG_COLOR = "#c08000", "#1f77b4", "#2ca02c", "#9467bd"
@@ -1542,11 +1542,28 @@ class SlipDistributionView(EventView):
             lines.append(auto)
         return "\n".join(lines)
 
-    def experiment_patch_value(self):
-        """``data['fault']['patch_x_mm']`` as stored, or None when there is none."""
+    def experiment_value(self, key: str, legacy_key: str):
+        """``data[key]`` as stored at the experiment level, else the same value in a
+        ``data['fault']`` dict (how earlier files kept it; a ``fault`` that is text,
+        a description of the sample, is left alone), or None."""
         data = self.data_manager.data if isinstance(self.data_manager.data, dict) else {}
-        fault = data.get(FAULT_KEY)
-        return fault.get(PATCH_KEY) if isinstance(fault, dict) else None
+        if data.get(key) is not None:
+            return data[key]
+        fault = data.get(LEGACY_FAULT_KEY)
+        return fault.get(legacy_key) if isinstance(fault, dict) else None
+
+    def store_experiment_value(self, key: str, legacy_key: str, value: list) -> None:
+        """Write ``data[key]`` and drop the copy an earlier file kept in ``data['fault']``."""
+        self.data_manager.set_data(key, value, add_key=True)
+        fault = self.data_manager.data.get(LEGACY_FAULT_KEY)
+        if isinstance(fault, dict) and legacy_key in fault:
+            del fault[legacy_key]
+            if not fault:
+                del self.data_manager.data[LEGACY_FAULT_KEY]
+
+    def experiment_patch_value(self):
+        """The experiment's ``patch_x_mm`` as stored, or None when there is none."""
+        return self.experiment_value(PATCH_KEY, PATCH_KEY)
 
     def experiment_patch(self) -> Optional[tuple]:
         """The experiment's patch edges, increasing, or None when absent or unusable."""
@@ -1600,7 +1617,7 @@ class SlipDistributionView(EventView):
         self.patch_note_var.set(note)
 
     def save_patch(self) -> bool:
-        """Store the patch edges for the whole experiment (``data['fault']['patch_x_mm']``)
+        """Store the patch edges for the whole experiment (``data['patch_x_mm']``)
         and show them in the other open Slip Distribution windows."""
         self.flush_pending()
         try:
@@ -1612,7 +1629,7 @@ class SlipDistributionView(EventView):
             self.status_var.set("type both patch edges first")
             return False
         old = self.experiment_patch()
-        self.data_manager.set_data(f"{FAULT_KEY}/{PATCH_KEY}", [float(patch[0]), float(patch[1])], add_key=True)
+        self.store_experiment_value(PATCH_KEY, PATCH_KEY, [float(patch[0]), float(patch[1])])
         for var in (self.patch_lo_var, self.patch_hi_var):
             self._shown[str(var)] = var.get()
         self.patch_x_mm = patch
@@ -1642,10 +1659,8 @@ class SlipDistributionView(EventView):
 
     # ------------------------------------------------------------ fault ends
     def experiment_ends_value(self):
-        """``data['fault']['ends_x_mm']`` as stored, or None when there is none."""
-        data = self.data_manager.data if isinstance(self.data_manager.data, dict) else {}
-        fault = data.get(FAULT_KEY)
-        return fault.get(ENDS_KEY) if isinstance(fault, dict) else None
+        """The experiment's ``fault_ends_x_mm`` as stored, or None when there is none."""
+        return self.experiment_value(RECORD_ENDS_KEY, LEGACY_ENDS_KEY)
 
     def experiment_ends(self) -> Optional[tuple]:
         return _patch_pair(self.experiment_ends_value())
@@ -1704,7 +1719,7 @@ class SlipDistributionView(EventView):
         self.ends_note_var.set(note)
 
     def save_ends(self) -> bool:
-        """Store the fault ends for the whole experiment (``data['fault']['ends_x_mm']``)
+        """Store the fault ends for the whole experiment (``data['fault_ends_x_mm']``)
         and show them in the other open windows that hold none typed there."""
         try:
             ends = self.read_ends()
@@ -1714,7 +1729,7 @@ class SlipDistributionView(EventView):
         if ends is None:
             self.status_var.set("type both fault ends first")
             return False
-        self.data_manager.set_data(f"{FAULT_KEY}/{ENDS_KEY}", [float(ends[0]), float(ends[1])], add_key=True)
+        self.store_experiment_value(RECORD_ENDS_KEY, LEGACY_ENDS_KEY, [float(ends[0]), float(ends[1])])
         for var in (self.ends_lo_var, self.ends_hi_var):
             self._shown[str(var)] = var.get()
         self.fault_ends = ends
