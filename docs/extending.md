@@ -439,9 +439,19 @@ layouts above: run keys that were dropped, picks moved into
 `event_extraction`, events reduced to the processed channels plus
 `waveform/<recorder>` records (with `trigger_time` and `positions`), arrival
 picks under `arrivals`, `event_analysis` records at version 3. The PSU
-`strain` layout is left as it is. A copy of the original is kept next to the
-file unless `--no-backup` is given:
+`strain` layout is left as it is. The patch edges and fault ends an earlier
+explorer kept at the top level (`patch_x_mm`, `fault_ends_x_mm`) or in a
+`fault` dict move into `analysis['fault']`. A copy of the original is kept
+next to the file unless `--no-backup` is given:
 
 ```bash
 python -m labquake_explorer.data.migrate experiment.h5
+```
+
+The fault geometry alone can be set without rewriting the file: with
+`--patch-x-mm` and/or `--ends-x-mm` only `analysis['fault']` is written (in
+place for an HDF5 file, so no copy is kept), and the legacy keys move:
+
+```bash
+python -m labquake_explorer.data.migrate t0213e.h5 --patch-x-mm=187.5,312.5 --ends-x-mm=0,500
 ```

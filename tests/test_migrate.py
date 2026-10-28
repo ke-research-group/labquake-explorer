@@ -170,3 +170,53 @@ def test_recalibrate_lp_displacement_from_volts(tmp_path):
     assert copy.read_bytes() == b"first original"                            # never overwritten
     again = DataManager(); again.load_file(path)
     assert again.get_data("runs/[0]/units")["LP_displacement"] == "um"
+
+
+def test_fault_geometry_moves_into_analysis():
+    data, _ = make_experiment()
+    data["patch_x_mm"] = [187.5, 312.5]
+    data["fault"] = {"ends_x_mm": np.array([0.0, 500.0]), "patch_x_mm": [1.0, 2.0]}   # the top-level copy wins
+    notes = M.upgrade_experiment(data)
+    assert data["analysis"]["fault"] == {"patch_x_mm": [187.5, 312.5], "ends_x_mm": [0.0, 500.0]}
+    assert "patch_x_mm" not in data and "fault" not in data
+    assert any("patch_x_mm -> analysis/fault/patch_x_mm" in n for n in notes)
+    data, _ = make_experiment()
+    data["fault"] = "one-dimensional PMMA fault, 500 mm long"            # a description stays
+    data["fault_ends_x_mm"] = [0.0, 500.0]
+    M.upgrade_experiment(data)
+    assert data["fault"] == "one-dimensional PMMA fault, 500 mm long"
+    assert data["analysis"]["fault"] == {"ends_x_mm": [0.0, 500.0]}
+    assert M.upgrade_experiment(data) == []                               # nothing left to do
+
+
+@pytest.mark.parametrize("suffix", [".h5", ".npz"])
+def test_write_fault_geometry_in_place(tmp_path, suffix):
+    data, _ = make_experiment()
+    data["fault"] = "one-dimensional PMMA fault, 500 mm long"
+    data["patch_x_mm"] = [187.5, 312.5]
+    dm = DataManager()
+    dm.data = data
+    path = tmp_path / f"exp{suffix}"
+    dm.save_file(path)
+    before = {"runs": len(data["runs"]), "events": len(data["runs"][0]["events"])}
+    notes = M.write_fault_geometry(path, ends_x_mm=(0, 500))
+    assert any("patch_x_mm -> analysis/fault/patch_x_mm" in n for n in notes)
+    assert any("ends_x_mm = [0.0, 500.0]" in n for n in notes)
+    dm2 = DataManager()
+    dm2.load_file(path)
+    assert np.asarray(dm2.data["analysis"]["fault"]["patch_x_mm"]).tolist() == [187.5, 312.5]
+    assert np.asarray(dm2.data["analysis"]["fault"]["ends_x_mm"]).tolist() == [0.0, 500.0]
+    assert "patch_x_mm" not in dm2.data and dm2.data["fault"] == "one-dimensional PMMA fault, 500 mm long"
+    assert len(dm2.data["runs"]) == before["runs"] and len(dm2.data["runs"][0]["events"]) == before["events"]
+    assert M.write_fault_geometry(path, patch_x_mm=[187.5, 312.5], ends_x_mm=[0, 500]) == []   # already so
+    notes = M.write_fault_geometry(path, patch_x_mm=[50, 450])
+    assert notes == ["analysis/fault/patch_x_mm = [50.0, 450.0]"]
+    dm3 = DataManager()
+    dm3.load_file(path)
+    assert np.asarray(dm3.data["analysis"]["fault"]["patch_x_mm"]).tolist() == [50.0, 450.0]
+    assert M.main([str(path), "--ends-x-mm=0,400"]) == 0
+    dm4 = DataManager()
+    dm4.load_file(path)
+    assert np.asarray(dm4.data["analysis"]["fault"]["ends_x_mm"]).tolist() == [0.0, 400.0]
+    with pytest.raises(ValueError, match="two numbers"):
+        M.write_fault_geometry(path, patch_x_mm=[1.0])

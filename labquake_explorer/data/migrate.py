@@ -5,10 +5,14 @@ note per change; ``upgrade_file(path)`` does it for a file (keeping a copy of
 the original next to it).  Run it from the command line::
 
     python -m labquake_explorer.data.migrate experiment.h5 [--no-backup] [--lvdt-um-per-v=-5040]
+    python -m labquake_explorer.data.migrate experiment.h5 --patch-x-mm=187.5,312.5 --ends-x-mm=0,500
 
 ``--lvdt-um-per-v`` converts an ``LP_displacement`` still in LVDT volts to
 micrometres in every run and event (``recalibrate_lp_displacement``), for
-files made before the LVDT slope was known.
+files made before the LVDT slope was known.  ``--patch-x-mm`` / ``--ends-x-mm``
+set the fault geometry in ``analysis['fault']`` (``write_fault_geometry``):
+for an HDF5 file that small group is written in place, nothing else in the
+file is touched, so no copy is kept.
 
 What is brought up to date (see ``docs/extending.md`` for the layouts):
 
@@ -18,6 +22,10 @@ What is brought up to date (see ``docs/extending.md`` for the layouts):
   and an ``event_window`` record merge into ``event_extraction``; a
   ``displacement`` field next to a ``slip`` channel array goes (it duplicated
   the first slip channel).
+* the experiment: the patch edges and fault ends an earlier explorer kept at
+  the top level (``patch_x_mm``, ``fault_ends_x_mm``) or in a ``fault`` dict
+  move into ``analysis['fault']`` (``patch_x_mm``, ``ends_x_mm``); a ``fault``
+  that is text, the sample description, stays.
 * events: the event-level ``pzt_spectrum`` map moves into the records it was
   computed on (``waveform/<recorder>/spectrum``); the recorders' ``raw_data``
   slices go (processed channels only);
@@ -38,11 +46,13 @@ import sys
 from pathlib import Path
 from typing import Mapping
 
+import h5py
 import numpy as np
 
 from labquake_explorer.analysis.event_metrics import RESULT_VERSION as ANALYSIS_VERSION
 from labquake_explorer.data.channels import channel_array, is_channel_array, positions_for
 from labquake_explorer.data.picks import EXTRACTION_KEY, LEGACY_INDICES_KEY
+from labquake_explorer.data.settings import ANALYSIS_KEY, get_setting, set_setting
 from labquake_explorer.data.sources import (WAVEFORM, ARRIVALS_KEY, is_legacy_strain, is_waveform_block,
                                             read_arrivals, run_sources, waveform_trigger_time, write_arrivals)
 
@@ -51,6 +61,9 @@ NI_KEYS_DROPPED = ("labels", "member_offsets")
 LEGACY_WINDOW_KEY = "event_window"
 LP_FIELD = "LP_displacement"
 INTERIM_ARRIVAL_KEYS = ("picked_idx", "rupture_arrival_time", "enabled_channels", "fitting_channels", "locations")
+FAULT_SETTING = "fault"                                   # analysis['fault']
+FAULT_GEOMETRY_KEYS = ("patch_x_mm", "ends_x_mm")
+LEGACY_GEOMETRY_KEYS = {"patch_x_mm": "patch_x_mm", "fault_ends_x_mm": "ends_x_mm"}   # top-level key -> new key
 
 
 def _recorders(run: Mapping) -> list:
@@ -279,9 +292,46 @@ def _waveform_entries(event: Mapping) -> dict:
 
 
 # ------------------------------------------------------------ experiment
+def _pair(value) -> list:
+    """Two floats from a stored pair (list, tuple or array); ValueError otherwise."""
+    arr = np.asarray(value, dtype=float).ravel()
+    if arr.size != 2:
+        raise ValueError(f"a fault geometry value needs two numbers, got {value!r}")
+    return [float(arr[0]), float(arr[1])]
+
+
+def upgrade_fault_geometry(data: dict) -> list:
+    """Move the patch edges and fault ends an earlier explorer kept at the top
+    level or in a ``fault`` dict into ``analysis['fault']`` (a value already
+    there wins); returns the notes."""
+    notes = []
+    if not isinstance(data, dict):
+        return notes
+    found = {}
+    for old, new in LEGACY_GEOMETRY_KEYS.items():
+        if old in data:
+            found[new] = (old, data.pop(old))
+    fault = data.get(FAULT_SETTING)
+    if isinstance(fault, dict):
+        for key in FAULT_GEOMETRY_KEYS:
+            if key in fault:
+                found.setdefault(key, (f"fault/{key}", fault.pop(key)))
+        if not fault:
+            del data[FAULT_SETTING]
+    for new, (old, value) in found.items():
+        if get_setting(data, FAULT_SETTING, new) is None and value is not None:
+            try:
+                set_setting(data, _pair(value), FAULT_SETTING, new)
+            except ValueError:
+                notes.append(f"{old}: unusable value {value!r} dropped")
+                continue
+        notes.append(f"{old} -> {ANALYSIS_KEY}/{FAULT_SETTING}/{new}")
+    return notes
+
+
 def upgrade_experiment(data: dict) -> list:
     """Upgrade every run of a loaded experiment dict in place; returns the notes."""
-    notes = []
+    notes = upgrade_fault_geometry(data)
     runs = data.get("runs") if isinstance(data, Mapping) else None
     if isinstance(runs, (list, tuple)):
         for i, run in enumerate(runs):
@@ -354,6 +404,65 @@ def upgrade_file(path, backup: bool = True, lvdt_um_per_v=None) -> list:
     return notes
 
 
+def write_fault_geometry(path, patch_x_mm=None, ends_x_mm=None) -> list:
+    """Set ``analysis['fault']['patch_x_mm']`` / ``['ends_x_mm']`` in an experiment
+    file (a value None is left as it is) and move the values an earlier file
+    kept at the top level or in a ``fault`` dict there.  An HDF5 file is
+    edited in place, the small group only, the rest of the file untouched; an
+    npz file is loaded and written back.  Returns the notes."""
+    from labquake_explorer.data.data_manager import CONTAINER_ATTR, DataManager
+    path = Path(path)
+    wanted = {key: None if value is None else _pair(value) for key, value in
+              (("patch_x_mm", patch_x_mm), ("ends_x_mm", ends_x_mm))}
+    if path.suffix.lower() == ".npz":
+        dm = DataManager()
+        dm.load_file(path)
+        notes = upgrade_fault_geometry(dm.data)
+        for key, value in wanted.items():
+            if value is not None and get_setting(dm.data, FAULT_SETTING, key) != value:
+                set_setting(dm.data, value, FAULT_SETTING, key)
+                notes.append(f"{ANALYSIS_KEY}/{FAULT_SETTING}/{key} = {value}")
+        if notes:
+            dm.save_file(path)
+        return notes
+    notes = []
+    with h5py.File(path, "r+") as f:
+        analysis = f.require_group(ANALYSIS_KEY)
+        analysis.attrs[CONTAINER_ATTR] = "dict"
+        fault = analysis.require_group(FAULT_SETTING)
+        fault.attrs[CONTAINER_ATTR] = "dict"
+        moves = [(old, new) for old, new in LEGACY_GEOMETRY_KEYS.items() if old in f]
+        legacy = f.get(FAULT_SETTING)
+        if isinstance(legacy, h5py.Group):                # a fault dict; a text fault stays
+            moves += [(f"{FAULT_SETTING}/{key}", key) for key in FAULT_GEOMETRY_KEYS if key in legacy]
+        for old, new in moves:
+            if new in fault:
+                del f[old]                                # the value already in analysis wins
+            else:
+                f.move(old, f"{ANALYSIS_KEY}/{FAULT_SETTING}/{new}")
+            notes.append(f"{old} -> {ANALYSIS_KEY}/{FAULT_SETTING}/{new}")
+        if isinstance(legacy, h5py.Group) and not len(legacy):
+            del f[FAULT_SETTING]
+        for key, value in wanted.items():
+            if value is None:
+                continue
+            if key in fault:
+                old_value = np.asarray(fault[key][...], dtype=float).ravel()
+                if old_value.size == 2 and np.allclose(old_value, value):
+                    continue
+                del fault[key]
+            fault.create_dataset(key, data=np.asarray(value, dtype=float))
+            notes.append(f"{ANALYSIS_KEY}/{FAULT_SETTING}/{key} = {value}")
+    return notes
+
+
+def _pair_option(args: list, name: str):
+    for a in args:
+        if a.startswith(name + "="):
+            return _pair([float(v) for v in a.split("=", 1)[1].split(",")])
+    return None
+
+
 def main(argv=None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     backup = "--no-backup" not in args
@@ -361,12 +470,16 @@ def main(argv=None) -> int:
     for a in args:
         if a.startswith("--lvdt-um-per-v="):
             lvdt = float(a.split("=", 1)[1])
+    patch, ends = _pair_option(args, "--patch-x-mm"), _pair_option(args, "--ends-x-mm")
     files = [a for a in args if not a.startswith("--")]
     if not files:
         print(__doc__)
         return 2
     for name in files:
-        notes = upgrade_file(name, backup=backup, lvdt_um_per_v=lvdt)
+        if patch is not None or ends is not None:
+            notes = write_fault_geometry(name, patch, ends)
+        else:
+            notes = upgrade_file(name, backup=backup, lvdt_um_per_v=lvdt)
         print(f"{name}: {len(notes)} change(s)" + ("" if notes else " (already up to date)"))
         for note in notes:
             print("  " + note)
