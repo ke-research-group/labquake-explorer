@@ -80,19 +80,21 @@ looks like this:
 | `calibration` | the steps that produced the physical channels (see the preprocessing package) |
 | `event_extraction`, `events` | the Pick Events form's record, with the picks (`event_indices`) inside (schema below), and the extracted events |
 
-At the experiment level (next to `runs`, with the other metadata such as a
-`fault` description), `patch_x_mm = [from, to]` gives the edges of the bare
-PMMA patch along the fault in mm (in either order), in the frame of the sensor
-positions, and `fault_ends_x_mm = [from, to]` where the fault (the sample)
-ends. The Slip Distribution view draws both and can save them there; a
-preprocessing notebook can set them with
-`experiment(..., patch_x_mm=[x0, x1], fault_ends_x_mm=[0, 500])`. A value that
-does not give two finite, different numbers is not drawn, and the view says
-it is unusable. The view cuts the slip profile at the fault ends, so a rupture
-whose fitted tip lies beyond an end is reported with its slip at that end.
-Files saved before these keys kept them as `fault = {'patch_x_mm': ...,
-'ends_x_mm': ...}`; the view reads that and moves a value out of it when it
-saves.
+Everything a view stores for the whole experiment goes into one dict next to
+`runs`, `analysis` (`labquake_explorer/data/settings.py`: `get_setting`,
+`set_setting`), so the top level keeps to the metadata the preprocessing
+wrote (`name`, `date`, `sample`, a `fault` description, ...):
+
+| key | meaning |
+|---|---|
+| `analysis['fault']` | `patch_x_mm = [from, to]`, the edges of the bare PMMA patch along the fault in mm (in either order), and `ends_x_mm = [from, to]`, where the fault (the sample) ends, both in the frame of the sensor positions. The Slip Distribution view draws them, cuts the slip profile at the ends and can save both; a notebook sets them with `experiment(..., analysis={'fault': {'patch_x_mm': [x0, x1], 'ends_x_mm': [0, 500]}})`. A value without two finite, different numbers is not drawn, and the view says it is unusable |
+| `analysis['medium']` | `rho_kg_m3`, `vp_m_s`, `vs_m_s` of the sample, as last saved by the PZT Spectrum view and offered to every new window |
+| `analysis['pzt_spectrum']` | the PZT Spectrum view's `settings` (its controls as last saved, the keys of a `spectrum` record below plus `phase` and `radiation_coefficient`) and `sensors` (per sensor, keyed by the channel's field name such as `pzt_1`, else `ch<k>`: the `calibration` table, `calibration_path`, `calibration_unit`, `calibration_db`, `t_star_s`, `distance_m`, `free_surface_factor`) |
+
+Files saved earlier kept the patch edges and fault ends as top-level
+`patch_x_mm` / `fault_ends_x_mm` or as `fault = {'patch_x_mm': ...,
+'ends_x_mm': ...}`; the view reads those and moves a value into `analysis`
+when it saves.
 
 A **channel array** (`labquake_explorer/data/channels.py`) is a dict with
 `data` shaped `(n_channels, n)`, `channels` naming the rows, `unit`, and an
@@ -174,8 +176,8 @@ entry per sensor, in the order of `channels`, except `patch_x_mm`
 | `peak_rate_um_s` | filtered slip rate at `t_i` |
 | `rate_noise_um_s` | standard deviation of the filtered slip rate in the before window; a `max_rate` peak below `rate_snr` times this is flagged `weak rate peak` |
 | `flags` | one text per sensor, `"; "`-joined: `pick at search edge`, `weak rate peak`, `no rate peak`, `no crossing found` (onset or step), `before/after window clipped` (the window runs past the data), `before/after window has gaps` (less than half of its samples are finite), `before/after window reaches t_i` (`t_i` lies inside the window), `before/after fit invalid` |
-| `rate_filter_tabs`, `fault_ends_x_mm` | the windows of both windowed filter tabs (`savgol_window_s`, `boxcar_window_s`), whichever is used; the fault ends the profile was cut at (NaN when none; the experiment's `fault_ends_x_mm` wins when the view opens) |
-| `patch_x_mm` | the bare PMMA patch edges drawn, `[from, to]` (NaN when none). An event opens with the experiment's `patch_x_mm` (see Run layout), else with this copy; edges typed in the view and not saved to the experiment stay as it moves between events. The copy counts towards "differs from the saved record" only while the experiment has no edges |
+| `rate_filter_tabs`, `fault_ends_x_mm` | the windows of both windowed filter tabs (`savgol_window_s`, `boxcar_window_s`), whichever is used; the fault ends the profile was cut at (NaN when none; the experiment's `analysis['fault']['ends_x_mm']` wins when the view opens) |
+| `patch_x_mm` | the bare PMMA patch edges drawn, `[from, to]` (NaN when none). An event opens with the experiment's `analysis['fault']['patch_x_mm']` (see Run layout), else with this copy; edges typed in the view and not saved to the experiment stay as it moves between events. The copy counts towards "differs from the saved record" only while the experiment has no edges |
 | `profile` | slip profile fit (`labquake_explorer/analysis/slip_profile.py`): `model` (`quadratic`, `eaz` or `eaz_asymmetric`), `params`, `valid`, `reason`, `n` (the sensors fitted: those in `use` with a finite slip and, when weighted, a positive `sigma`), `weighted`, `r2`, `rms_um`, `tips_mm` (where the fitted profile reaches zero), `peak_x_mm`, `peak_um`, `at_bounds`, `unresolved` (the parameters the sensors do not pin down, and `tips` when a rupture edge is only bracketed), `ranges` (name to `[lo, hi]`, the values that fit equally well where known, NaN for an open end; `tip_minus`/`tip_plus` are the brackets of free edges, and an EAZ `D` that moves with a free `lambda` has a range without being listed), `fixed` (the parameters held at the user's values), `end_slip_um` (the profile at the two fault ends where it reaches them, else NaN), `settings` (every model tab's parameters: per model and name, `fit` false for a held one, `value` the held value, `min`/`max` the user's bounds, NaN for automatic), and `use` (the sensors chosen) |
 | `front` | rupture-front fit of `t_shift_s` (`t_i - event_time`) against `x`: `mode` (`single` or `bilateral`, below), `valid`, `reason`, `split_x_mm` and `t0_s` (bilateral: the apex and its time relative to `event_time`; NaN when there is none), `segments` (`x_from`, `x_to`, `n`, `slope_s_per_mm`, `intercept_s` at x = 0 relative to `event_time`, `velocity_m_s` positive towards +x and infinite for a flat line, `r2`, `resolved` false when the front crosses the segment within one sample, and `min_speed_m_s`, the speed of crossing it in one sample: the lower bound of an unresolved one), `use` and `use_auto` (while true, `use` follows the pick flags: the sensors whose `t_i` is doubtful, flagged `pick at search edge`, `weak rate peak` or `no rate peak`, are left out) |
 
@@ -259,7 +261,11 @@ channel. The event-level `pzt_spectrum` map of older files is still read
 and moves into the record on the next save or with the migration tool.
 A record stores every control (trigger source and time, pre/post window and
 noise window in ms, taper, baseline mode, step removal, calibration path/unit/dB,
-t*, fit band, bins per decade, SNR threshold, n fixed, loss), the binned
+t*, fit band, bins per decade, SNR threshold, n fixed, loss), the calibration
+table itself (`calibration`: `Calibration.as_dict()` plus `gain_db`, how the
+CSV was read; None when uncalibrated), the source entries as typed
+(`source_inputs`: phase, `rho_kg_m3`, `vp_m_s`, `vs_m_s`, `distance_m`,
+`radiation_coefficient`, `free_surface_factor`, None where blank), the binned
 spectrum (`spectrum`: binned frequencies, amplitudes, noise, SNR, counts and
 the window/taper/calibration metadata), the fit (`fit`: `omega0` in the
 spectrum's units, `fc`, `n`, weighted rms of ln residuals, bins used, band
@@ -267,6 +273,14 @@ used, `converged`, `at_bounds`, `band_limited`, `valid`, `reason`) and, once
 "Compute source" has run, `source` (phase, medium constants, distance,
 radiation coefficient, free-surface factor, `seismic_moment_nm`, `mw`,
 `source_radius_m`, `rupture_area_m2`, `stress_drop_pa`, `kR`, warnings).
+Save also writes the controls, the medium and the sensor's own values to the
+experiment's `analysis` dict (see Run layout), so a window on any other event
+opens with them: the controls and the medium when the first channel shown has
+no record, a sensor's calibration, t*, distance and free-surface factor
+whenever its channel is selected without a record. The calibration is read
+from the CSV when its path is typed or browsed (the dB flag follows the
+header), kept as a table and used from the table afterwards, so a saved
+file works without the CSV; the frame says what is loaded.
 Calibration CSVs are recognised by header: the frequency column is any
 `frequency`/`freq`/`f` column, with or without a unit (`Frequency (Hz)`,
 `freq_kHz`; kHz is converted), the gain column is the one mentioning gain,
