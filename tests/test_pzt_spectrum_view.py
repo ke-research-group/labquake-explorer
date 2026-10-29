@@ -427,8 +427,8 @@ def test_save_merges_channels_and_is_json_like(brune_app, view):
     rec = saved["channels"]["ch3"]
     for key in ("version", "channel", "trigger", "trigger_time_s", "fs_hz", "pre_ms", "post_ms", "taper",
                 "baseline", "highpass_hz", "remove_step", "calibration_path", "calibration_unit",
-                "calibration_db", "t_star_s", "fmin_hz", "fmax_hz", "bins_per_decade", "snr_min",
-                "n_fixed", "loss", "parameter_warnings", "spectrum", "fit", "source"):
+                "calibration_db", "calibration", "t_star_s", "fmin_hz", "fmax_hz", "bins_per_decade", "snr_min",
+                "n_fixed", "loss", "parameter_warnings", "source_inputs", "spectrum", "fit", "source"):
         assert key in rec, key
     assert rec["channel"] == BRUNE_CH and rec["fit"]["valid"] and rec["source"]["valid"]
     assert rec["spectrum"]["amp_units"] == "m*s"
@@ -836,14 +836,16 @@ def test_dragging_the_windows_updates_settings_and_recomputes(brune_app, view):
     assert view.post_var.get() == "2.5" and view.handles["signal_end"].get_xdata()[0] == pytest.approx(2.5)
     view.end_drag()
     assert view.record["post_ms"] == 2.5 and view.window.n_post == int(round(2.5e-3 * brune_app.fs))
-    # the pre edge cannot cross the trigger; moved earlier, it pushes the noise window ahead of it, length kept
+    # the pre edge cannot cross the trigger; the automatic noise window (blank entries) follows it
     view.begin_drag("signal_start", -0.5)
     e = view.drag_to(0.3)
-    assert e["signal_start"] == 0.0 and e["noise_end"] == pytest.approx(-0.5) and view.pre_var.get() == "0"
+    assert e["signal_start"] == 0.0 and view.pre_var.get() == "0"
     e = view.drag_to(-1.0)
-    assert e["noise_end"] == pytest.approx(-1.0) and e["noise_start"] == pytest.approx(-3.5)
+    assert e["signal_start"] == pytest.approx(-1.0) and e["noise_end"] == pytest.approx(-1.0)
+    assert (view.noise_start_var.get(), view.noise_end_var.get()) == ("", "")
     view.end_drag()
-    assert view.record["pre_ms"] == 1.0 and view.record["noise_end_ms"] == -1.0 and view.record["noise_start_ms"] == -3.5
+    assert view.record["pre_ms"] == 1.0 and view.record["noise_start_ms"] is None
+    assert view.window.i_noise1 == view.window.i_trigger - view.window.n_pre
     # the whole signal window slides, keeping its length and the trigger inside
     e1 = view.current_edges_ms()
     view.begin_drag("signal", 0.5)
@@ -854,7 +856,7 @@ def test_dragging_the_windows_updates_settings_and_recomputes(brune_app, view):
     assert e["signal_start"] == 0.0                                   # stops at the trigger
     view.end_drag()
     assert view.record["pre_ms"] == 0.0 and view.record["post_ms"] == pytest.approx(e1["signal_end"] - e1["signal_start"])
-    # the noise window: its end never passes the signal start, its body slides as one
+    # a noise edge dragged makes the noise window explicit; its end never passes the signal start
     view.pre_var.set("0.5"); view.post_var.set("2.0")
     view.schedule_compute(now=True)
     e2 = view.current_edges_ms()
@@ -864,6 +866,12 @@ def test_dragging_the_windows_updates_settings_and_recomputes(brune_app, view):
     view.drag_to(-1.0)
     view.end_drag()
     assert view.record["noise_end_ms"] == -1.0 and view.window.i_noise1 == view.window.i_trigger - int(round(1e-3 * brune_app.fs))
+    assert view.record["noise_start_ms"] == pytest.approx(e2["noise_start"])      # the start stayed put
+    # explicit noise: the signal start now stops at it instead of pushing it
+    view.begin_drag("signal_start", -0.5)
+    e = view.drag_to(-3.0)
+    assert e["signal_start"] == pytest.approx(-1.0) and e["noise_end"] == pytest.approx(-1.0)
+    view.end_drag()
     e3 = view.current_edges_ms()
     view.begin_drag("noise", e3["noise_start"] + 0.5)
     e = view.drag_to(e3["noise_start"] + 0.5 - 1.0)
@@ -871,41 +879,90 @@ def test_dragging_the_windows_updates_settings_and_recomputes(brune_app, view):
     assert e["noise_start"] == pytest.approx(e3["noise_start"] - 1.0)
     view.end_drag()
     assert view.record["noise_start_ms"] == pytest.approx(e3["noise_start"] - 1.0)
+    # a click without a move changes nothing
+    before = dict(view.record)
+    view.begin_drag("signal_end", view.current_edges_ms()["signal_end"])
+    view.end_drag()
+    assert view.record["post_ms"] == before["post_ms"]
 
 
 def test_mouse_events_grab_edges_and_bodies(brune_app, view):
-    from matplotlib.backend_bases import MouseEvent, PickEvent
+    from matplotlib.backend_bases import MouseEvent
     view.set_channel(BRUNE_CH)
     view.canvas.draw()
     e0 = view.current_edges_ms()
     ax = view.ax_time
-    y_mid = float(np.mean(ax.get_ylim()))
-    # an edge, through a pick event on its line
-    px, py = ax.transData.transform((e0["signal_end"], y_mid))
-    mouse = MouseEvent("button_press_event", view.canvas, px, py, button=1)
-    view.on_pick(PickEvent("pick_event", view.canvas, mouse, view.handles["signal_end"]))
+
+    def mouse(name, x_ms, dx_px=0.0):
+        px, py = ax.transData.transform((x_ms, float(np.mean(ax.get_ylim()))))
+        return MouseEvent(name, view.canvas, px + dx_px, py, button=1)
+
+    press = mouse("button_press_event", e0["signal_end"], dx_px=3)     # a few pixels off still grabs the edge
+    assert press.inaxes is ax                                           # not the taper axes on top of it
+    view.on_press(press)
     assert view._drag["what"] == "signal_end"
-    px2, _ = ax.transData.transform((e0["signal_end"] + 1.0, y_mid))
-    view.on_motion(MouseEvent("motion_notify_event", view.canvas, px2, py, button=1))
-    assert view.post_var.get() == "3"
-    view.on_release(MouseEvent("button_release_event", view.canvas, px2, py, button=1))
-    assert view._drag is None and view.record["post_ms"] == 3.0
-    # the signal body, through a press inside the span
+    view.on_motion(mouse("motion_notify_event", e0["signal_end"] + 1.0))
+    assert float(view.post_var.get()) == pytest.approx(3.0, abs=0.02)      # matplotlib keeps whole pixels
+    view.on_release(mouse("button_release_event", e0["signal_end"] + 1.0))
+    assert view._drag is None and view.record["post_ms"] == pytest.approx(3.0, abs=0.02)
     e1 = view.current_edges_ms()
-    px, py = ax.transData.transform((0.5 * (e1["signal_start"] + e1["signal_end"]), y_mid))
-    view.on_press(MouseEvent("button_press_event", view.canvas, px, py, button=1))
+    view.on_press(mouse("button_press_event", e1["noise_start"], dx_px=-3))
+    assert view._drag["what"] == "noise_start"
+    view.on_release(mouse("button_release_event", e1["noise_start"]))
+    view.on_press(mouse("button_press_event", 0.5 * (e1["signal_start"] + e1["signal_end"])))
     assert view._drag["what"] == "signal"
-    view.on_release(MouseEvent("button_release_event", view.canvas, px, py, button=1))
-    # the noise body
-    px, py = ax.transData.transform((0.5 * (e1["noise_start"] + e1["noise_end"]), y_mid))
-    view.on_press(MouseEvent("button_press_event", view.canvas, px, py, button=1))
+    view.on_release(mouse("button_release_event", 0.5 * (e1["signal_start"] + e1["signal_end"])))
+    view.on_press(mouse("button_press_event", 0.5 * (e1["noise_start"] + e1["noise_end"])))
     assert view._drag["what"] == "noise"
-    view.on_release(MouseEvent("button_release_event", view.canvas, px, py, button=1))
-    # with the toolbar's zoom active nothing is grabbed
-    view.toolbar.zoom()
-    view.on_press(MouseEvent("button_press_event", view.canvas, px, py, button=1))
+    view.on_release(mouse("button_release_event", 0.5 * (e1["noise_start"] + e1["noise_end"])))
+    view.toolbar.zoom()                                                 # with the toolbar's zoom active nothing is grabbed
+    view.on_press(mouse("button_press_event", e1["signal_end"]))
     assert view._drag is None
     view.toolbar.zoom()
+
+
+def shown(view):
+    view.deiconify()
+    view.update()
+    view.canvas.draw()
+    view.update()
+    if not view.canvas.get_tk_widget().winfo_ismapped():
+        pytest.skip("window not mapped: Tk mouse events need a display")
+    return view.canvas.get_tk_widget()
+
+
+def tk_xy(view, x_ms):
+    px, py = view.ax_time.transData.transform((x_ms, float(np.mean(view.ax_time.get_ylim()))))
+    return int(round(px)), int(round(view.canvas.figure.bbox.height - py))
+
+
+def tk_drag(widget, x0, y0, x1, y1):
+    widget.event_generate("<Button-1>", x=x0, y=y0)
+    widget.update()
+    for f in (0.3, 0.6, 1.0):
+        widget.event_generate("<Motion>", x=int(x0 + f * (x1 - x0)), y=int(y0 + f * (y1 - y0)), state=0x100)
+        widget.update()
+    widget.event_generate("<ButtonRelease-1>", x=x1, y=y1)
+    widget.update()
+
+
+def test_real_mouse_drags_every_window_edge(brune_app, view):
+    view.set_channel(BRUNE_CH)
+    widget = shown(view)
+    e = view.current_edges_ms()
+    tk_drag(widget, *tk_xy(view, e["signal_end"]), *tk_xy(view, 3.0))
+    assert float(view.post_var.get()) == pytest.approx(3.0, abs=0.05)
+    e = view.current_edges_ms()                            # the automatic noise window followed: re-read the edges
+    assert e["noise_start"] == pytest.approx(-4.0, abs=0.05)
+    tk_drag(widget, *tk_xy(view, e["noise_start"]), *tk_xy(view, -5.0))      # the noise becomes explicit
+    assert float(view.noise_start_var.get()) == pytest.approx(-5.0, abs=0.05)
+    e = view.current_edges_ms()
+    tk_drag(widget, *tk_xy(view, e["noise_end"]), *tk_xy(view, -1.5))
+    assert float(view.noise_end_var.get()) == pytest.approx(-1.5, abs=0.05)
+    e = view.current_edges_ms()
+    tk_drag(widget, *tk_xy(view, e["signal_start"]), *tk_xy(view, -1.0))
+    assert float(view.pre_var.get()) == pytest.approx(1.0, abs=0.05)
+    assert view.record["pre_ms"] == pytest.approx(1.0, abs=0.05) and view.record["noise_end_ms"] == pytest.approx(-1.5, abs=0.05)
 
 
 def test_legacy_event_level_map_is_read_and_moved_on_save(brune_app, view):
@@ -921,3 +978,159 @@ def test_legacy_event_level_map_is_read_and_moved_on_save(brune_app, view):
     store = view.event["strain"]["spectrum"]["channels"]
     assert set(store) == {"ch3", "ch7"} and "pzt_spectrum" not in view.event
     assert "under strain" in view.status_var.get()
+
+
+
+# ------------------------------------------- calibration table and experiment settings
+def test_calibration_table_is_stored_and_used_without_the_csv(brune_app, view, tmp_path):
+    assert view.calibration_note_var.get().startswith("no calibration loaded")
+    calibrated_compute(view)
+    note = view.calibration_note_var.get()
+    assert note.startswith("loaded: sensor.csv") and "25 rows" in note and "V/m" in note
+    table = view.record["calibration"]
+    assert len(table["frequency_hz"]) == 25 and table["unit"] == "V/m" and table["source"] == brune_app.calibration_csv
+    assert view.save()
+    sensors = brune_app.data_manager.data["analysis"]["pzt_spectrum"]["sensors"]
+    assert set(sensors) == {"ch3"} and sensors["ch3"]["calibration"]["unit"] == "V/m"
+    assert sensors["ch3"]["calibration_path"] == brune_app.calibration_csv
+    import os
+    os.remove(brune_app.calibration_csv)                  # the CSV is gone: the stored table serves
+    view.on_close()
+    v2 = PZTSpectrumView(brune_app, 0, EVENT)
+    try:
+        assert v2.record is not None and v2.record["spectrum"]["amp_units"] == "m*s"
+        assert "file not found; the stored table is used" in v2.calibration_note_var.get()
+        assert "calibration CSV" not in v2.status_var.get()
+        v2.set_channel(5)                                 # another sensor without a table: the controls carry over
+        assert v2.record is not None and v2.record["spectrum"]["amp_units"] == "m*s"
+        v2.clear_calibration()
+        assert v2.calibration_path_var.get() == "" and v2.calibration_table is None
+        assert v2.unit_combobox.get() == "V/m" and "needs a CSV" in v2.status_var.get()
+        v2.unit_combobox.set("V/V")
+        v2.schedule_compute(now=True)
+        assert v2.record["spectrum"]["amp_units"] == "V*s" and v2.record["calibration"] is None
+    finally:
+        v2.on_close()
+
+
+def test_every_control_reopens_from_the_experiment_settings(brune_app, view):
+    view.set_channel(BRUNE_CH)
+    view.pre_var.set("0.4"); view.post_var.set("1.5"); view.snr_var.set("2"); view.bins_var.set("25")
+    view.fmin_var.set("1500"); view.t_star_var.set("1e-6"); view.taper_combobox.set("tukey")
+    view.calibration_path_var.set(brune_app.calibration_csv); view.unit_combobox.set("V/m")
+    assert view.compute(), view.status_var.get()
+    set_medium(view, "S", 0.7)
+    view.free_surface_var.set("1.3")
+    assert view.save()                                    # the source was never computed, still everything is kept
+    a = brune_app.data_manager.data["analysis"]
+    assert a["medium"] == {"rho_kg_m3": RHO, "vp_m_s": VP, "vs_m_s": VS}
+    settings = a["pzt_spectrum"]["settings"]
+    assert settings["pre_ms"] == 0.4 and settings["phase"] == "S" and settings["radiation_coefficient"] == 0.7
+    assert settings["snr_min"] == 2.0 and settings["t_star_s"] is None if "t_star_s" in settings else True
+    sensor = a["pzt_spectrum"]["sensors"]["ch3"]
+    assert sensor["distance_m"] == DIST and sensor["free_surface_factor"] == 1.3 and sensor["t_star_s"] == 1e-6
+    assert view.record["source_inputs"]["free_surface_factor"] == 1.3
+    view.on_close()
+    v2 = PZTSpectrumView(brune_app, 0, 2)                 # another event, nothing saved there
+    try:
+        assert "saved record" not in v2.status_var.get()
+        assert (v2.pre_var.get(), v2.post_var.get(), v2.snr_var.get(), v2.bins_var.get()) == ("0.4", "1.5", "2", "25")
+        assert v2.fmin_var.get() == "1500" and v2.taper_combobox.get() == "tukey"
+        assert (v2.rho_var.get(), v2.c_var.get(), v2.vs_var.get()) == ("2700", "6000", "3500")
+        assert v2.phase_combobox.get() == "S" and v2.radiation_var.get() == "0.7"
+        assert v2.current_channel() == 0                   # no record anywhere: channel 0, whose sensor has no entry
+        v2.set_channel(BRUNE_CH)                           # this sensor's own values
+        assert (v2.distance_var.get(), v2.free_surface_var.get()) == ("0.1", "1.3")
+        assert float(v2.t_star_var.get()) == pytest.approx(1e-6) and v2.unit_combobox.get() == "V/m"
+        assert v2.calibration_note_var.get().startswith("loaded: sensor.csv")
+        assert v2.record is not None and v2.record["spectrum"]["amp_units"] == "m*s"
+    finally:
+        v2.on_close()
+
+
+def test_experiment_settings_survive_an_hdf5_round_trip(brune_app, view, tmp_path, app_from_file):
+    calibrated_compute(view)
+    set_medium(view, "P")
+    assert view.compute_source() and view.save()
+    path = tmp_path / "exp.h5"
+    brune_app.data_manager.save_file(path)
+    app2 = app_from_file(path)
+    v2 = PZTSpectrumView(app2, 0, EVENT)
+    try:
+        assert v2.record["spectrum"]["amp_units"] == "m*s" and v2.record["source"]["valid"]
+        assert v2.calibration_note_var.get().startswith("loaded: sensor.csv")
+        assert (v2.rho_var.get(), v2.distance_var.get()) == ("2700", "0.1")
+        v3 = PZTSpectrumView(app2, 0, 2)
+        try:
+            assert v3.rho_var.get() == "2700" and v3.phase_combobox.get() == "P"
+            v3.set_channel(BRUNE_CH)
+            assert v3.record["spectrum"]["amp_units"] == "m*s"
+        finally:
+            v3.on_close()
+    finally:
+        v2.on_close()
+
+
+def test_coincident_edges_are_told_apart_by_the_drag_direction(brune_app, view):
+    from matplotlib.backend_bases import MouseEvent
+    from labquake_explorer.ui.views.pzt_spectrum_view import TIE
+    view.set_channel(BRUNE_CH)
+    view.canvas.draw()
+    ax = view.ax_time
+
+    def mouse(name, x_ms):
+        px, py = ax.transData.transform((x_ms, float(np.mean(ax.get_ylim()))))
+        return MouseEvent(name, view.canvas, px, py, button=1)
+
+    e0 = view.current_edges_ms()
+    assert e0["noise_end"] == e0["signal_start"]           # automatic noise: it ends where the signal starts
+    view.on_press(mouse("button_press_event", e0["signal_start"]))
+    assert view._drag["what"] == "signal_start"            # the noise follows anyway
+    view.on_release(mouse("button_release_event", e0["signal_start"]))
+    view.noise_start_var.set("-3"); view.noise_end_var.set("-0.5")   # explicit, still glued to the signal
+    view.schedule_compute(now=True)
+    view.canvas.draw()
+    view.on_press(mouse("button_press_event", -0.5))
+    assert view._drag["what"] == TIE
+    e = view.drag_to(-1.0)                                 # left: the noise end moves, the signal start stays
+    assert e["noise_end"] == pytest.approx(-1.0) and e["signal_start"] == pytest.approx(-0.5)
+    view.end_drag()
+    view.noise_end_var.set("-0.5")
+    view.schedule_compute(now=True)
+    view.canvas.draw()
+    view.on_press(mouse("button_press_event", -0.5))
+    e = view.drag_to(-0.2)                                 # right: the signal start moves
+    assert e["signal_start"] == pytest.approx(-0.2) and e["noise_end"] == pytest.approx(-0.5)
+    view.end_drag()
+    assert view.record["pre_ms"] == pytest.approx(0.2) and view.record["noise_end_ms"] == -0.5
+
+
+def test_a_noise_window_too_short_to_use_does_not_poison_the_entries(brune_app, view):
+    """An explicit noise window that the analysis cannot use (shorter than a
+    quarter of the signal window) must not be written back as a degenerate
+    pair by the next drag; and a recompute that fails leaves the windows on
+    the top panel, so they can be dragged back."""
+    view.set_channel(BRUNE_CH)
+    view.noise_start_var.set("-1.0"); view.noise_end_var.set("-0.6")
+    view.post_var.set("10")                               # the noise (0.4 ms) is now under a quarter of the window
+    view.schedule_compute(now=True)
+    assert view.window is not None and not view.window.noise_available
+    assert set(view.handles) == {"signal_start", "signal_end"}
+    e = view.current_edges_ms()
+    view.begin_drag("signal_start", e["signal_start"])
+    view.drag_to(0.0)                                     # to the trigger: pre 0
+    view.end_drag()
+    assert (view.noise_start_var.get(), view.noise_end_var.get()) == ("-1.0", "-0.6")   # left as typed
+    assert view.pre_var.get() == "0" and view.record is not None
+    # a recompute that fails (entries that give no window) keeps the top panel and its drags
+    view.noise_end_var.set("-1.0")
+    view.schedule_compute(now=True)
+    assert view.record is None and "noise start must be before noise end" in view.status_var.get()
+    assert view.window is not None and view.ax_time.lines and "not recomputed" in view.ax_spec.get_title()
+    view.begin_drag("signal_end", view.current_edges_ms()["signal_end"])
+    view.drag_to(5.0)
+    view.end_drag()
+    assert view.post_var.get() == "5" and view.record is None      # the noise entries are still wrong
+    view.noise_end_var.set("-0.6")
+    view.schedule_compute(now=True)
+    assert view.record is not None and view.record["post_ms"] == 5.0

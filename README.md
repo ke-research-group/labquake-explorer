@@ -39,6 +39,10 @@ file untouched).
   slip); apply one set of ranges to all events of a run
 - Inter-event Metrics: recurrence, load-point advance, fault slip and creep
   per stick-slip cycle
+- Slip Distribution: coseismic slip of every eddy-current sensor with its own
+  event time (largest slip rate or dragged by hand) and fit windows before and
+  after it; slip along the fault with a quadratic or earthquake arrest zone
+  fit, and the rupture-front velocity from the event times
 - Pick dynamic strain arrivals and estimate rupture speed
 - Fit a Cohesive Zone Model to dynamic strain records
 - PZT Spectrum: calibrated amplitude spectrum, omega^-n source fit and
