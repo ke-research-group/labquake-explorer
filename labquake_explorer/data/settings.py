@@ -9,7 +9,10 @@ metadata the preprocessing wrote (``name``, ``date``, ``sample``, ``fault``,
   patch edges and where the fault ends, in the frame of the sensor positions;
 * ``analysis['medium']``: ``rho_kg_m3``, ``vp_m_s``, ``vs_m_s`` of the sample;
 * ``analysis['pzt_spectrum']``: the PZT Spectrum view's last saved controls
-  (``settings``) and its per-sensor tables (``sensors``).
+  and per-sensor tables per result set (``sets[<name>]['settings']``,
+  ``sets[<name>]['sensors']``) and the set last saved (``current_set``);
+  files written before result sets keep flat ``settings``/``sensors``, read
+  as the set ``default`` and moved on the next save.
 
 Values are read with :func:`get_setting` and written with :func:`set_setting`,
 which creates the dicts on the way.

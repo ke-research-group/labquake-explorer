@@ -82,10 +82,14 @@ def test_noise_window_shortened_then_unavailable():
     np.testing.assert_allclose(w.noise, x[0:500])
     # exactly 25% is still accepted
     w = sp.extract_window(t, x, 550 / FS, 3e-4, 7e-4, baseline="none")
-    assert w.noise_available and w.noise.size == 250
-    # below 25%: noise is NaN and flagged
+    assert w.noise_available and w.noise.size == 250 and w.noise_region == "pre"
+    # below 25% before the signal: the stretch after it, when there is one
     w = sp.extract_window(t, x, 500 / FS, 3e-4, 7e-4, baseline="none")
-    assert not w.noise_available
+    assert w.noise_available and w.noise_region == "post" and w.noise.size == 1000
+    np.testing.assert_allclose(w.noise, x[1200:2200])
+    # and none on either side: noise is NaN and flagged
+    w = sp.extract_window(t[:1300], x[:1300], 500 / FS, 3e-4, 7e-4, baseline="none")
+    assert not w.noise_available and w.noise_region == ""
     assert w.noise_fraction == 0.0
     assert np.all(np.isnan(w.noise))
     s = sp.compute_spectrum(w)
@@ -452,8 +456,8 @@ def test_fit_invalid_cases_never_raise():
     assert math.isnan(fit.omega0) and math.isnan(fit.fc)
     assert np.all(np.isnan(fit.model([1e3, 1e4])))
     assert not fit.converged and not fit.band_limited
-    # noise unavailable but SNR gating requested
-    w_nn = sp.extract_window(t, x, 1000 / FS, 1e-3, 1e-3)
+    # noise unavailable (the window fills the trace) but SNR gating requested
+    w_nn = sp.extract_window(t[:2000], x[:2000], 1000 / FS, 1e-3, 1e-3)
     assert not w_nn.noise_available
     fit = sp.fit_omega_n(sp.compute_spectrum(w_nn))
     assert not fit.valid and "snr_min" in fit.reason
@@ -637,8 +641,8 @@ def test_noise_bias_direction_and_noise_subtraction(fc):
     assert abs(np.mean(o0_sub) - omega0) < abs(np.mean(o0) - omega0)
     # re-binning inside the fit keeps the subtraction setting
     assert sp.fit_omega_n(s_sub, bins_per_decade=20).valid
-    # without a noise window the request is recorded but nothing is subtracted
-    w_nn = sp.extract_window(t, x, 1000 / FS, 1e-3, 1e-3)
+    # without a noise window (the window fills the trace) the request is recorded but nothing is subtracted
+    w_nn = sp.extract_window(t[:2000], x[:2000], 1000 / FS, 1e-3, 1e-3)
     s_nn = sp.compute_spectrum(w_nn, noise_subtract=True)
     assert s_nn.meta["noise_subtracted"] is False
     np.testing.assert_allclose(s_nn.amp_binned, sp.compute_spectrum(w_nn).amp_binned)
@@ -924,3 +928,98 @@ def test_extract_window_with_an_explicit_noise_window():
     hp = sp.extract_window(t, x, trigger, pre_s, post_s, baseline="highpass", highpass_hz=1e3,
                            noise_window=(-0.0040, -0.0025))
     assert hp.noise_available and hp.noise.size == 150 and np.all(np.isfinite(hp.noise))
+
+
+def test_free_n_bounds_are_a_parameter():
+    t, x = make_pulse(20e3)
+    s = sp.compute_spectrum(sp.extract_window(t, x, T0, PRE, POST))
+    default = sp.fit_omega_n(s, snr_min=None, n_fixed=False)
+    assert default.n_bounds == sp.N_BOUNDS == (1.0, 4.0) and default.n == pytest.approx(2.0, abs=0.05)
+    wide = sp.fit_omega_n(s, snr_min=None, n_fixed=False, n_bounds=(1, 8))
+    assert wide.n_bounds == (1.0, 8.0) and wide.n == pytest.approx(2.0, abs=0.05) and not wide.at_bounds["n"]
+    assert wide.as_dict()["n_bounds"] == [1.0, 8.0]
+    # a floor above the truth: n sits on it, and at_bounds refers to the bounds given
+    high = sp.fit_omega_n(s, snr_min=None, n_fixed=False, n_bounds=(3, 8))
+    assert high.valid and high.n == pytest.approx(3.0, abs=0.05) and high.at_bounds["n"]
+    assert any("n at bound" in msg for msg in high.warnings)
+    # a fixed n ignores them; an invalid fit still reports them; bad bounds are refused
+    assert sp.fit_omega_n(s, snr_min=None, n_fixed=True, n_bounds=(3, 8)).n == 2.0
+    assert sp.fit_omega_n(s, snr_min=None, fmin=1e9, n_bounds=(2, 6)).n_bounds == (2.0, 6.0)
+    for bad in ((4, 1), (0, 4), (1,), (1, float("nan")), "ab"):
+        with pytest.raises(ValueError):
+            sp.fit_omega_n(s, snr_min=None, n_bounds=bad)
+
+
+def test_noise_window_after_the_signal():
+    from scipy import signal as sps
+    fs = 100e3
+    t = np.arange(0, 0.05, 1 / fs)
+    x = 0.01 * np.sin(2 * np.pi * 300 * t)
+    trigger = 0.030
+    pre_s, post_s = 0.0005, 0.002
+    # explicit, right after the signal window
+    w = sp.extract_window(t, x, trigger, pre_s, post_s, baseline="none", noise_window=(0.002, 0.0035))
+    assert w.noise_available and w.noise_region == "explicit"
+    assert w.i_noise0 == w.i_trigger + w.n_post and w.i_noise1 == w.i_trigger + 350
+    np.testing.assert_allclose(w.noise, x[w.i_noise0:w.i_noise1])
+    assert w.noise_fraction == pytest.approx(150 / w.n)
+    assert sp.compute_spectrum(w).meta["noise_region"] == "explicit"
+    # a gap after the signal is fine too; overlapping the signal is not, on either side
+    gap = sp.extract_window(t, x, trigger, pre_s, post_s, noise_window=(0.003, 0.0045))
+    assert gap.noise_available and gap.i_noise0 == gap.i_trigger + 300
+    for bad in ((-0.001, 0.001), (0.001, 0.003), (-0.003, 0.0)):
+        with pytest.raises(ValueError, match="before the signal window .* or after it"):
+            sp.extract_window(t, x, trigger, pre_s, post_s, noise_window=bad)
+    # the pre-linear baseline comes from the pre-trigger samples, not from the coda, and is taken off the noise too
+    wb = sp.extract_window(t, x, trigger, pre_s, post_s, baseline="pre_linear", noise_window=(0.002, 0.0035))
+    assert wb.baseline_region == "pre_trigger"
+    i0 = wb.i_trigger - wb.n_pre
+    slope, intercept = np.polyfit(np.arange(wb.n_pre, dtype=float), x[i0:wb.i_trigger], 1)
+    k = np.arange(wb.i_noise0 - i0, wb.i_noise1 - i0)
+    np.testing.assert_allclose(wb.noise, x[wb.i_noise0:wb.i_noise1] - (slope * k + intercept), atol=1e-12)
+    np.testing.assert_allclose(wb.signal, x[i0:wb.i_trigger + wb.n_post] - (slope * np.arange(wb.n) + intercept), atol=1e-12)
+    # the highpass baseline filters an adjacent noise window jointly with the signal, no edge at the join
+    hp = sp.extract_window(t, x, trigger, pre_s, post_s, baseline="highpass", highpass_hz=1e3,
+                           noise_window=(0.002, 0.0035))
+    assert hp.noise_available and hp.noise.size == 150 and np.all(np.isfinite(hp.noise))
+    joint = sps.sosfiltfilt(sps.butter(2, 1e3, btype="highpass", fs=fs, output="sos"), x[i0:hp.i_noise1], padlen=12)
+    np.testing.assert_allclose(hp.signal, joint[:hp.n], atol=1e-12)
+    np.testing.assert_allclose(hp.noise, joint[hp.n:], atol=1e-12)
+
+
+def test_automatic_noise_falls_back_to_after_the_signal():
+    fs = 100e3
+    t = np.arange(0, 0.05, 1 / fs)
+    x = 0.01 * np.sin(2 * np.pi * 300 * t)
+    # the trigger 3 ms into the trace: a 2.5 ms signal window leaves 50 samples before it, under a quarter of 250
+    w = sp.extract_window(t, x, 0.003, 0.0025, 0.0, baseline="none")
+    assert w.noise_available and w.noise_region == "post"
+    assert w.i_noise0 == w.i_trigger + w.n_post and w.noise.size == w.n and w.noise_fraction == 1.0
+    np.testing.assert_allclose(w.noise, x[w.i_noise0:w.i_noise1])
+    assert sp.compute_spectrum(w).meta["noise_region"] == "post"
+    # with room before, the stretch before is used as always
+    before = sp.extract_window(t, x, 0.030, 0.0025, 0.0, baseline="none")
+    assert before.noise_region == "pre" and before.i_noise1 == before.i_trigger - before.n_pre
+    # room on neither side: no noise window
+    none = sp.extract_window(t[:310], x[:310], 0.003, 0.0025, 0.0, baseline="none")
+    assert not none.noise_available and none.noise_region == "" and none.i_noise0 == -1
+    assert sp.compute_spectrum(none).meta["noise_region"] == ""
+
+
+def test_moment_unit_and_gain_divisor(tmp_path):
+    cal = sp.Calibration.from_arrays([100.0, 1e5], [4628.0, 4628.0], "V/(N m)", gain_divisor=4628.0)
+    assert cal.output_units == "N*m*s" and cal.k == 0 and sp.CALIBRATION_UNITS["V/(N m)"] == 0
+    np.testing.assert_allclose(cal.gain, [1.0, 1.0])
+    np.testing.assert_allclose(sp.Calibration.from_dict(cal.as_dict()).gain, [1.0, 1.0])   # stored already divided
+    t, x = make_pulse(20e3)
+    s = sp.compute_spectrum(sp.extract_window(t, x, T0, PRE, POST), calibration=cal)
+    assert s.amp_units == "N*m*s" and s.calibrated
+    assert sp.fit_omega_n(s, snr_min=None).omega0 == pytest.approx(1.0, rel=0.02)
+    csv = tmp_path / "psi.csv"
+    csv.write_text("Frequency (Hz),Mean_Inst_App_Psi\n100,9256\n100000,9256\n")
+    loaded = sp.load_calibration_csv(csv, "V/(N m)", False, gain_divisor=4628.0)
+    np.testing.assert_allclose(loaded.gain, [2.0, 2.0])
+    assert sp.load_calibration_csv(csv, "V/m").gain[0] == 9256.0
+    for bad in (0.0, -1.0, float("nan")):
+        with pytest.raises(ValueError):
+            sp.Calibration.from_arrays([1.0, 10.0], [1.0, 1.0], "V/m", gain_divisor=bad)

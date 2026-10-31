@@ -72,7 +72,9 @@ from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import RUN
 from labquake_explorer.ui.views.base import RunView, event_list
 from labquake_explorer.data.sources import waveform_blocks
-from labquake_explorer.ui.views.pzt_spectrum_view import parse_channel_key
+from labquake_explorer.data.settings import get_setting
+from labquake_explorer.data.spectrum_store import DEFAULT_SET, set_channels, set_names
+from labquake_explorer.ui.views.pzt_spectrum_view import SETTING as PZT_SETTING, CURRENT_SET_SETTING, parse_channel_key
 
 RESULT_VERSION = 2
 PZT_KEY = "pzt_spectrum"               # the older event-level map
@@ -271,8 +273,11 @@ def _record_constants(source: dict) -> dict:
     return out
 
 
-def pzt_channel_records(event: dict, exclude_near_field: bool = False) -> dict[str, dict]:
-    """Per-channel PZT source values of one event: ``{channel: {field: ...}}``.
+def pzt_channel_records(event: dict, exclude_near_field: bool = False,
+                        result_set: str = DEFAULT_SET) -> dict[str, dict]:
+    """Per-channel PZT source values of one event: ``{channel: {field: ...}}``,
+    from the result set ``result_set`` of each record's spectrum store (the
+    version-1 store and the older event-level map count as ``'default'``).
 
     Only channels with a valid ``source`` dict are returned (``valid`` False
     or a numpy False skips the channel).  Every numeric field is a float
@@ -288,7 +293,8 @@ def pzt_channel_records(event: dict, exclude_near_field: bool = False) -> dict[s
         return out
     stores = [block.get(SPECTRUM_KEY) for block in waveform_blocks(event).values() if isinstance(block, dict)]
     stores.append(event.get(PZT_KEY))
-    for name, record in [item for store in stores if isinstance(store, dict) for item in _channel_items(store.get("channels"))]:
+    for name, record in [item for store in stores if isinstance(store, dict)
+                         for item in _channel_items(set_channels(store, result_set))]:
         if name in out:
             continue
         source = record.get("source")
@@ -412,10 +418,12 @@ def combine_channels(records: list[dict]) -> dict:
 
 
 def gather_records(run: dict, channel: str = ALL_CHANNELS, trend: bool = False,
-                   include_flagged: bool = False, exclude_near_field: bool = False) -> list[dict]:
+                   include_flagged: bool = False, exclude_near_field: bool = False,
+                   result_set: str = DEFAULT_SET) -> list[dict]:
     """One row per event with all ``FIELDS`` as floats (NaN when unavailable).
 
-    ``channel`` selects one PZT channel; ``ALL_CHANNELS`` combines the
+    ``result_set`` names the spectrum result set the records are taken from
+    (:func:`available_sets`).  ``channel`` selects one PZT channel; ``ALL_CHANNELS`` combines the
     channels of each event with :func:`combine_channels`.  Quality gating:
     a single-channel row is ``flagged`` when the record carries an excluding
     flag (:func:`excluding_flags`: the fit-quality flags, plus the near-field
@@ -441,7 +449,7 @@ def gather_records(run: dict, channel: str = ALL_CHANNELS, trend: bool = False,
                "phases": [], "constants": [], "constants_consistent": True}
         for field in PZT_FIELDS:
             row[field] = nan
-        per_channel = pzt_channel_records(event, exclude_near_field)
+        per_channel = pzt_channel_records(event, exclude_near_field, result_set)
         if channel == ALL_CHANNELS:
             records = list(per_channel.values())
             if not include_flagged:
@@ -478,11 +486,25 @@ def gather_records(run: dict, channel: str = ALL_CHANNELS, trend: bool = False,
     return rows
 
 
-def available_channels(run: dict) -> list[str]:
-    """Channel names present in any saved PZT record of the run (sorted)."""
+def available_sets(run: dict) -> list[str]:
+    """The spectrum result sets saved in any record of the run, ``'default'``
+    first (always offered), the rest sorted."""
     names: set[str] = set()
     for event in event_list(run):
-        names.update(pzt_channel_records(event).keys())
+        if not isinstance(event, dict):
+            continue
+        stores = [block.get(SPECTRUM_KEY) for block in waveform_blocks(event).values() if isinstance(block, dict)]
+        stores.append(event.get(PZT_KEY))
+        for store in stores:
+            names.update(set_names(store))
+    return [DEFAULT_SET] + sorted(names - {DEFAULT_SET})
+
+
+def available_channels(run: dict, result_set: str = DEFAULT_SET) -> list[str]:
+    """Channel names present in any saved PZT record of the run's result set (sorted)."""
+    names: set[str] = set()
+    for event in event_list(run):
+        names.update(pzt_channel_records(event, result_set=result_set).keys())
 
     def key(name: str):
         number = parse_channel_key(name)          # 'ch3' (PZT view) or legacy '3'
@@ -580,36 +602,42 @@ class SourceScalingView(RunView):
 
         left = ttk.Frame(self)
         left.grid(row=0, column=0, rowspan=2, padx=5, pady=5, sticky="ns")
-        left.grid_rowconfigure(9, weight=1)
+        left.grid_rowconfigure(10, weight=1)
         left.grid_columnconfigure(1, weight=1)
 
-        ttk.Label(left, text="Channel:").grid(row=0, column=0, padx=(0, 4), pady=2, sticky="w")
+        ttk.Label(left, text="Result set:").grid(row=0, column=0, padx=(0, 4), pady=2, sticky="w")
+        self.set_combo = ttk.Combobox(left, state="readonly", width=16, values=[DEFAULT_SET])
+        self.set_combo.set(DEFAULT_SET)
+        self.set_combo.grid(row=0, column=1, pady=2, sticky="ew")
+        self.set_combo.bind("<<ComboboxSelected>>", lambda e: self.on_set_selected())
+
+        ttk.Label(left, text="Channel:").grid(row=1, column=0, padx=(0, 4), pady=2, sticky="w")
         self.channel_combo = ttk.Combobox(left, state="readonly", width=16)
-        self.channel_combo.grid(row=0, column=1, pady=2, sticky="ew")
+        self.channel_combo.grid(row=1, column=1, pady=2, sticky="ew")
         self.channel_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh())
 
-        ttk.Label(left, text="Y variable:").grid(row=1, column=0, padx=(0, 4), pady=2, sticky="w")
+        ttk.Label(left, text="Y variable:").grid(row=2, column=0, padx=(0, 4), pady=2, sticky="w")
         self.y_combo = ttk.Combobox(left, state="readonly", width=26, values=list(Y_VARIABLES))
         self.y_combo.set(Y_FC)
-        self.y_combo.grid(row=1, column=1, pady=2, sticky="ew")
+        self.y_combo.grid(row=2, column=1, pady=2, sticky="ew")
         self.y_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh())
 
         self.trend_var = tk.BooleanVar(master=self, value=False)
         ttk.Checkbutton(left, text="Trend-corrected mechanical values",
                         variable=self.trend_var, command=self.refresh,
-                        ).grid(row=2, column=0, columnspan=2, pady=2, sticky="w")
+                        ).grid(row=3, column=0, columnspan=2, pady=2, sticky="w")
         self.include_flagged_var = tk.BooleanVar(master=self, value=False)
         ttk.Checkbutton(left, text="Include flagged fits (band-limited / fc at bound / "
                                    "not converged)",
                         variable=self.include_flagged_var, command=self.refresh,
-                        ).grid(row=3, column=0, columnspan=2, pady=2, sticky="w")
+                        ).grid(row=4, column=0, columnspan=2, pady=2, sticky="w")
         self.exclude_near_field_var = tk.BooleanVar(master=self, value=False)
         ttk.Checkbutton(left, text="Exclude near-field records (kR < 3 at the band's low edge)",
                         variable=self.exclude_near_field_var, command=self.refresh,
-                        ).grid(row=8, column=0, columnspan=2, pady=2, sticky="w")
+                        ).grid(row=9, column=0, columnspan=2, pady=2, sticky="w")
 
         buttons = ttk.Frame(left)
-        buttons.grid(row=4, column=0, columnspan=2, pady=(6, 2), sticky="ew")
+        buttons.grid(row=5, column=0, columnspan=2, pady=(6, 2), sticky="ew")
         buttons.grid_columnconfigure((0, 1), weight=1)
         self.fit_button = ttk.Button(buttons, text="Fit power law", command=self.fit_power_law)
         self.fit_button.grid(row=0, column=0, padx=(0, 2), sticky="ew")
@@ -618,10 +646,10 @@ class SourceScalingView(RunView):
 
         self.fit_text = tk.StringVar(master=self, value="No fit yet")
         ttk.Label(left, textvariable=self.fit_text, wraplength=300, justify="left",
-                  ).grid(row=5, column=0, columnspan=2, pady=(4, 2), sticky="w")
+                  ).grid(row=6, column=0, columnspan=2, pady=(4, 2), sticky="w")
         self.status_var = tk.StringVar(master=self, value="")
         ttk.Label(left, textvariable=self.status_var, wraplength=300, justify="left",
-                  ).grid(row=6, column=0, columnspan=2, pady=(2, 6), sticky="w")
+                  ).grid(row=7, column=0, columnspan=2, pady=(2, 6), sticky="w")
 
         ttk.Label(left, text="Typical constants: rho 2650 kg/m3 (rock), Vp ~ 5000-6000 m/s "
                              "(granite), Vs ~ Vp/1.7 - set them in the PZT spectrum view. "
@@ -629,10 +657,10 @@ class SourceScalingView(RunView):
                              "kR is evaluated at the plateau (band low edge), where every laboratory "
                              "record is near-field: a warning, excluded only on request.",
                   wraplength=300, justify="left", foreground="gray",
-                  ).grid(row=7, column=0, columnspan=2, pady=(0, 6), sticky="w")
+                  ).grid(row=8, column=0, columnspan=2, pady=(0, 6), sticky="w")
 
         table_frame = ttk.Frame(left)
-        table_frame.grid(row=9, column=0, columnspan=2, sticky="nsew")
+        table_frame.grid(row=10, column=0, columnspan=2, sticky="nsew")
         table_frame.grid_rowconfigure(0, weight=1)
         table_frame.grid_columnconfigure(0, weight=1)
         columns = [c[0] for c in TABLE_COLUMNS]
@@ -650,6 +678,7 @@ class SourceScalingView(RunView):
 
     def on_run_loaded(self) -> None:
         saved = self.load_results()
+        self.refresh_sets()
         self.refresh_channels()
         if saved is not None:
             self.apply_saved_selections(saved)
@@ -658,15 +687,36 @@ class SourceScalingView(RunView):
             self.show_saved(saved)
 
     # ------------------------------------------------------------- selection
+    def refresh_sets(self) -> None:
+        """The result sets saved in the run; a window opens on the set the PZT
+        Spectrum view last saved for the experiment when the run has it."""
+        previous = self.set_combo.get() if getattr(self, "_sets_loaded", False) else ""
+        values = available_sets(self.run)
+        self.set_combo.config(values=values)
+        current = get_setting(self.data_manager.data, PZT_SETTING, CURRENT_SET_SETTING)
+        for choice in (previous, str(current) if current is not None else "", DEFAULT_SET):
+            if choice in values:
+                self.set_combo.set(choice)
+                break
+        self._sets_loaded = True
+
+    def on_set_selected(self) -> None:
+        self.refresh_channels()
+        self.refresh()
+
     def refresh_channels(self) -> None:
         previous = self.channel_combo.get()
-        self.channels = available_channels(self.run)
+        self.channels = available_channels(self.run, self.result_set)
         values = [ALL_CHANNELS] + self.channels
         self.channel_combo.config(values=values)
         self.channel_combo.set(previous if previous in values else ALL_CHANNELS)
 
     def apply_saved_selections(self, saved: dict) -> None:
         """Set the controls from a saved result (falling back where a choice no longer exists)."""
+        result_set = str(saved.get("result_set", DEFAULT_SET))
+        if result_set in list(self.set_combo["values"]) and result_set != self.set_combo.get():
+            self.set_combo.set(result_set)
+            self.refresh_channels()
         channel = str(saved.get("channel", ALL_CHANNELS))
         values = list(self.channel_combo["values"])
         self.channel_combo.set(channel if channel in values else ALL_CHANNELS)
@@ -676,6 +726,10 @@ class SourceScalingView(RunView):
         self.trend_var.set(_is_true(saved.get("trend_corrected", False)))
         self.include_flagged_var.set(_is_true(saved.get("include_flagged", False)))
         self.exclude_near_field_var.set(_is_true(saved.get("exclude_near_field", False)))
+
+    @property
+    def result_set(self) -> str:
+        return self.set_combo.get() or DEFAULT_SET
 
     @property
     def channel(self) -> str:
@@ -719,7 +773,7 @@ class SourceScalingView(RunView):
     def refresh(self) -> None:
         """Re-gather the rows for the current selections and redraw (fit cleared)."""
         self.rows = gather_records(self.run, self.channel, bool(self.trend_var.get()),
-                                   self.include_flagged, self.exclude_near_field)
+                                   self.include_flagged, self.exclude_near_field, self.result_set)
         self.fit = None
         self.bootstrap = (float("nan"), float("nan"))
         self.fit_indices = []
@@ -755,7 +809,7 @@ class SourceScalingView(RunView):
         x, _, _ = self.pairs()
         n_events = len(self.rows)
         text = (f"{n_pzt} of {n_events} events have PZT source parameters "
-                f"(channel {self.channel}); {x.size} usable pairs for {self.y_variable}")
+                f"(set '{self.result_set}', channel {self.channel}); {x.size} usable pairs for {self.y_variable}")
         n_flagged = sum(1 for r in self.rows if r["flagged"] and np.isfinite(r["seismic_moment_nm"]))
         if self.include_flagged and n_flagged:
             text += f"; {n_flagged} quality-flagged event(s) INCLUDED"
@@ -904,6 +958,7 @@ class SourceScalingView(RunView):
         phases, constants, consistent = self.constants_summary()
         return {
             "version": RESULT_VERSION,
+            "result_set": self.result_set,
             "channel": self.channel,
             "y_variable": self.y_variable,
             "y_field": self.y_field,

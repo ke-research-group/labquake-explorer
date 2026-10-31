@@ -93,7 +93,8 @@ def test_upgrade_brings_runs_and_events_up_to_date():
     assert "picked_idx" not in e0["waveform"]["elsys"] and e0["waveform"]["elsys"]["arrivals"]["version"] == 1
     assert "pzt_spectrum" not in e0
     moved = e0["waveform"]["elsys"]["spectrum"]
-    assert moved["version"] == 1 and moved["channels"]["ch0"]["record"] == "waveform/elsys"
+    assert moved["version"] == 2 and "channels" not in moved
+    assert moved["sets"]["default"]["channels"]["ch0"]["record"] == "waveform/elsys"
     assert e1["waveform"]["ni"]["data"].shape == (1, 50) and "trigger_time" not in e1["waveform"]["ni"]
     # a second pass changes nothing
     assert M.upgrade_experiment(data) == []
@@ -220,3 +221,21 @@ def test_write_fault_geometry_in_place(tmp_path, suffix):
     assert np.asarray(dm4.data["analysis"]["fault"]["ends_x_mm"]).tolist() == [0.0, 400.0]
     with pytest.raises(ValueError, match="two numbers"):
         M.write_fault_geometry(path, patch_x_mm=[1.0])
+
+
+def test_flat_pzt_settings_and_version_1_stores_upgrade_to_result_sets():
+    data = {"name": "x", "runs": [], "analysis": {"pzt_spectrum": {
+        "settings": {"pre_ms": 1.0}, "sensors": {"pzt_1": {"t_star_s": 1e-6}, "pzt_2": {"t_star_s": 2e-6}},
+        "sets": {"default": {"sensors": {"pzt_1": {"t_star_s": 3e-6}}}}}}}
+    notes = M.upgrade_experiment(data)
+    assert len(notes) == 2
+    pz = data["analysis"]["pzt_spectrum"]
+    assert "settings" not in pz and "sensors" not in pz
+    assert pz["sets"]["default"]["settings"] == {"pre_ms": 1.0}
+    assert pz["sets"]["default"]["sensors"] == {"pzt_1": {"t_star_s": 3e-6}, "pzt_2": {"t_star_s": 2e-6}}   # the set's own wins
+    assert M.upgrade_experiment(data) == []
+    event = {"waveform": {"elsys": {"spectrum": {"version": 1, "channels": {"ch0": {"channel": 0}}}}}}
+    notes = M.upgrade_event(event, {}, "e")
+    assert any("version 2" in n for n in notes)
+    assert event["waveform"]["elsys"]["spectrum"] == {"version": 2, "sets": {"default": {"channels": {"ch0": {"channel": 0}}}}}
+    assert M.upgrade_event(event, {}, "e") == []

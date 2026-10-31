@@ -26,7 +26,8 @@ What is brought up to date (see ``docs/extending.md`` for the layouts):
   the top level (``patch_x_mm``, ``fault_ends_x_mm``) or in a ``fault`` dict
   move into ``analysis['fault']`` (``patch_x_mm``, ``ends_x_mm``); a ``fault``
   that is text, the sample description, stays.
-* events: the event-level ``pzt_spectrum`` map moves into the records it was
+* events: version-1 spectrum stores become version 2 (result sets, the old
+  channels as the set ``default``); the event-level ``pzt_spectrum`` map moves into the records it was
   computed on (``waveform/<recorder>/spectrum``); the recorders' ``raw_data``
   slices go (processed channels only);
   ``high_rate``/``low_rate`` and the older per-recorder blocks with
@@ -52,7 +53,8 @@ import numpy as np
 from labquake_explorer.analysis.event_metrics import RESULT_VERSION as ANALYSIS_VERSION
 from labquake_explorer.data.channels import channel_array, is_channel_array, positions_for
 from labquake_explorer.data.picks import EXTRACTION_KEY, LEGACY_INDICES_KEY
-from labquake_explorer.data.settings import ANALYSIS_KEY, get_setting, set_setting
+from labquake_explorer.data.settings import ANALYSIS_KEY, delete_setting, get_setting, set_setting
+from labquake_explorer.data.spectrum_store import DEFAULT_SET, STORE_VERSION, ensure_set, upgrade_store
 from labquake_explorer.data.stamp import write_stamp_h5
 from labquake_explorer.data.sources import (WAVEFORM, ARRIVALS_KEY, is_legacy_strain, is_waveform_block,
                                             read_arrivals, run_sources, waveform_trigger_time, write_arrivals)
@@ -257,7 +259,7 @@ def upgrade_event(event: dict, run: Mapping, where: str = "event") -> list:
         if isinstance(rec, dict) and rec.get("record") in recorders:
             rec["record"] = f"{WAVEFORM}/{rec['record']}"
             notes.append(f"{where}: pzt_spectrum record renamed to {rec['record']}")
-    # the event-level map moves under the record each channel was computed on
+    # the event-level map moves under the record each channel was computed on (its default set)
     records = {k: b for k, b in _waveform_entries(event).items()}
     if items and records:
         left = []
@@ -267,15 +269,27 @@ def upgrade_event(event: dict, run: Mapping, where: str = "event") -> list:
                 left.append((key, rec))
                 continue
             target = rec.get("record") if rec.get("record") in records else next(iter(records))
-            store = records[target].setdefault("spectrum", {"version": 1, "channels": {}})
-            if not isinstance(store.get("channels"), dict):
-                store["channels"] = {}
-            store["channels"][f"ch{int(m.group(1))}"] = rec
-            notes.append(f"{where}: pzt_spectrum channel {key} moved under {target}/spectrum")
+            store = records[target].get("spectrum")
+            if not isinstance(store, dict):
+                store = records[target]["spectrum"] = {}
+            ensure_set(store, DEFAULT_SET)["channels"][f"ch{int(m.group(1))}"] = rec
+            notes.append(f"{where}: pzt_spectrum channel {key} moved under {target}/spectrum (set {DEFAULT_SET})")
         if left:
             spectrum["channels"] = dict(left) if isinstance(channels, Mapping) else [r for _, r in left]
         else:
             del event["pzt_spectrum"]
+    # version-1 spectrum stores (one set of channels) become version 2 with the set 'default',
+    # under every waveform record and the PSU strain block alike
+    blocks = {}
+    waveform = event.get(WAVEFORM)
+    if isinstance(waveform, Mapping):
+        blocks.update({f"{WAVEFORM}/{k}": b for k, b in waveform.items() if isinstance(b, dict)})
+    if isinstance(event.get("strain"), dict):
+        blocks["strain"] = event["strain"]
+    for key, block in blocks.items():
+        store = block.get("spectrum")
+        if isinstance(store, dict) and store.get("version") != STORE_VERSION and upgrade_store(store):
+            notes.append(f"{where}: {key}/spectrum upgraded to version {STORE_VERSION} (set {DEFAULT_SET})")
     return notes
 
 
@@ -330,9 +344,30 @@ def upgrade_fault_geometry(data: dict) -> list:
     return notes
 
 
+def upgrade_spectrum_settings(data: dict) -> list:
+    """The PZT Spectrum view's ``settings`` and ``sensors`` kept directly under
+    ``analysis['pzt_spectrum']`` (before result sets) move into
+    ``analysis['pzt_spectrum']['sets']['default']``; what that set already has wins."""
+    notes = []
+    for key in ("settings", "sensors"):
+        flat = get_setting(data, "pzt_spectrum", key)
+        if flat is None:
+            continue
+        if isinstance(flat, dict):
+            if key == "sensors":
+                for sensor, entry in flat.items():
+                    if get_setting(data, "pzt_spectrum", "sets", DEFAULT_SET, key, sensor) is None:
+                        set_setting(data, entry, "pzt_spectrum", "sets", DEFAULT_SET, key, sensor)
+            elif get_setting(data, "pzt_spectrum", "sets", DEFAULT_SET, key) is None:
+                set_setting(data, flat, "pzt_spectrum", "sets", DEFAULT_SET, key)
+        delete_setting(data, "pzt_spectrum", key)
+        notes.append(f"{ANALYSIS_KEY}/pzt_spectrum/{key} -> {ANALYSIS_KEY}/pzt_spectrum/sets/{DEFAULT_SET}/{key}")
+    return notes
+
+
 def upgrade_experiment(data: dict) -> list:
     """Upgrade every run of a loaded experiment dict in place; returns the notes."""
-    notes = upgrade_fault_geometry(data)
+    notes = upgrade_fault_geometry(data) + upgrade_spectrum_settings(data)
     runs = data.get("runs") if isinstance(data, Mapping) else None
     if isinstance(runs, (list, tuple)):
         for i, run in enumerate(runs):

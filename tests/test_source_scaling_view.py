@@ -716,7 +716,7 @@ def test_pzt_view_records_feed_the_scaling_view(app_with_strain, tmp_path):
             assert pv.save()
         finally:
             pv.on_close()
-    assert set(events[0]["strain"]["spectrum"]["channels"]) == {"ch3"}      # saved with the record
+    assert set(events[0]["strain"]["spectrum"]["sets"]["default"]["channels"]) == {"ch3"}      # saved with the record
 
     v = SourceScalingView(app, 0)
     try:
@@ -775,3 +775,36 @@ def test_records_under_the_waveform_records_are_gathered(app):
     assert set(per_channel) == {"ch0", "ch1"}
     assert per_channel["ch1"]["seismic_moment_nm"] == pytest.approx(2.0)
     assert "ch1" in available_channels(run) and "ch0" in available_channels(run)
+
+
+def test_result_set_chooser_selects_the_records(app_with_strain):
+    from labquake_explorer.ui.views.source_scaling_view import available_sets
+    app = app_with_strain
+    events = populate(app)                                    # the legacy maps are the 'default' set
+    for j, event in enumerate(events):
+        m0 = M0_VALUES[j % len(M0_VALUES)]
+        event["strain"]["spectrum"] = {"version": 2, "sets": {
+            "EGF": {"channels": {"ch0": dict(source_record(10.0 * m0), channel=0)}}}}
+    assert available_sets(app.data_manager.get_data("runs/[0]")) == ["default", "EGF"]
+    v = SourceScalingView(app, 0)
+    try:
+        assert list(v.set_combo["values"]) == ["default", "EGF"] and v.result_set == "default"
+        assert list(v.channel_combo["values"]) == [ALL_CHANNELS, "ch0", "ch1"]
+        m0_default = float(v.table.item("0")["values"][1])
+        v.set_combo.set("EGF")
+        v.on_set_selected()
+        assert list(v.channel_combo["values"]) == [ALL_CHANNELS, "ch0"]
+        assert float(v.table.item("0")["values"][1]) == pytest.approx(10.0 * m0_default)
+        assert "set 'EGF'" in v.status_var.get()
+        assert v.fit_power_law() is not None
+        saved = v.save()
+        assert saved["result_set"] == "EGF"
+        v.on_close()
+        v2 = SourceScalingView(app, 0)                        # reopens on the saved set
+        try:
+            assert v2.result_set == "EGF" and list(v2.channel_combo["values"]) == [ALL_CHANNELS, "ch0"]
+        finally:
+            v2.on_close()
+    finally:
+        if v in app.child_windows:
+            v.on_close()

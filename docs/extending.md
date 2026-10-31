@@ -89,7 +89,7 @@ wrote (`name`, `date`, `sample`, a `fault` description, ...):
 |---|---|
 | `analysis['fault']` | `patch_x_mm = [from, to]`, the edges of the bare PMMA patch along the fault in mm (in either order), and `ends_x_mm = [from, to]`, where the fault (the sample) ends, both in the frame of the sensor positions. The Slip Distribution view draws them, cuts the slip profile at the ends and can save both; a notebook sets them with `experiment(..., analysis={'fault': {'patch_x_mm': [x0, x1], 'ends_x_mm': [0, 500]}})`. A value without two finite, different numbers is not drawn, and the view says it is unusable |
 | `analysis['medium']` | `rho_kg_m3`, `vp_m_s`, `vs_m_s` of the sample, as last saved by the PZT Spectrum view and offered to every new window |
-| `analysis['pzt_spectrum']` | the PZT Spectrum view's `settings` (its controls as last saved, the keys of a `spectrum` record below plus `phase` and `radiation_coefficient`) and `sensors` (per sensor, keyed by the channel's field name such as `pzt_1`, else `ch<k>`: the `calibration` table, `calibration_path`, `calibration_unit`, `calibration_db`, `t_star_s`, `distance_m`, `free_surface_factor`) |
+| `analysis['pzt_spectrum']` | per result set (see the `spectrum` schema), `sets[<name>]['settings']` (the PZT Spectrum view's controls as last saved in that set: the keys of a `spectrum` record below plus `phase` and `radiation_coefficient`) and `sets[<name>]['sensors']` (per sensor, keyed by the channel's field name such as `pzt_1`, else `ch<k>`: the `calibration` table, `calibration_path`, `calibration_unit`, `calibration_db`, `calibration_divisor`, `t_star_s`, `distance_m`, `free_surface_factor`), and `current_set`, the set last saved, where a new window opens. Files written before result sets (2026-11) keep flat `settings` / `sensors`: they are read as the set `default` and moved on the next save or by the migration tool |
 
 Files saved earlier kept the patch edges and fault ends as top-level
 `patch_x_mm` / `fault_ends_x_mm` or as `fault = {'patch_x_mm': ...,
@@ -266,32 +266,72 @@ sampled by a mean over `width_s` starting `delay_s` after its `event_time`;
 per-cycle values are differences between consecutive events; the first event
 and any window outside the run are NaN.
 
-### `spectrum` (PZTSpectrumView, per record, version 1)
+### `spectrum` (PZTSpectrumView, per record, store version 2)
 
 Kept with the record it was computed on, `event['waveform'][recorder]['spectrum']`
 (or `event['strain']['spectrum']` in PSU files), as
-`{"version": 1, "channels": {"ch<k>": record}}`, one record per analysed
-channel. The event-level `pzt_spectrum` map of older files is still read
-and moves into the record on the next save or with the migration tool.
+`{"version": 2, "sets": {"<name>": {"channels": {"ch<k>": record}}}}`
+(`labquake_explorer/data/spectrum_store.py`): named **result sets**, one
+record per analysed channel in each, so that the same channel analysed by
+different routes (a displacement calibration, an EGF moment calibration)
+keeps both results; the view's "Result set" box chooses one or names a new
+one (any text without `/`), Save writes into it, and the record carries its
+set's name as `result_set`. Store version 1, `{"version": 1, "channels":
+{...}}`, is read as the set `default` and becomes version 2 on the next save
+or with the migration tool; the event-level `pzt_spectrum` map of still
+older files is read as the `default` set and moves likewise.
 A record stores every control (trigger source and time, pre/post window and
 noise window in ms, taper, baseline mode, step removal, calibration path/unit/dB,
-t*, fit band, bins per decade, SNR threshold, n fixed, loss), the calibration
-table itself (`calibration`: `Calibration.as_dict()` plus `gain_db`, how the
-CSV was read; None when uncalibrated), the source entries as typed
+`calibration_divisor` (a constant the CSV gain is divided by, None for 1),
+t*, fit band, bins per decade, SNR threshold, n fixed, `n_max`, loss), the calibration
+table itself (`calibration`: `Calibration.as_dict()` plus `gain_db` and
+`gain_divisor`, how the CSV was read, the gains already divided; None when
+uncalibrated), the source entries as typed
 (`source_inputs`: phase, `rho_kg_m3`, `vp_m_s`, `vs_m_s`, `distance_m`,
 `radiation_coefficient`, `free_surface_factor`, None where blank), the binned
 spectrum (`spectrum`: binned frequencies, amplitudes, noise, SNR, counts and
 the window/taper/calibration metadata), the fit (`fit`: `omega0` in the
 spectrum's units, `fc`, `n`, weighted rms of ln residuals, bins used, band
-used, `converged`, `at_bounds`, `band_limited`, `valid`, `reason`) and, once
-"Compute source" has run, `source` (phase, medium constants, distance,
-radiation coefficient, free-surface factor, `seismic_moment_nm`, `mw`,
-`source_radius_m`, `rupture_area_m2`, `stress_drop_pa`, `kR`, warnings).
+used, `converged`, `at_bounds`, `band_limited`, `valid`, `reason`,
+`n_bounds`) and, once "Compute source" has run, `source` (phase, medium
+constants, distance, radiation coefficient, free-surface factor,
+`seismic_moment_nm`, `mw`, `source_radius_m`, `rupture_area_m2`,
+`stress_drop_pa`, `kR`, warnings).
+
+Calibration units are `V/m`, `V/(m/s)`, `V/(m/s^2)` (a displacement spectrum
+in `m*s`), `V/V` (uncalibrated, `V*s`) and `V/(N m)`: an in-situ response
+that turns volts into a **moment spectrum** in `N*m*s` (the empirical
+Green's function route; a Psi table in V/(N m) per `C_FM = Vp + Vs` is used
+as stored with `calibration_divisor` = C_FM). With a moment spectrum
+"Compute source" takes `M0 = Omega0` (`source_parameters(...,
+moment_spectrum=True)`): the radius still comes from `fc`, `k` and Vs and the
+stress drop from both; rho, Vp, distance, the radiation coefficient and the
+free-surface factor are not used, their entries are greyed out, they are
+None in `source.constants`, `constants.moment_spectrum` is True and `kR` is
+NaN.
+
+The noise window (`noise_start_ms`, `noise_end_ms`, from the trigger) lies
+before the signal window (end at or before `-pre_ms`) or after it (start at
+or after `post_ms`); blank entries mean the same length just before the
+signal, or just after it when fewer than a quarter of the signal window's
+samples lie before (a recorder keeping little pre-trigger data), and the
+status line says so. `spectrum.meta.noise_region` records which: `pre`,
+`post` or `explicit` (`""` when no usable noise window). A free `n`
+(`n_fixed` false) is kept between 1 and the "n max" entry (`n_max`, default
+4; `fit.n_bounds` is the pair used and `fit.at_bounds.n` refers to it).
+Source parameters are computed also when the analysis flags the plateau as
+attenuated (transient outside the taper's flat region, as a long coda under
+a bh4 taper gives, `taper_energy_fraction` below 0.95): the warning is
+carried in `source.warnings`, the warnings row and the status instead of
+refusing the computation. Records written before 2026-11 have no `n_max`
+(read as 4) and no `noise_region`.
 Save also writes the controls, the medium and the sensor's own values to the
-experiment's `analysis` dict (see Run layout), so a window on any other event
-opens with them: the controls and the medium when the first channel shown has
-no record, a sensor's calibration, t*, distance and free-surface factor
-whenever its channel is selected without a record. The calibration is read
+experiment's `analysis` dict (see Run layout), per result set, so a window on
+any other event opens with them (on the set last saved): the set's controls
+and the medium when the first channel shown has no record, a sensor's
+calibration, divisor, t*, distance and free-surface factor whenever its
+channel is selected without a record; switching sets does the same for the
+new set. The calibration is read
 from the CSV when its path is typed or browsed (the dB flag follows the
 header), kept as a table and used from the table afterwards, so a saved
 file works without the CSV; the frame says what is loaded.
@@ -312,7 +352,10 @@ at 2 by default over log-binned, SNR-gated bins.
 
 Also `exclude_near_field` (whether records flagged near-field, kR < 3 at the
 plateau frequency, were excluded from the fit; by default they are only
-warned about).
+warned about) and `result_set`, the spectrum result set the records were
+taken from (the view's "Result set" box lists the sets saved in the run and
+opens on the one the PZT Spectrum view last saved; results written before
+result sets read as `default`).
 
 The channel and Y variable used, quality-gating choice, OLS exponent with
 standard error and bootstrap 16-84 range, reduced-major-axis exponent,
@@ -452,7 +495,9 @@ paths, channel maps, the calibration, the builders, plots, save.
 layouts above: run keys that were dropped, picks moved into
 `event_extraction`, events reduced to the processed channels plus
 `waveform/<recorder>` records (with `trigger_time` and `positions`), arrival
-picks under `arrivals`, `event_analysis` records at version 3. The PSU
+picks under `arrivals`, `event_analysis` records at version 3, spectrum
+stores at version 2 (result sets) with the flat PZT Spectrum settings of
+`analysis['pzt_spectrum']` moved into its `default` set. The PSU
 `strain` layout is left as it is. The patch edges and fault ends an earlier
 explorer kept at the top level (`patch_x_mm`, `fault_ends_x_mm`) or in a
 `fault` dict move into `analysis['fault']`. A copy of the original is kept

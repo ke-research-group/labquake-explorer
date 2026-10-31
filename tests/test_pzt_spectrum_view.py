@@ -9,8 +9,8 @@ import pytest
 from labquake_explorer.analysis import source as src
 from labquake_explorer.analysis import spectrum as sp
 from labquake_explorer.ui.views.pzt_spectrum_view import (
-    PZTSpectrumView, RESULT_VERSION, TRIGGER_PICKED, TRIGGER_EVENT_TIME, TRIGGER_RECORD, TUKEY_ALPHA,
-    channel_key, parse_channel_key,
+    HANDLES, PZTSpectrumView, RESULT_VERSION, TIE_AFTER, TRIGGER_PICKED, TRIGGER_EVENT_TIME, TRIGGER_RECORD,
+    TUKEY_ALPHA, channel_key, parse_channel_key,
 )
 
 EVENT = 1
@@ -248,9 +248,10 @@ def test_parameters_reach_the_analysis_calls(brune_app, view):
     assert view.fit.omega0 != pytest.approx(omega_t, rel=1e-6)
 
 
-def test_short_pre_window_warning_is_visible_and_blocks_source(view):
+def test_short_pre_window_warning_is_visible_and_warns_the_source(brune_app, view):
     """A pre window shorter than the tukey ramp attenuates Omega0; the view
-    must say so (flags, status, taper row) and refuse source parameters."""
+    must say so (flags, status, taper row) and the source parameters, still
+    computed, carry the warning."""
     view.set_channel(BRUNE_CH)
     view.calibration_path_var.set(view.app.calibration_csv)
     view.unit_combobox.set("V/m")
@@ -269,11 +270,17 @@ def test_short_pre_window_warning_is_visible_and_blocks_source(view):
     status = view.status_var.get()
     assert "fit OK" not in status
     assert "warnings" in status and "attenuated" in status
-    # compute source is refused for the attenuated plateau
+    # the source parameters are computed anyway, the warning carried along and saved with them
     set_medium(view, "P", 0.52)
-    assert not view.compute_source()
-    assert "attenuated" in view.status_var.get()
-    assert view.record["source"] is None
+    assert view.compute_source(), view.status_var.get()
+    assert "attenuated" in view.status_var.get() and "not saved" in view.status_var.get()
+    source = view.record["source"]
+    assert source["valid"] and any("attenuated" in w for w in source["warnings"])
+    assert "attenuated" in view.source_vars["warnings"].get()
+    assert "attenuated" in view.result_vars["flags"].get()
+    assert view.save()
+    saved = brune_app.data_manager.get_data(f"runs/[0]/events/[{EVENT}]/strain/spectrum")["sets"]["default"]["channels"]["ch3"]
+    assert saved["source"]["valid"] and any("attenuated" in w for w in saved["source"]["warnings"])
     # the parameter warning fires on its own from the entries
     assert PZTSpectrumView.parameter_warnings({"taper": "tukey", "pre_ms": 0.3, "post_ms": 2.5})
     assert PZTSpectrumView.parameter_warnings({"taper": "tukey", "pre_ms": 0.5, "post_ms": 2.0}) == []
@@ -285,6 +292,8 @@ def test_short_pre_window_warning_is_visible_and_blocks_source(view):
     assert "fit OK" in view.status_var.get()
     assert "WARNINGS" not in view.result_vars["flags"].get()
     assert view.compute_source(), view.status_var.get()
+    assert not any("attenuated" in w for w in view.record["source"]["warnings"])
+    assert "attenuated" not in view.status_var.get()
 
 
 def test_compute_source(view):
@@ -422,14 +431,18 @@ def test_save_merges_channels_and_is_json_like(brune_app, view):
     assert view.save()
     saved = brune_app.data_manager.get_data(f"runs/[0]/events/[{EVENT}]/strain/spectrum")
     assert saved is view.event["strain"]["spectrum"]
-    assert saved["version"] == RESULT_VERSION
-    assert set(saved["channels"]) == {channel_key(BRUNE_CH)} == {"ch3"}
-    rec = saved["channels"]["ch3"]
+    assert saved["version"] == 2 and list(saved["sets"]) == ["default"] and "channels" not in saved
+    channels = saved["sets"]["default"]["channels"]
+    assert set(channels) == {channel_key(BRUNE_CH)} == {"ch3"}
+    rec = channels["ch3"]
+    assert rec["result_set"] == "default"
     for key in ("version", "channel", "trigger", "trigger_time_s", "fs_hz", "pre_ms", "post_ms", "taper",
                 "baseline", "highpass_hz", "remove_step", "calibration_path", "calibration_unit",
                 "calibration_db", "calibration", "t_star_s", "fmin_hz", "fmax_hz", "bins_per_decade", "snr_min",
-                "n_fixed", "loss", "parameter_warnings", "source_inputs", "spectrum", "fit", "source"):
+                "n_fixed", "n_max", "loss", "parameter_warnings", "source_inputs", "spectrum", "fit", "source"):
         assert key in rec, key
+    assert rec["n_max"] == 4.0 and rec["fit"]["n_bounds"] == [1.0, 4.0]
+    assert rec["spectrum"]["meta"]["noise_region"] == "pre"
     assert rec["channel"] == BRUNE_CH and rec["fit"]["valid"] and rec["source"]["valid"]
     assert rec["spectrum"]["amp_units"] == "m*s"
     assert isinstance(rec["fit"]["warnings"], list) and isinstance(rec["fit"]["band_used"], list)
@@ -444,10 +457,11 @@ def test_save_merges_channels_and_is_json_like(brune_app, view):
     assert view.compute()
     assert view.save()
     saved = view.event["strain"]["spectrum"]
-    assert set(saved["channels"]) == {"ch3", "ch0"}
-    assert saved["channels"]["ch3"]["source"]["valid"]
-    assert saved["channels"]["ch0"]["source"] is None
-    assert saved["channels"]["ch0"]["remove_step"] is True
+    channels = saved["sets"]["default"]["channels"]
+    assert set(channels) == {"ch3", "ch0"}
+    assert channels["ch3"]["source"]["valid"]
+    assert channels["ch0"]["source"] is None
+    assert channels["ch0"]["remove_step"] is True
     # save with nothing computable (a bad control) is refused
     view.set_channel(7)
     view.pre_var.set("abc")
@@ -470,7 +484,7 @@ def test_channel_keys_are_not_digit_strings_and_legacy_keys_are_read(brune_app, 
     assert view.record is not None and "saved record" in view.status_var.get()
     view.set_channel(BRUNE_CH)
     assert view.compute() and view.save()
-    channels = view.event["strain"]["spectrum"]["channels"]
+    channels = view.event["strain"]["spectrum"]["sets"]["default"]["channels"]
     assert set(channels) == {"ch3", "ch5"}
     assert not any(k.isdigit() for k in channels)
 
@@ -487,7 +501,7 @@ def test_saved_record_without_channel_field_can_be_saved(brune_app, view):
         assert v2.pre_var.get() == "1"
         assert v2.record["channel"] == 2
         assert v2.save()
-        channels = v2.event["strain"]["spectrum"]["channels"]
+        channels = v2.event["strain"]["spectrum"]["sets"]["default"]["channels"]
         assert set(channels) == {"ch2"} and channels["ch2"]["channel"] == 2
         assert "channel 2 saved" in v2.status_var.get()
         # a record with no channel and no selection is refused with a status line
@@ -521,7 +535,7 @@ def test_legacy_digit_keyed_channels_loaded_as_a_list_are_read(brune_app, view):
         v2.calibration_path_var.set(brune_app.calibration_csv)
         v2.unit_combobox.set("V/m")
         assert v2.compute() and v2.save()
-        channels = v2.event["strain"]["spectrum"]["channels"]
+        channels = v2.event["strain"]["spectrum"]["sets"]["default"]["channels"]
         assert isinstance(channels, dict)
         assert set(channels) == {"ch0", "ch1", "ch3"}          # the legacy records are kept and renamed
         assert channels["ch1"]["channel"] == 1
@@ -536,7 +550,7 @@ def test_restore_accepts_array_valued_fields(brune_app, view):
     set_medium(view, "P")
     assert view.compute_source() and view.save()
     fit_fc = view.fit.fc
-    rec = view.event["strain"]["spectrum"]["channels"]["ch3"]
+    rec = view.event["strain"]["spectrum"]["sets"]["default"]["channels"]["ch3"]
     rec["fit"]["band_used"] = np.asarray(rec["fit"]["band_used"])
     rec["fit"]["warnings"] = np.asarray(["band_limited: synthetic"])
     for key in ("f_binned", "amp_binned", "noise_binned", "snr", "counts"):
@@ -564,7 +578,7 @@ def test_malformed_saved_record_does_not_block_the_window(brune_app, view, monke
     calibrated_compute(view)
     assert view.save()
     view.on_close()
-    channels = brune_app.data_manager.get_data(f"runs/[0]/events/[{EVENT}]/strain/spectrum")["channels"]
+    channels = brune_app.data_manager.get_data(f"runs/[0]/events/[{EVENT}]/strain/spectrum")["sets"]["default"]["channels"]
     good = channels["ch3"]
     # fit stored as a string, at_bounds not a dict, band garbage, source constants odd
     channels["ch3"] = dict(good, fit="garbage", source={"valid": True, "constants": "x", "warnings": 3})
@@ -606,7 +620,7 @@ def test_reopen_restores_parameters_and_numbers(brune_app, view):
     assert view.compute()
     assert "flat region: no" in view.result_vars["taper"].get()
     set_medium(view, "P", 0.6)
-    assert not view.compute_source() and "attenuated" in view.status_var.get()
+    assert view.compute_source() and "attenuated" in view.status_var.get()   # computed, with the warning
     view.taper_combobox.set("tukey")        # ramp 0.24 ms < pre 0.4 ms: flat region
     view.snr_var.set("2")
     view.bins_var.set("25")
@@ -617,7 +631,7 @@ def test_reopen_restores_parameters_and_numbers(brune_app, view):
     set_medium(view, "P", 0.6)
     assert view.compute_source()
     assert view.save()
-    rec_saved = view.event["strain"]["spectrum"]["channels"]["ch3"]
+    rec_saved = view.event["strain"]["spectrum"]["sets"]["default"]["channels"]["ch3"]
     view.on_close()
 
     v2 = PZTSpectrumView(brune_app, 0, EVENT)
@@ -975,7 +989,7 @@ def test_legacy_event_level_map_is_read_and_moved_on_save(brune_app, view):
     view.set_channel(7)
     assert "saved record" in view.status_var.get()
     assert view.save()
-    store = view.event["strain"]["spectrum"]["channels"]
+    store = view.event["strain"]["spectrum"]["sets"]["default"]["channels"]
     assert set(store) == {"ch3", "ch7"} and "pzt_spectrum" not in view.event
     assert "under strain" in view.status_var.get()
 
@@ -990,7 +1004,7 @@ def test_calibration_table_is_stored_and_used_without_the_csv(brune_app, view, t
     table = view.record["calibration"]
     assert len(table["frequency_hz"]) == 25 and table["unit"] == "V/m" and table["source"] == brune_app.calibration_csv
     assert view.save()
-    sensors = brune_app.data_manager.data["analysis"]["pzt_spectrum"]["sensors"]
+    sensors = brune_app.data_manager.data["analysis"]["pzt_spectrum"]["sets"]["default"]["sensors"]
     assert set(sensors) == {"ch3"} and sensors["ch3"]["calibration"]["unit"] == "V/m"
     assert sensors["ch3"]["calibration_path"] == brune_app.calibration_csv
     import os
@@ -1024,10 +1038,10 @@ def test_every_control_reopens_from_the_experiment_settings(brune_app, view):
     assert view.save()                                    # the source was never computed, still everything is kept
     a = brune_app.data_manager.data["analysis"]
     assert a["medium"] == {"rho_kg_m3": RHO, "vp_m_s": VP, "vs_m_s": VS}
-    settings = a["pzt_spectrum"]["settings"]
+    settings = a["pzt_spectrum"]["sets"]["default"]["settings"]
     assert settings["pre_ms"] == 0.4 and settings["phase"] == "S" and settings["radiation_coefficient"] == 0.7
     assert settings["snr_min"] == 2.0 and settings["t_star_s"] is None if "t_star_s" in settings else True
-    sensor = a["pzt_spectrum"]["sensors"]["ch3"]
+    sensor = a["pzt_spectrum"]["sets"]["default"]["sensors"]["ch3"]
     assert sensor["distance_m"] == DIST and sensor["free_surface_factor"] == 1.3 and sensor["t_star_s"] == 1e-6
     assert view.record["source_inputs"]["free_surface_factor"] == 1.3
     view.on_close()
@@ -1134,3 +1148,254 @@ def test_a_noise_window_too_short_to_use_does_not_poison_the_entries(brune_app, 
     view.noise_end_var.set("-0.6")
     view.schedule_compute(now=True)
     assert view.record is not None and view.record["post_ms"] == 5.0
+
+
+def test_n_max_bounds_the_free_exponent_and_is_kept(brune_app, view):
+    view.set_channel(BRUNE_CH)
+    assert view.n_max_var.get() == "4" and view.record["n_max"] == 4.0
+    assert view.record["fit"]["n_bounds"] == [1.0, 4.0] and view.fit.n_bounds == (1.0, 4.0)
+    view.n_fixed_var.set(False)
+    view.n_max_var.set("8")
+    view.schedule_compute(now=True)
+    assert view.fit.valid and not view.fit.n_fixed and view.fit.n_bounds == (1.0, 8.0)
+    assert view.record["n_max"] == 8.0 and view.record["fit"]["n_bounds"] == [1.0, 8.0]
+    assert view.fit.n == pytest.approx(2.0, abs=0.2) and not view.fit.at_bounds["n"]
+    view.n_max_var.set("1.5")                       # a ceiling under the truth: n sits on it, flagged for these bounds
+    view.schedule_compute(now=True)
+    assert view.fit.n == pytest.approx(1.5, abs=0.02) and view.fit.at_bounds["n"]
+    assert "at bound: n" in view.result_vars["flags"].get()
+    view.n_max_var.set("1")                         # not above n min
+    view.schedule_compute(now=True)
+    assert view.record is None and "n max" in view.status_var.get()
+    view.n_max_var.set("8")
+    view.schedule_compute(now=True)
+    assert view.save()
+    assert brune_app.data_manager.data["analysis"]["pzt_spectrum"]["sets"]["default"]["settings"]["n_max"] == 8.0
+    rec = copy.deepcopy(view.record)
+    view.on_close()
+    v2 = PZTSpectrumView(brune_app, 0, 2)           # another event: the experiment's settings
+    try:
+        assert v2.n_max_var.get() == "8" and not v2.n_fixed_var.get()
+        rec.pop("n_max")                            # a record written before the key existed reads as the default
+        v2.apply_record(rec)
+        assert v2.n_max_var.get() == "4"
+    finally:
+        v2.on_close()
+
+
+def test_noise_window_after_the_signal_in_the_view(brune_app, view):
+    from matplotlib.backend_bases import MouseEvent
+    view.set_channel(BRUNE_CH)
+    # explicit, after the signal: entries, analysis, record, handles
+    view.noise_start_var.set("2"); view.noise_end_var.set("4.5")
+    view.schedule_compute(now=True)
+    w = view.window
+    assert w.noise_available and w.noise_region == "explicit" and w.i_noise0 == w.i_trigger + w.n_post
+    assert view.fit.valid, view.fit.reason
+    assert view.record["noise_start_ms"] == 2.0 and view.record["spectrum"]["meta"]["noise_region"] == "explicit"
+    e = view.current_edges_ms()
+    assert e["noise_start"] == pytest.approx(2.0) and e["noise_end"] == pytest.approx(4.5)
+    assert set(view.handles) == set(HANDLES)
+    assert view.ax_time.get_xlim()[1] > 4.5                         # the plot shows the noise window
+    # the signal end stops at the noise start, the noise start at the signal end; the noise end is free
+    view.begin_drag("signal_end", e["signal_end"])
+    assert view.drag_to(3.0)["signal_end"] == pytest.approx(2.0)
+    view.end_drag()
+    e = view.current_edges_ms()
+    view.begin_drag("noise_start", e["noise_start"])
+    assert view.drag_to(0.5)["noise_start"] == pytest.approx(e["signal_end"])
+    view.drag_to(2.5)
+    view.end_drag()
+    assert view.record["noise_start_ms"] == 2.5 and view.record["noise_end_ms"] == 4.5
+    e = view.current_edges_ms()
+    view.begin_drag("noise_end", e["noise_end"])
+    view.drag_to(6.0)
+    view.end_drag()
+    assert view.record["noise_end_ms"] == 6.0
+    # the noise body slides after the signal, never onto it
+    e = view.current_edges_ms()
+    view.begin_drag("noise", e["noise_start"] + 1.0)
+    e1 = view.drag_to(e["noise_start"] + 1.0 - 5.0)
+    assert e1["noise_start"] == pytest.approx(e["signal_end"])
+    assert e1["noise_end"] - e1["noise_start"] == pytest.approx(e["noise_end"] - e["noise_start"])
+    view.end_drag()
+    assert view.record["noise_start_ms"] == pytest.approx(e["signal_end"])
+    # coincident edges after the signal: the drag direction tells them apart
+    view.canvas.draw()
+    ax = view.ax_time
+
+    def press(x_ms):
+        px, py = ax.transData.transform((x_ms, float(np.mean(ax.get_ylim()))))
+        view.on_press(MouseEvent("button_press_event", view.canvas, px, py, button=1))
+
+    e = view.current_edges_ms()
+    assert e["noise_start"] == pytest.approx(e["signal_end"])
+    press(e["signal_end"])
+    assert view._drag["what"] == TIE_AFTER
+    e1 = view.drag_to(e["signal_end"] + 1.0)                         # right: the noise start moves
+    assert e1["noise_start"] == pytest.approx(e["signal_end"] + 1.0) and e1["signal_end"] == pytest.approx(e["signal_end"])
+    view.end_drag()
+    view.noise_start_var.set(str(e["signal_end"]))
+    view.schedule_compute(now=True)
+    view.canvas.draw()
+    press(e["signal_end"])
+    e1 = view.drag_to(e["signal_end"] - 0.5)                         # left: the signal end moves
+    assert e1["signal_end"] == pytest.approx(e["signal_end"] - 0.5) and e1["noise_start"] == pytest.approx(e["signal_end"])
+    view.end_drag()
+    assert view.record["post_ms"] == pytest.approx(e["signal_end"] - 0.5)
+    # automatic noise with no room before the signal is taken after it, says so, and follows the signal end
+    view.noise_start_var.set(""); view.noise_end_var.set("")
+    view.pre_var.set("9.5"); view.post_var.set("0.5")                # the trace starts 10 ms before the trigger
+    view.schedule_compute(now=True)
+    w = view.window
+    assert w.noise_region == "post" and w.i_noise0 == w.i_trigger + w.n_post
+    assert "after the signal" in view.status_var.get() and view.record["noise_start_ms"] is None
+    e = view.current_edges_ms()
+    view.begin_drag("signal_end", e["signal_end"])
+    e1 = view.drag_to(1.0)
+    assert e1["signal_end"] == pytest.approx(1.0) and e1["noise_start"] == pytest.approx(1.0)
+    assert (view.noise_start_var.get(), view.noise_end_var.get()) == ("", "")
+    view.end_drag()
+    assert view.window.i_noise0 == view.window.i_trigger + view.window.n_post and view.record["noise_start_ms"] is None
+    # with room before again, the noise goes back before the signal
+    view.pre_var.set("0.5"); view.post_var.set("2.0")
+    view.schedule_compute(now=True)
+    assert view.window.noise_region == "pre" and "after the signal" not in view.status_var.get()
+    # a real mouse drag of the end of a noise window after the signal
+    view.noise_start_var.set("2"); view.noise_end_var.set("4.5")
+    view.schedule_compute(now=True)
+    widget = shown(view)
+    e = view.current_edges_ms()
+    tk_drag(widget, *tk_xy(view, e["noise_end"]), *tk_xy(view, 6.0))
+    assert float(view.noise_end_var.get()) == pytest.approx(6.0, abs=0.05)
+    assert view.record["noise_end_ms"] == pytest.approx(6.0, abs=0.05) and view.record["noise_start_ms"] == 2.0
+
+
+def test_result_sets_keep_routes_side_by_side(brune_app, view):
+    """Records saved in different result sets do not overwrite each other; each
+    set keeps its own experiment settings; a window opens on the set last saved."""
+    calibrated_compute(view)                                  # V/m: the 'default' set
+    assert view.result_set == "default" and list(view.set_combobox["values"]) == ["default"]
+    set_medium(view, "P")
+    assert view.compute_source() and view.save()
+    fc_default = view.fit.fc
+    assert view.record["result_set"] == "default"
+    # a new set typed into the box: the same channel through another calibration
+    view.set_combobox.set("EGF")
+    view.on_set_changed()
+    assert view.result_set == "EGF" and list(view.set_combobox["values"]) == ["default", "EGF"]
+    assert "not saved" in view.status_var.get()               # nothing saved in EGF yet: recomputed
+    view.unit_combobox.set("V/(N m)")
+    view.calibration_divisor_var.set("2")
+    assert view.compute(), view.status_var.get()
+    assert view.spectrum.amp_units == "N*m*s"
+    assert view.compute_source(), view.status_var.get()
+    assert view.save()
+    assert "set 'EGF'" in view.status_var.get()
+    store = view.event["strain"]["spectrum"]
+    assert store["version"] == 2 and set(store["sets"]) == {"default", "EGF"}
+    assert store["sets"]["default"]["channels"]["ch3"]["calibration_unit"] == "V/m"
+    assert store["sets"]["EGF"]["channels"]["ch3"]["calibration_unit"] == "V/(N m)"
+    assert store["sets"]["EGF"]["channels"]["ch3"]["result_set"] == "EGF"
+    a = brune_app.data_manager.data["analysis"]["pzt_spectrum"]
+    assert a["current_set"] == "EGF" and set(a["sets"]) == {"default", "EGF"}
+    assert a["sets"]["default"]["sensors"]["ch3"]["calibration_unit"] == "V/m"
+    assert a["sets"]["EGF"]["sensors"]["ch3"]["calibration_unit"] == "V/(N m)"
+    assert a["sets"]["EGF"]["sensors"]["ch3"]["calibration_divisor"] == 2.0
+    assert "settings" not in a and "sensors" not in a
+    # back to default: its record and its calibration come back
+    view.set_combobox.set("default")
+    view.on_set_changed()
+    assert view.unit_combobox.get() == "V/m" and view.fit.fc == pytest.approx(fc_default)
+    assert "matches the saved record" in view.status_var.get()
+    # a bad name is refused and the box reverts
+    view.set_combobox.set("a/b")
+    view.on_set_changed()
+    assert view.result_set == "default" and view.set_combobox.get() == "default" and "'/'" in view.status_var.get()
+    view.on_close()
+    # a new window opens on the set last saved (EGF), with that set's sensor values on another event
+    v2 = PZTSpectrumView(brune_app, 0, 2)
+    try:
+        assert v2.result_set == "EGF" and v2.set_combobox.get() == "EGF"
+        assert list(v2.set_combobox["values"]) == ["default", "EGF"]
+        v2.set_channel(BRUNE_CH)
+        assert v2.unit_combobox.get() == "V/(N m)" and v2.calibration_divisor_var.get() == "2"
+        v2.set_combobox.set("default")
+        v2.on_set_changed()
+        assert v2.unit_combobox.get() == "V/m" and v2.calibration_divisor_var.get() == ""
+    finally:
+        v2.on_close()
+
+
+def test_version_1_store_and_flat_settings_are_read_as_the_default_set(brune_app, view):
+    calibrated_compute(view)
+    rec = copy.deepcopy(view.record)
+    view.event["strain"]["spectrum"] = {"version": 1, "channels": {"ch3": dict(rec, channel=3), "ch5": dict(rec, channel=5)}}
+    data = brune_app.data_manager.data
+    data["analysis"] = {"pzt_spectrum": {"settings": {"pre_ms": 0.7, "post_ms": 1.8},
+                                         "sensors": {"ch6": {"t_star_s": 2e-6}}}}
+    view.on_close()
+    v2 = PZTSpectrumView(brune_app, 0, EVENT)
+    try:
+        assert v2.result_set == "default" and set(v2.saved_channels()) == {3, 5}
+        assert v2.current_channel() == 3 and "saved record" in v2.status_var.get()
+        assert v2.experiment_settings()["pre_ms"] == 0.7                     # the flat settings
+        v2.set_channel(6)
+        assert float(v2.t_star_var.get()) == pytest.approx(2e-6)             # the flat sensors entry
+        v2.set_channel(3)
+        assert v2.save()
+        store = v2.event["strain"]["spectrum"]
+        assert store["version"] == 2 and "channels" not in store
+        assert set(store["sets"]["default"]["channels"]) == {"ch3", "ch5"}
+        a = data["analysis"]["pzt_spectrum"]
+        assert "settings" not in a and "sensors" not in a and a["current_set"] == "default"
+        assert a["sets"]["default"]["sensors"]["ch6"] == {"t_star_s": 2e-6}  # moved
+        assert a["sets"]["default"]["sensors"]["ch3"]["calibration_unit"] == "V/m"
+        assert a["sets"]["default"]["settings"]["pre_ms"] == 0.5             # the saved record's controls
+    finally:
+        v2.on_close()
+
+
+def test_moment_unit_greys_the_medium_entries_and_takes_m0_from_the_plateau(brune_app, view, tmp_path):
+    view.set_channel(BRUNE_CH)
+    csv = tmp_path / "psi.csv"
+    f = np.geomspace(100.0, 100e3, 25)
+    csv.write_text("Frequency (Hz),Mean_Inst_App_Psi\n" + "\n".join(f"{fi:.6g},{2 * GAIN}" for fi in f) + "\n")
+    view.calibration_path_var.set(str(csv))
+    view.unit_combobox.set("V/(N m)")
+    view.calibration_divisor_var.set("2")                     # Psi / C_FM, say
+    assert view.compute(), view.status_var.get()
+    assert view.spectrum.amp_units == "N*m*s" and view.fit.valid
+    assert view.fit.omega0 == pytest.approx(OMEGA0_V / GAIN, rel=0.05)
+    assert all(entry.instate(["disabled"]) for entry in view.medium_entries.values())
+    assert "M0 = Omega0" in view.source_hint_var.get()
+    assert "gain / 2" in view.calibration_note_var.get()
+    assert view.record["calibration_divisor"] == 2.0 and view.record["calibration"]["gain_divisor"] == 2.0
+    # only the phase and Vs are needed
+    view.rho_var.set(""); view.c_var.set(""); view.distance_var.set("")
+    view.vs_var.set(str(VS))
+    assert view.compute_source(), view.status_var.get()
+    source = view.record["source"]
+    assert source["valid"] and source["seismic_moment_nm"] == pytest.approx(view.fit.omega0)
+    assert source["source_radius_m"] == pytest.approx(src.PHASE_CONSTANTS["P"]["k"] * VS / view.fit.fc)
+    assert source["constants"]["moment_spectrum"] is True and source["constants"]["rho_kg_m3"] is None
+    assert math.isnan(source["kR"]) and "M0 = Omega0" in view.status_var.get()
+    assert view.source_vars["m0"].get().endswith("N m")
+    assert view.save()
+    # back to a displacement unit: the entries come back and rho is required again
+    view.unit_combobox.set("V/m")
+    view.calibration_divisor_var.set("")
+    assert view.compute(), view.status_var.get()
+    assert view.spectrum.amp_units == "m*s"
+    assert not any(entry.instate(["disabled"]) for entry in view.medium_entries.values())
+    assert not view.compute_source() and "rho" in view.status_var.get()
+    # the unit and the divisor come back with the saved record
+    view.on_close()
+    v2 = PZTSpectrumView(brune_app, 0, EVENT)
+    try:
+        assert v2.current_channel() == BRUNE_CH
+        assert v2.unit_combobox.get() == "V/(N m)" and v2.calibration_divisor_var.get() == "2"
+        assert v2.record["spectrum"]["amp_units"] == "N*m*s"
+        assert all(entry.instate(["disabled"]) for entry in v2.medium_entries.values())
+    finally:
+        v2.on_close()
