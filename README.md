@@ -30,6 +30,15 @@ the node they belong to and written to disk with "Save As" (`.npz`, `.h5` or
 `.hdf5`; other suffixes are refused, and a failed save leaves the previous
 file untouched).
 
+## Versions
+
+`labquake-explorer --version` prints the package version (the window title
+shows it too); it is written once, in `labquake_explorer/_version.py`, and
+releases are tagged `v<version>`. Every experiment file written records,
+under a top-level `labquake_explorer` dict, the version that last wrote it
+and when, the git commit when run from a checkout, and the version that
+built it.
+
 ## Features
 
 - Load and analyze labquake data stored in NPZ and HDF5 formats

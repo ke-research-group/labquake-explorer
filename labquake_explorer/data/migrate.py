@@ -53,6 +53,7 @@ from labquake_explorer.analysis.event_metrics import RESULT_VERSION as ANALYSIS_
 from labquake_explorer.data.channels import channel_array, is_channel_array, positions_for
 from labquake_explorer.data.picks import EXTRACTION_KEY, LEGACY_INDICES_KEY
 from labquake_explorer.data.settings import ANALYSIS_KEY, get_setting, set_setting
+from labquake_explorer.data.stamp import write_stamp_h5
 from labquake_explorer.data.sources import (WAVEFORM, ARRIVALS_KEY, is_legacy_strain, is_waveform_block,
                                             read_arrivals, run_sources, waveform_trigger_time, write_arrivals)
 
@@ -408,8 +409,9 @@ def write_fault_geometry(path, patch_x_mm=None, ends_x_mm=None) -> list:
     """Set ``analysis['fault']['patch_x_mm']`` / ``['ends_x_mm']`` in an experiment
     file (a value None is left as it is) and move the values an earlier file
     kept at the top level or in a ``fault`` dict there.  An HDF5 file is
-    edited in place, the small group only, the rest of the file untouched; an
-    npz file is loaded and written back.  Returns the notes."""
+    edited in place, the small group only (and the version stamp when
+    something changed), the rest of the file untouched; an npz file is loaded
+    and written back.  Returns the notes."""
     from labquake_explorer.data.data_manager import CONTAINER_ATTR, DataManager
     path = Path(path)
     wanted = {key: None if value is None else _pair(value) for key, value in
@@ -453,6 +455,8 @@ def write_fault_geometry(path, patch_x_mm=None, ends_x_mm=None) -> list:
                 del fault[key]
             fault.create_dataset(key, data=np.asarray(value, dtype=float))
             notes.append(f"{ANALYSIS_KEY}/{FAULT_SETTING}/{key} = {value}")
+        if notes:
+            write_stamp_h5(f)
     return notes
 
 

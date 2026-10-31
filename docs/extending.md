@@ -96,6 +96,20 @@ Files saved earlier kept the patch edges and fault ends as top-level
 'ends_x_mm': ...}`; the view reads those and moves a value into `analysis`
 when it saves.
 
+Next to it, `labquake_explorer` says which package wrote the file
+(`labquake_explorer/data/stamp.py`):
+
+| key | meaning |
+|---|---|
+| `version`, `saved_at` | the package version that last wrote the file and the local time it did (ISO 8601 with the UTC offset). Every write refreshes them: `DataManager.save_file` and the migration tool's in-place edits |
+| `git` | `git describe` of the checkout the package ran from (`v0.2.0-3-g1bf4fca`, `-dirty` when it had uncommitted edits), so a file written between releases still names its commit; absent when the package did not run from a checkout |
+| `created_version`, `created_at` | the package that built the experiment (`preprocessing.build.experiment`); later saves leave them |
+
+A file made before the stamp existed gets one when it is next saved. The
+version itself is written once, in `labquake_explorer/_version.py` (`setup.py`
+reads it; the window title and `labquake-explorer --version` show it); bump
+it for a release or a layout change and tag that commit `v<version>`.
+
 A **channel array** (`labquake_explorer/data/channels.py`) is a dict with
 `data` shaped `(n_channels, n)`, `channels` naming the rows, `unit`, and an
 optional `positions` table (`x`, `y`, `z` per channel, NaN when unknown, plus
