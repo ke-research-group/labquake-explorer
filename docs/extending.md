@@ -329,6 +329,20 @@ recompute reproduces the saved record from the same ensemble inputs. The
 view's ensemble row and Source Scaling's error bars (the 16-84 % of M0 and
 fc) use `stats_resolved` when any member is resolved, else `stats`.
 
+The ensemble gives a range, not a point estimate: the record's own `fit` is
+the estimate, and neither view shows a median. `stats_resolved` selects
+members by their own outcome, so for a corner below about twice the larger
+fmins the members that land low are dropped as band-limited and the
+survivors are those that landed high. Its median is then biased upward (a
+2 kHz corner injected into the 8 MPa BAC records came back near 4.3 kHz from
+the default 16 bands), and its 16-84 % range can sit wholly above the
+record's fc (276 of the 1288 BAC records of T0177/T0183/T0184/T0185). The
+1 kHz members, the only ones whose band brackets such a corner, sit on the
+step of the BAC table at 1.08-1.17 kHz, so choosing members by whether
+their band brackets the record's own fc does not cure it for those files.
+Read a low-corner record's error bar as band sensitivity, not as a bracket
+around its fc.
+
 Calibration units are `V/m`, `V/(m/s)`, `V/(m/s^2)` (a displacement spectrum
 in `m*s`), `V/V` (uncalibrated, `V*s`) and `V/(N m)`: an in-situ response
 that turns volts into a **moment spectrum** in `N*m*s` (the empirical
