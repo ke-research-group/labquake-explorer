@@ -52,8 +52,8 @@ A tall column of controls goes into a `ScrollPanel`
 `panel.bind_children()`. The panel opens at its full height (at most the
 screen height less 160 px), follows the window's height, shows a scrollbar
 only when the controls do not fit, and takes the mouse wheel over its
-widgets, comboboxes included. The Slip Distribution view uses one for each
-of its two control columns.
+widgets, comboboxes included. The Slip Distribution and PZT Spectrum views
+use one for each of their two control columns.
 
 A menu command that is not a window registers a function instead:
 
