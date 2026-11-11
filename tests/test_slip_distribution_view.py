@@ -1295,3 +1295,18 @@ def test_waveform_field_and_burst_tab(slip_app):
     finally:
         if view in slip_app.child_windows:
             view.on_close()
+
+
+def test_control_columns_scroll_in_a_short_window(slip_app, view):
+    shown(view)
+    for panel in (view.left_panel, view.fits_panel):
+        assert panel.inner.winfo_children()                 # the controls live in the scrolling panels
+    view.geometry("1400x500")
+    view.update()
+    assert view.left_panel.overflows() and view.left_panel.scrollbar.winfo_ismapped()
+    view.left_panel.scroll(5)
+    assert view.left_panel.canvas.yview()[0] > 0.0
+    assert view.save_button.winfo_toplevel() is view       # still reachable by scrolling
+    view.geometry(f"1400x{view.left_panel.content_height() + 150}")
+    view.update()
+    assert not view.left_panel.scrollbar.winfo_ismapped()

@@ -46,6 +46,15 @@ the event combobox, `load_results()` / `save_results()`, `make_figure()`,
 `toolbar_active()`, `on_close()` and the hook `on_run_loaded()` (called once
 the run is loaded; there is no event selector and no `on_event_loaded()`).
 
+A tall column of controls goes into a `ScrollPanel`
+(`labquake_explorer/ui/views/scroll_panel.py`): grid the panel with
+`sticky="ns"`, build the controls in `panel.inner`, then call
+`panel.bind_children()`. The panel opens at its full height (at most the
+screen height less 160 px), follows the window's height, shows a scrollbar
+only when the controls do not fit, and takes the mouse wheel over its
+widgets, comboboxes included. The Slip Distribution view uses one for each
+of its two control columns.
+
 A menu command that is not a window registers a function instead:
 
 ```python
