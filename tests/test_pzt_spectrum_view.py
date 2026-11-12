@@ -1532,3 +1532,22 @@ def test_q_table_per_sensor(brune_app, view, tmp_path):
         assert v2.attenuation_table["n_rows"] == 2 and v2.spectrum.meta["attenuation"]["travel_time_s"] == 1e-4
     finally:
         v2.on_close()
+
+
+def test_control_columns_scroll_in_a_short_window(view):
+    view.deiconify()
+    view.update()
+    if not view.winfo_ismapped():
+        pytest.skip("window not mapped")
+    for panel in (view.left_panel, view.middle_panel):
+        assert panel.inner.winfo_children()                 # the controls live in the scrolling panels
+    view.geometry("1400x400")
+    view.update()
+    assert view.left_panel.overflows() and view.left_panel.scrollbar.winfo_ismapped()
+    view.left_panel.scroll(5)
+    assert view.left_panel.canvas.yview()[0] > 0.0
+    tall = view.left_panel.content_height() + 150
+    if tall < view.winfo_screenheight():                  # the column is taller than many screens
+        view.geometry(f"1400x{tall}")
+        view.update()
+        assert not view.left_panel.scrollbar.winfo_ismapped()
