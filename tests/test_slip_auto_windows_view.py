@@ -134,6 +134,31 @@ def test_the_run_is_named_by_its_name_and_the_list_scrolls_sideways(slip_app, vi
     assert sdv.AUTO_CHECK_WIDTH_PX <= table.master.winfo_reqwidth() < table.column("why", "width")
 
 
+def test_event_arrows_step_through_the_events(slip_app, view):
+    n = view.n_events()
+    assert view.event_idx == EVENT
+    view.prev_event_button.invoke()
+    assert view.event_idx == 0 and view.event_combobox.get() == "0"
+    view.prev_event_button.invoke()                       # nothing before the first
+    assert view.event_idx == 0
+    view.next_event_button.invoke()
+    view.next_event_button.invoke()
+    assert view.event_idx == 2
+    # an event without a slip array is skipped
+    del slip_app.data_manager.get_data("runs/[0]/events/[3]")["slip"]
+    view.step_event(+1)
+    assert view.event_idx == (4 if n > 4 else 2)
+    # with a list of chosen events, the arrows step through those
+    slip_app.data_manager.get_data("runs/[0]")[sdv.RUN_KEY] = {"version": 1, "events": [0, 2]}
+    view.set_event(1)
+    view.step_event(+1)
+    assert view.event_idx == 2
+    view.step_event(+1)
+    assert view.event_idx == 2
+    view.step_event(-1)
+    assert view.event_idx == 0
+
+
 def test_apply_to_events_entries_and_refusals(slip_app, view, monkeypatch):
     n = view.n_events()
     view.auto_events_var.set("")

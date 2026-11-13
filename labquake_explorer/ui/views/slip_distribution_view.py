@@ -475,6 +475,12 @@ class SlipDistributionView(EventView):
         frame = ttk.LabelFrame(left, text="Event")
         frame.pack(fill="x", pady=(0, 4))
         self.build_event_selector(frame, row=0, column=0)
+        arrows = ttk.Frame(frame)                # previous / next event, as for the sensors
+        arrows.grid(row=0, column=2, padx=(0, 4), sticky="w")
+        self.prev_event_button = ttk.Button(arrows, text="◀", width=2, command=lambda: self.step_event(-1))
+        self.prev_event_button.pack(side="left")
+        self.next_event_button = ttk.Button(arrows, text="▶", width=2, command=lambda: self.step_event(+1))
+        self.next_event_button.pack(side="left")
         ttk.Label(frame, text="Field:").grid(row=1, column=0, padx=4, pady=2, sticky="e")
         self.field_combobox = ttk.Combobox(frame, width=10, state="readonly")
         self.field_combobox.grid(row=1, column=1, padx=4, pady=2, sticky="w")
@@ -886,6 +892,25 @@ class SlipDistributionView(EventView):
                                                    f"staying on event {self.event_idx}.", parent=self)
             return
         super().set_event(event_idx)
+
+    def step_event(self, delta: int) -> None:
+        """The previous (``delta`` < 0) or next event with a slip array: among the
+        run's chosen events (``slip_analysis.events``) when it has a list, else
+        among all; nothing at either end."""
+        n = self.n_events()
+        chosen = self.run_events()
+        order = sorted(e for e in chosen if 0 <= e < n) if chosen is not None else list(range(n))
+        candidates = [e for e in order if (e > self.event_idx if delta > 0 else e < self.event_idx)]
+        if delta < 0:
+            candidates.reverse()
+        for k in candidates:
+            try:
+                event = self.data_manager.get_data(f"{self.run_path}/events/[{k}]")
+            except (KeyError, IndexError, TypeError):
+                continue
+            if slip_fields(event):
+                self.set_event(k)
+                return
 
     def on_event_loaded(self) -> None:
         fields = slip_fields(self.event, self.get_run())
