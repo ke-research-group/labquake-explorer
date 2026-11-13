@@ -1,5 +1,7 @@
 """Headless-Tk tests for the Auto windows box of the Slip Distribution view
 (analysis/fit_windows.py; added on the slip-auto-windows branch)."""
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -157,6 +159,37 @@ def test_event_arrows_step_through_the_events(slip_app, view):
     assert view.event_idx == 2
     view.step_event(-1)
     assert view.event_idx == 0
+
+
+def test_a_negative_slip_of_auto_windows_is_flagged(slip_app, view):
+    assert view.apply_auto_windows()
+    assert all(fw.FLAG_NEGATIVE not in view.auto_flags(i) for i in range(8))
+    real = view.result.sensors[3]
+    view.result.sensors[3] = SimpleNamespace(coseismic_slip=-0.8, flags=[])   # as the slip measured came out
+    try:
+        assert fw.FLAG_NEGATIVE in view.auto_flags(3) and fw.FLAG_NEGATIVE in view.sensor_flags(3)
+        assert fw.FLAG_NEGATIVE in view.auto_record()["flags"][3]
+        view.auto_info[3] = None                          # windows placed by hand: no auto flag
+        assert view.auto_flags(3) == []
+    finally:
+        view.result.sensors[3] = real
+    # a stored negative flag is not restored: it follows the slip shown
+    record = view.record()
+    record[sdv.AUTO_KEY]["flags"][2] = fw.FLAG_NEGATIVE
+    view.restore_auto(record, 8)
+    assert fw.FLAG_NEGATIVE not in view.auto_flags(2)
+
+
+def test_the_list_to_check_scrolls_with_the_wheel(slip_app, view):
+    view.fill_auto_check([(k, 7, [fw.FLAG_CREEP]) for k in range(20)])
+    view.update_idletasks()
+    assert str(view.auto_check_table.cget("yscrollcommand"))
+    panel_before = view.fits_panel.canvas.yview()
+    assert view.auto_check_table.yview()[0] == 0.0
+    assert view.on_auto_check_wheel(SimpleNamespace(num=5, delta=-120)) == "break"
+    view.update_idletasks()
+    assert view.auto_check_table.yview()[0] > 0.0
+    assert view.fits_panel.canvas.yview() == panel_before
 
 
 def test_apply_to_events_entries_and_refusals(slip_app, view, monkeypatch):

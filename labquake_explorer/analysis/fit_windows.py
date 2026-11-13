@@ -41,7 +41,9 @@ A sensor whose background rate is more than ``creep_ratio`` of its slip rate
 at ``t_i`` creeps nearly as fast before the event as it slips during it: its
 coseismic step does not stand out from the creep, the windows (whichever
 rule placed them) decide much of its slip, and it is flagged for a check by
-hand.
+hand.  A slip that comes out negative with the placed windows (``FLAG_NEGATIVE``,
+added by the caller, which measures the slip) is flagged too: the fault does
+not slip backwards in an event, so it marks windows the trace does not suit.
 
 Times are relative to the event time, as ``fit_before_s`` / ``fit_after_s``
 are in a ``slip_analysis`` record.  The defaults were set against windows
@@ -84,6 +86,7 @@ MIN_WIDTH_FRACTION = 0.5              # a before window shortened below this fra
 FLAG_NO_DECAY = "auto: slip rate stays high, check the after window"
 FLAG_NO_BACKGROUND = "auto: no background slip rate, check the after window"
 FLAG_CREEP = "auto: creep close to the coseismic rate, check the windows"
+FLAG_NEGATIVE = "auto: negative slip, check the windows"   # set by the caller from the slip measured
 FLAG_NO_ROOM_AFTER = "auto: no room for the after window"
 FLAG_NO_ONSET = "auto: no onset found"
 FLAG_BEFORE_SHORT = "auto: before window shortened"
@@ -305,7 +308,7 @@ __all__ = [
     "DEFAULT_STEP_S", "DEFAULT_PLATEAU_TOL_UM", "DEFAULT_PLATEAU_SPAN_S", "DEFAULT_BACKGROUND_FACTOR",
     "DEFAULT_RATE_SMOOTHING_S", "DEFAULT_MIN_AFTER_S", "DEFAULT_MAX_DECAY_S", "DEFAULT_CREEP_RATIO",
     "DEFAULT_ONSET_FRACTION", "DEFAULT_BEFORE_GAP_S", "DEFAULT_ONSET_SEARCH_S", "DEFAULT_EVENT_MARGIN_S",
-    "MIN_WIDTH_FRACTION", "FLAG_NO_DECAY", "FLAG_NO_BACKGROUND", "FLAG_CREEP", "FLAG_NO_ROOM_AFTER",
+    "MIN_WIDTH_FRACTION", "FLAG_NO_DECAY", "FLAG_NO_BACKGROUND", "FLAG_CREEP", "FLAG_NEGATIVE", "FLAG_NO_ROOM_AFTER",
     "FLAG_NO_ONSET", "FLAG_BEFORE_SHORT", "FLAG_NO_ROOM_BEFORE", "FLAG_NO_RATE", "AutoWindows",
     "after_line_values", "plateau_start",
     "settle_time", "choose_before", "choose_after", "auto_windows",

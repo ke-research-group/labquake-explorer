@@ -104,7 +104,7 @@ from labquake_explorer.data.settings import get_setting, set_setting
 from labquake_explorer.ui.actions import register_view
 from labquake_explorer.ui.context import EVENT
 from labquake_explorer.ui.views.base import EventView
-from labquake_explorer.ui.views.scroll_panel import ScrollPanel
+from labquake_explorer.ui.views.scroll_panel import WHEEL_EVENTS, ScrollPanel, wheel_units
 
 LIVE_DELAY_MS = 400                    # recompute this long after the last keystroke
 HANDLE_PICK_PX = 6                     # a press this close (pixels) to t_i or a window edge grabs it
@@ -141,7 +141,7 @@ AUTO_KEY = "auto_windows"              # in a slip_analysis record: how the auto
 AUTO_VERSION = 1
 RUN_KEY = "slip_analysis"              # run level: {"version", "events"}, the events chosen for the analysis
 RUN_VERSION = 1
-AUTO_CHECK_WIDTH_PX = 300              # the list of sensors to check: shown this wide ...
+AUTO_CHECK_WIDTH_PX = 270              # the list of sensors to check: shown this wide ...
 AUTO_WHY_WIDTH_PX = 720                # ... its "why" column this wide, scrolled sideways
 SIDES = (("minus", "-x"), ("plus", "+x"))   # the rupture edges, in the order of ProfileFit.tips_mm
 NOT_RESOLVED = "not resolved by the sensors:"
@@ -646,6 +646,8 @@ class SlipDistributionView(EventView):
         self._build_auto_frame(fits)             # auto windows (analysis/fit_windows.py)
         self.left_panel.bind_children()
         self.fits_panel.bind_children()
+        for sequence in WHEEL_EVENTS:            # the wheel over the list of sensors to check scrolls the list
+            self.auto_check_table.bind(sequence, self.on_auto_check_wheel)
         self.make_figure(figsize=(8.5, 6), figure_kwargs={"layout": "constrained"},
                          row=0, column=2, padx=5, pady=5, sticky="nsew")
         gs = self.figure.add_gridspec(2, 2, width_ratios=(1.35, 1.0))
@@ -807,14 +809,17 @@ class SlipDistributionView(EventView):
             self.auto_check_table.column(name, width=int(width * scale), minwidth=int(width * scale), anchor="w",
                                          stretch=False)
         self.auto_check_xscroll = ttk.Scrollbar(box, orient="horizontal", command=self.auto_check_table.xview)
-        self.auto_check_table.configure(xscrollcommand=self.auto_check_xscroll.set)
+        self.auto_check_yscroll = ttk.Scrollbar(box, orient="vertical", command=self.auto_check_table.yview)
+        self.auto_check_table.configure(xscrollcommand=self.auto_check_xscroll.set,
+                                        yscrollcommand=self.auto_check_yscroll.set)
         self.auto_check_table.grid(row=0, column=0, sticky="nsew")
+        self.auto_check_yscroll.grid(row=0, column=1, sticky="ns")
         self.auto_check_xscroll.grid(row=1, column=0, sticky="ew")
         box.grid_rowconfigure(0, weight=1)
         box.grid_columnconfigure(0, weight=1)
         box.update_idletasks()
-        box.configure(width=int(AUTO_CHECK_WIDTH_PX * scale), height=self.auto_check_table.winfo_reqheight()
-                      + self.auto_check_xscroll.winfo_reqheight())
+        box.configure(width=int(AUTO_CHECK_WIDTH_PX * scale) + self.auto_check_yscroll.winfo_reqwidth(),
+                      height=self.auto_check_table.winfo_reqheight() + self.auto_check_xscroll.winfo_reqheight())
         box.grid_propagate(False)
         self.auto_check_table.bind("<<TreeviewSelect>>", self.on_auto_check_selected)
 
@@ -2503,8 +2508,18 @@ class SlipDistributionView(EventView):
     def sensor_flags(self, i: int) -> list:
         """The analysis flags of sensor ``i`` and those of its auto windows."""
         flags = list(self.result.sensors[i].flags) if self.result is not None else []
+        return flags + self.auto_flags(i)
+
+    def auto_flags(self, i: int) -> list:
+        """The flags of sensor ``i``'s auto windows, and ``FLAG_NEGATIVE`` when the
+        slip they give is below zero; empty for windows placed by hand."""
         info = self.auto_info[i] if i < len(self.auto_info) else None
-        return flags + (list(info.flags) if info is not None else [])
+        if info is None:
+            return []
+        flags = [f for f in info.flags if f != fw.FLAG_NEGATIVE]
+        if self.result is not None and i < len(self.result.sensors) and self.result.sensors[i].coseismic_slip < 0:
+            flags.append(fw.FLAG_NEGATIVE)
+        return flags
 
     def read_auto_settings(self) -> dict:
         """The Auto windows settings typed, as keyword arguments of
@@ -2592,7 +2607,7 @@ class SlipDistributionView(EventView):
         return {"version": AUTO_VERSION, "settings": dict(self.auto_settings or {}),
                 "applied": [w is not None for w in info],
                 "kind": [w.kind if w is not None else "" for w in info],
-                "flags": ["; ".join(w.flags) if w is not None else "" for w in info],
+                "flags": ["; ".join(self.auto_flags(i)) for i in range(n)],
                 "creep_ratio": [float(w.creep_ratio) if w is not None else float("nan") for w in info],
                 "background_rate_um_s": [float(w.background_rate) if w is not None else float("nan") for w in info]}
 
@@ -2621,7 +2636,8 @@ class SlipDistributionView(EventView):
             if applied[i]:
                 self.auto_info[i] = fw.AutoWindows(self.fit_before[i], self.fit_after[i], kinds[i],
                                                    background_rate=background[i], creep_ratio=ratio[i],
-                                                   flags=[f for f in flags[i].split("; ") if f])
+                                                   flags=[f for f in flags[i].split("; ")
+                                                          if f and f != fw.FLAG_NEGATIVE])   # from the slip shown
 
     def run_events(self) -> Optional[list]:
         """The events chosen for the analysis (the run's ``slip_analysis.events``), or None."""
@@ -2734,6 +2750,13 @@ class SlipDistributionView(EventView):
         for k, i, flags in rows:
             name = self.channels[i] if i < len(self.channels) else str(i)
             self.auto_check_table.insert("", "end", iid=f"{k}:{i}", values=(k, name, "; ".join(flags)))
+
+    def on_auto_check_wheel(self, event):
+        """Scroll the list of sensors to check, not the column it is in."""
+        units = wheel_units(event)
+        if units:
+            self.auto_check_table.yview_scroll(units, "units")
+        return "break"
 
     def on_auto_check_selected(self, event=None) -> None:
         """Open the event and the sensor of the row clicked."""
