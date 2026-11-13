@@ -192,6 +192,33 @@ def test_the_list_to_check_scrolls_with_the_wheel(slip_app, view):
     assert view.fits_panel.canvas.yview() == panel_before
 
 
+def test_the_sensor_table_scrolls_both_ways(slip_app):
+    run = slip_app.data_manager.get_data("runs/[0]")
+    x = np.linspace(20.0, 480.0, 12)                      # more sensors than the table has rows
+    for j, event in enumerate(run["events"]):
+        add_slip_array(event, x_mm=x, slips_um=np.full(12, 1.0), creep_um_s=30.0, seed=j)
+    v = SlipDistributionView(slip_app, 0, EVENT)
+    try:
+        v.deiconify()
+        v.update()
+        assert len(v.table.get_children()) == 12 and int(v.table.cget("height")) < 12
+        assert str(v.table.cget("yscrollcommand")) and str(v.table.cget("xscrollcommand"))
+        base = dict(sdv.TABLE_COLUMNS)["flags"]
+        assert v.table.column("flags", "width") < base + 20     # no long flags yet: about as it was
+        assert v.apply_auto_windows()                            # every sensor creeps: long flags
+        v.geometry("1100x800")                                   # a window narrower than the columns
+        v.update()
+        assert v.table.column("flags", "width") > base + 100
+        if not v.table.winfo_ismapped():
+            pytest.skip("window not mapped")
+        assert v.table.yview()[1] < 1.0                          # the last rows are reached by scrolling
+        assert v.table.xview()[1] < 1.0                          # and the end of the flags too
+        for name, width in sdv.TABLE_COLUMNS:                     # no column squeezed below its width
+            assert v.table.column(name, "width") >= width
+    finally:
+        v.on_close()
+
+
 def test_apply_to_events_entries_and_refusals(slip_app, view, monkeypatch):
     n = view.n_events()
     view.auto_events_var.set("")

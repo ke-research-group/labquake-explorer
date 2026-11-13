@@ -667,12 +667,26 @@ class SlipDistributionView(EventView):
         self.canvas.mpl_connect("motion_notify_event", self.on_motion)
         self.canvas.mpl_connect("button_release_event", self.on_release)
 
-        self.table = ttk.Treeview(self, columns=[c for c, _ in TABLE_COLUMNS], show="headings", height=8,
+        # the table scrolls both ways: the rows below its height, and flags longer than their column
+        table_box = ttk.Frame(self)
+        table_box.grid(row=2, column=2, padx=5, pady=(0, 5), sticky="ew")
+        self.table = ttk.Treeview(table_box, columns=[c for c, _ in TABLE_COLUMNS], show="headings", height=8,
                                   selectmode="browse")
         for name, width in TABLE_COLUMNS:
             self.table.heading(name, text=name)
             self.table.column(name, width=width, anchor="e" if name not in ("sensor", "t_i from", "flags") else "w")
-        self.table.grid(row=2, column=2, padx=5, pady=(0, 5), sticky="ew")
+            self.table.column(name, minwidth=width)      # scroll sideways rather than squeeze a column
+        self.table_yscroll = ttk.Scrollbar(table_box, orient="vertical", command=self.table.yview)
+        self.table_xscroll = ttk.Scrollbar(table_box, orient="horizontal", command=self.table.xview)
+        self.table.configure(yscrollcommand=self.table_yscroll.set, xscrollcommand=self.table_xscroll.set)
+        self.table.grid(row=0, column=0, sticky="nsew")
+        self.table_yscroll.grid(row=0, column=1, sticky="ns")
+        self.table_xscroll.grid(row=1, column=0, sticky="ew")
+        table_box.grid_columnconfigure(0, weight=1)
+        table_box.update_idletasks()             # its natural size, kept while the flags column widens
+        table_box.configure(width=self.table.winfo_reqwidth() + self.table_yscroll.winfo_reqwidth(),
+                            height=self.table.winfo_reqheight() + self.table_xscroll.winfo_reqheight())
+        table_box.grid_propagate(False)
         self.table.bind("<ButtonPress-1>", lambda e: self.flush_pending(), add="+")    # before the class binding
         self.table.bind("<<TreeviewSelect>>", self.on_table_select)
 
@@ -1374,6 +1388,17 @@ class SlipDistributionView(EventView):
                 self.table.selection_set(str(self.sensor))
         finally:
             self._syncing = False
+        self.fit_flags_column()
+
+    def fit_flags_column(self) -> None:
+        """Widen the flags column to its longest text (the table then scrolls sideways)."""
+        texts = [str(self.table.set(iid, "flags")) for iid in self.table.get_children()]
+        font = getattr(self, "_text_font", None)
+        if font is None or not texts:
+            return
+        base = dict(TABLE_COLUMNS)["flags"]
+        width = max(base, max(font.measure(t) for t in texts) + 16)
+        self.table.column("flags", width=width, minwidth=width)
 
     # --------------------------------------------------------------- edits
     def on_method_selected(self, event=None) -> None:
