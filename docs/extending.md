@@ -665,11 +665,11 @@ needed, so a large file is checked in seconds.
   before that are three times too high and are fixed by dividing by three,
   in the runs and in every event's slice of them, along with the factor and
   formula of the `calibration` step).
-  `pressure_transducers(section, calibration='e-pump-2026-11')` converts both
-  lines with the transducer calibration made in place against the e-pump
+  Since version 0.4.0 the default, `calibration='e-pump-2026-11'`, converts
+  both lines with the transducer calibration made in place against the e-pump
   (`PRESSURE_CALIBRATIONS`, `P = 59.147 V + 1.254` bar, T0238 and T0239)
   through the jack and fault areas of the section (`PRESSURE_MPA_PER_BAR`);
-  the default keeps the Table B.1 factors. A new
+  `calibration=None` keeps the Table B.1 factors of older files. A new
   conversion is a class with `apply(run, units)` and `describe()`.
 - `alignment.offset_from_trigger(ni, elsys)` puts the Elsys clock on the NI
   clock from the NI trigger sample; `slip_step_table` checks that slip follows
