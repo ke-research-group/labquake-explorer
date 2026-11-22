@@ -256,12 +256,14 @@ PRESSURE_MPA_PER_BAR = {
 
 
 def pressure_transducers(section: str = "1D-5cm", normal_source: str = "pressure_1",
-                         shear_source: str = "pressure_2", calibration: Optional[str] = None) -> list:
+                         shear_source: str = "pressure_2",
+                         calibration: Optional[str] = "e-pump-2026-11") -> list:
     """``normal_stress`` and ``shear_stress`` (MPa) from the two pressure voltages.
 
-    ``calibration`` None uses the factors of ``PRESSURE_PRESETS`` (Table B.1); a key of
-    ``PRESSURE_CALIBRATIONS`` (``"e-pump-2026-11"``) converts both lines with that transducer
-    calibration instead, through the jack and fault areas of ``section``.
+    ``calibration`` is a key of ``PRESSURE_CALIBRATIONS``: the default, ``"e-pump-2026-11"``,
+    converts both lines with the transducer calibration made against the e-pump, through the
+    jack and fault areas of ``section``; None uses the older factors of ``PRESSURE_PRESETS``
+    (Table B.1), as every file built before version 0.4.0 did.
     """
     if calibration is not None:
         line, mpa_per_bar = PRESSURE_CALIBRATIONS[calibration], PRESSURE_MPA_PER_BAR[section]

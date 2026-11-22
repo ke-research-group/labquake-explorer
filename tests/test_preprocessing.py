@@ -28,7 +28,7 @@ def synthetic_run(fs=2000.0, duration=2.0):
 
 def test_linear_friction_presets_and_run_names():
     run = synthetic_run()
-    cal = Calibration(*pressure_transducers("1D-5cm"), Friction(), note="thesis table B.1")
+    cal = Calibration(*pressure_transducers("1D-5cm", calibration=None), Friction(), note="thesis table B.1")
     cal.apply(run)
     assert run["units"]["pressure_1"] == "V" and run["units"]["normal_stress"] == "MPa"
     assert run["normal_stress"].mean() == pytest.approx(8.0, abs=1e-5)
@@ -53,7 +53,8 @@ def test_linear_friction_presets_and_run_names():
         n, s = pressure_transducers(section, calibration="e-pump-2026-11")
         assert n.factor / normal.factor == pytest.approx(PRESSURE_MPA_PER_BAR[section]["normal"] / PRESSURE_MPA_PER_BAR["1D-5cm"]["normal"])
         assert s.factor / shear.factor == pytest.approx(PRESSURE_MPA_PER_BAR[section]["shear"] / PRESSURE_MPA_PER_BAR["1D-5cm"]["shear"])
-    assert [s.factor for s in pressure_transducers("1D-5cm")] == [1 / 0.222, 1 / 0.326]   # the default is unchanged
+    assert [s.factor for s in pressure_transducers("1D-5cm")] == [normal.factor, shear.factor]   # the e-pump one is the default
+    assert [s.factor for s in pressure_transducers("1D-5cm", calibration=None)] == [1 / 0.222, 1 / 0.326]
     with pytest.raises(KeyError):
         pressure_transducers("1D-5cm", calibration="no such calibration")
     # a missing source is skipped, not an error
@@ -120,7 +121,7 @@ ELSYS_MAP = {"A1": "pzt_1", "A5": "pressure_1", "A6": "pressure_2", "B1": "eddy_
 
 
 def calibration():
-    return Calibration(*pressure_transducers("1D-5cm"), EddySlip({"eddy_1": -0.0947}), Friction())
+    return Calibration(*pressure_transducers("1D-5cm", calibration=None), EddySlip({"eddy_1": -0.0947}), Friction())
 
 
 def test_run_from_tpc5_and_sources(elsys, tmp_path):
