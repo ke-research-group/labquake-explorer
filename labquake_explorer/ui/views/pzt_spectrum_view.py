@@ -1223,7 +1223,7 @@ class PZTSpectrumView(EventView):
             "channel": int(channel),
             "trigger": trigger,
             "pre_ms": _parse_float(self.pre_var.get(), "pre window (ms)", lo=0.0),
-            "post_ms": _parse_float(self.post_var.get(), "post window (ms)", lo=0.0),
+            "post_ms": _parse_float(self.post_var.get(), "post window (ms)"),       # negative: ends before the trigger
             "noise_start_ms": _parse_float(self.noise_start_var.get(), "noise start (ms)", required=False),
             "noise_end_ms": _parse_float(self.noise_end_var.get(), "noise end (ms)", required=False),
             "taper": self.taper_combobox.get(),
@@ -1530,6 +1530,9 @@ class PZTSpectrumView(EventView):
         self.plot()
         # automatic noise that had to move after the signal (no room before it) is said in the status
         note = "; noise taken after the signal (no room before it)" if window.noise_region == "post" else ""
+        if noise_window is not None and not window.noise_available:
+            note += (f"; noise window too short to use (it needs {sp.MIN_NOISE_FRACTION:.0%} of the signal window, "
+                     f"{sp.MIN_NOISE_FRACTION * window.window_s * 1e3:.4g} ms): no noise spectrum")
         if not fit.valid:
             self.status_var.set(f"channel {p['channel']}: fit invalid - {fit.reason}{note}")
             return True
@@ -1984,7 +1987,7 @@ class PZTSpectrumView(EventView):
             kind = kind if kind in sp.TAPER_KINDS else self.taper_combobox.get()
             taper = sp.taper_window(w.signal.size, kind if kind in sp.TAPER_KINDS else DEFAULTS["taper"], TUKEY_ALPHA)
             t_ms = w.t_rel * 1e3
-            edges = self.window_edges_ms(w)
+            edges = self.current_edges_ms()
             # the trace around both windows, so there is room to drag them
             first, last = min(edges["noise_start"], edges["signal_start"]), max(edges["noise_end"], edges["signal_end"])
             span = max(last - first, 1e-3)
@@ -1999,13 +2002,16 @@ class PZTSpectrumView(EventView):
                 self.ax_time.plot(t_noise, w.noise, color="#7f7f7f", lw=0.8, label="noise window")
                 self.noise_span = self.ax_time.axvspan(edges["noise_start"], edges["noise_end"],
                                                        color="#7f7f7f", alpha=0.12, zorder=0)
+            elif self.noise_shown():
+                self.noise_span = self.ax_time.axvspan(edges["noise_start"], edges["noise_end"], color="#d62728",
+                                                       alpha=0.15, zorder=0, label="noise window (too short, unused)")
             self.signal_span = self.ax_time.axvspan(edges["signal_start"], edges["signal_end"],
                                                     color="#1f77b4", alpha=0.08, zorder=0)
             self.ax_time.plot(t_ms, w.signal, color="#1f77b4", lw=1.0, label="signal window")
             self.ax_time.plot(t_ms, w.signal * taper, color="#d62728", lw=1.0, label="tapered (what is transformed)")
             self.ax_time.axvline(0.0, color="k", lw=0.8, ls=":")
             for name in HANDLES:
-                if name.startswith("noise") and not w.noise_available:
+                if name.startswith("noise") and not self.noise_shown():
                     continue
                 color = "#7f7f7f" if name.startswith("noise") else "#1f77b4"
                 self.handles[name] = self.ax_time.axvline(edges[name], color=color, lw=1.6, zorder=5,
@@ -2092,19 +2098,34 @@ class PZTSpectrumView(EventView):
 
     # ------------------------------------------------------ window dragging
     @staticmethod
-    def window_edges_ms(w: sp.WindowResult) -> dict:
-        """The four window edges in ms from the trigger."""
+    def window_edges_ms(w: sp.WindowResult, noise_ms: Optional[tuple] = None) -> dict:
+        """The four window edges in ms from the trigger; ``noise_ms`` (the typed
+        noise edges) stands for a noise window too short to be used."""
         pre_ms, post_ms = w.n_pre / w.fs * 1e3, w.n_post / w.fs * 1e3
         edges = {"signal_start": -pre_ms, "signal_end": post_ms}
         if w.noise_available:
             edges["noise_start"] = (w.i_noise0 - w.i_trigger) / w.fs * 1e3
             edges["noise_end"] = (w.i_noise1 - w.i_trigger) / w.fs * 1e3
+        elif noise_ms is not None:
+            edges["noise_start"], edges["noise_end"] = noise_ms
         else:
             edges["noise_start"] = edges["noise_end"] = -pre_ms
         return edges
 
     def current_edges_ms(self) -> Optional[dict]:
-        return self.window_edges_ms(self.window) if self.window is not None else None
+        return self.window_edges_ms(self.window, self.typed_noise_ms()) if self.window is not None else None
+
+    def typed_noise_ms(self) -> Optional[tuple]:
+        """The noise entries as (start, end) ms, None when blank or not a valid pair."""
+        try:
+            a, b = (float(v.get()) for v in (self.noise_start_var, self.noise_end_var))
+        except ValueError:
+            return None
+        return (a, b) if math.isfinite(a) and math.isfinite(b) and a < b else None
+
+    def noise_shown(self) -> bool:
+        """A noise window is on the plot: a usable one, or a typed one too short to use."""
+        return self.window is not None and (self.window.noise_available or self.typed_noise_ms() is not None)
 
     def _in_time_axes(self, event) -> bool:
         return event.inaxes in (self.ax_time, self.ax_taper) and event.xdata is not None
@@ -2155,7 +2176,7 @@ class PZTSpectrumView(EventView):
         edges = self.current_edges_ms()
         if edges["signal_start"] <= x <= edges["signal_end"]:
             self.begin_drag("signal", x)
-        elif self.window.noise_available and edges["noise_start"] <= x <= edges["noise_end"]:
+        elif self.noise_shown() and edges["noise_start"] <= x <= edges["noise_end"]:
             self.begin_drag("noise", x)
 
     def begin_drag(self, what: str, x_ms: float) -> None:
@@ -2166,7 +2187,7 @@ class PZTSpectrumView(EventView):
         self._drag = {"what": what, "x0": float(x_ms), "edges": edges, "moved": False,
                       "auto_noise": auto and what in ("signal_start", "signal_end", "signal", TIE, TIE_AFTER),
                       # the noise window lies after the signal: the limits and the following swap sides
-                      "noise_after": bool(self.window.noise_available and edges["noise_start"] >= edges["signal_end"])}
+                      "noise_after": bool(self.noise_shown() and edges["noise_start"] >= edges["signal_end"])}
 
     def on_motion(self, event) -> None:
         if self._drag is None or not self._in_time_axes(event):
@@ -2177,9 +2198,9 @@ class PZTSpectrumView(EventView):
         """Move the grabbed edge, or window, to ``x_ms`` (ms from the trigger) and
         show the new values in the entries; the analysis waits for the release.
         An edge moves on its own and stops at the other window (whichever side
-        of the signal the noise lies), at the trigger (the signal window keeps
-        it inside) and at the record's ends; a body slides as one within the
-        same limits."""
+        of the signal the noise lies), at the record's ends and, for the signal
+        start, at the trigger (the signal end may pass it: a window wholly before
+        the trigger); a body slides as one within the same limits."""
         d = self._drag
         e = dict(d["edges"])
         dx = x_ms - d["x0"]
@@ -2193,21 +2214,21 @@ class PZTSpectrumView(EventView):
         what = d["what"]
         dt = 1e3 / self.window.fs
         lo_t, hi_t = self._trace_bounds_ms()
-        noise = self.window.noise_available and not d["auto_noise"]
+        noise = self.noise_shown() and not d["auto_noise"]
         after = d["noise_after"]
         floor = e["noise_end"] if noise and not after else lo_t      # the signal start stops here
         ceiling = e["noise_start"] if noise and after else hi_t      # the signal end stops here
         if what == "signal_start":
             e["signal_start"] = min(max(x_ms, lo_t, floor), 0.0, e["signal_end"] - dt)
         elif what == "signal_end":
-            e["signal_end"] = max(min(x_ms, hi_t, ceiling), 0.0, e["signal_start"] + dt)
+            e["signal_end"] = max(min(x_ms, hi_t, ceiling), e["signal_start"] + dt)
         elif what == "noise_start":
             e["noise_start"] = min(max(x_ms, e["signal_end"] if after else lo_t), e["noise_end"] - dt)
         elif what == "noise_end":
             e["noise_end"] = max(min(x_ms, hi_t if after else e["signal_start"]), e["noise_start"] + dt)
         elif what == "signal":
             length = e["signal_end"] - e["signal_start"]
-            lo = max(lo_t, floor, -length)
+            lo = max(lo_t, floor)
             start = min(max(e["signal_start"] + dx, lo), 0.0, min(hi_t, ceiling) - length)
             e["signal_start"], e["signal_end"] = start, start + length
         elif what == "noise":
@@ -2235,7 +2256,7 @@ class PZTSpectrumView(EventView):
         yet); with ``noise_entries`` False the noise entries stay blank (automatic)."""
         self.pre_var.set(_text(round(abs(e["signal_start"]), 4)))     # never "-0"
         self.post_var.set(_text(round(e["signal_end"], 4) + 0.0))
-        if noise_entries and self.window is not None and self.window.noise_available:
+        if noise_entries and self.noise_shown():
             # without a usable noise window the edges carry a stand-in (both at the signal start),
             # which must not become the entries' values
             self.noise_start_var.set(_text(round(e["noise_start"], 4) + 0.0))
