@@ -9,7 +9,8 @@ Conventions (documented once here, echoed in the result ``meta``):
 
 * Windows are defined by SAMPLE COUNTS around a trigger sample:
   ``n_pre = round(pre_s * fs)``, ``n_post = round(post_s * fs)`` with
-  ``fs = 1 / median(diff(time))``.  The trigger is the sample nearest to the
+  ``fs = 1 / median(diff(time))``.  ``post_s`` may be negative: the window
+  then ends before the trigger (it still starts at or before it).  The trigger is the sample nearest to the
   caller's ``trigger_time`` (an event time or a picked arrival).
 * The noise window is the equal-length segment immediately before the signal
   window, or immediately after it when there is no room before (a recorder
@@ -334,8 +335,8 @@ def extract_window(time, x, trigger_time: float, pre_s: float, post_s: float,
     x = np.asarray(x, dtype=float).ravel()
     if time.shape != x.shape:
         raise ValueError("time and x must have the same length")
-    if not (np.isfinite(pre_s) and np.isfinite(post_s)) or pre_s < 0 or post_s < 0:
-        raise ValueError("pre_s and post_s must be finite and >= 0")
+    if not (np.isfinite(pre_s) and np.isfinite(post_s)) or pre_s < 0:
+        raise ValueError("pre_s must be finite and >= 0, post_s finite (negative: the window ends before the trigger)")
     fs = sampling_rate(time)
     dt = 1.0 / fs
     if not np.isfinite(trigger_time):
@@ -392,8 +393,8 @@ def extract_window(time, x, trigger_time: float, pre_s: float, post_s: float,
             k = np.arange(i_n0 - i0, i_n1 - i0, dtype=float)   # noise samples relative to the signal start
             y = noise
             region = "noise"
-        elif n_pre >= 2:
-            k = np.arange(0, n_pre, dtype=float)
+        elif min(n_pre, n) >= 2:                      # a window ending before the trigger is all pre-trigger
+            k = np.arange(0, min(n_pre, n), dtype=float)
             y = sig[:n_pre]
             region = "pre_trigger"
         else:

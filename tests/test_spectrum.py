@@ -95,6 +95,12 @@ def test_pre_linear_and_highpass_baselines():
     w = sp.extract_window(t, pulse + trend, 1000 / FS, 1e-3, 1e-3)
     assert w.baseline_region == "pre_trigger"
     np.testing.assert_allclose(w.signal, pulse[0:2000], atol=tol)
+    # a negative post ends the window before the trigger: all of it is pre-trigger, its mean removed
+    w = sp.extract_window(t, pulse + trend, 1000 / FS, 1e-3, -0.5e-3)
+    assert (w.n_pre, w.n_post, w.n) == (1000, -500, 500) and w.t_rel[-1] < 0 and w.baseline_region == "pre_trigger"
+    assert abs(w.signal.mean()) < 1e-9
+    with pytest.raises(ValueError):
+        sp.extract_window(t, pulse, 1000 / FS, 1e-3, -1e-3)              # empty window
     # 'none' keeps the raw samples
     w = sp.extract_window(t, pulse + trend, T0, PRE, POST, baseline="none")
     np.testing.assert_allclose(w.signal, (pulse + trend)[1000:3000])

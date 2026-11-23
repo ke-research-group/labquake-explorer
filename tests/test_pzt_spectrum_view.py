@@ -825,6 +825,16 @@ def test_noise_entries_and_dragged_windows_before_the_signal(brune_app, view):
     assert view.post_var.get() == "2.5" and view.handles["signal_end"].get_xdata()[0] == pytest.approx(2.5)
     view.end_drag()
     assert view.record["post_ms"] == 2.5 and view.window.n_post == int(round(2.5e-3 * brune_app.fs))
+    # the post edge may pass the trigger: a window wholly before it (it stops one sample after the start)
+    view.begin_drag("signal_end", 2.5)
+    assert view.drag_to(-0.2)["signal_end"] == pytest.approx(-0.2) and view.post_var.get() == "-0.2"
+    assert view.drag_to(-3.0)["signal_end"] == pytest.approx(-0.5 + 1e3 / brune_app.fs)
+    view.drag_to(-0.2)
+    view.end_drag()
+    assert view.record["post_ms"] == -0.2 and view.window.n_post == -int(round(0.2e-3 * brune_app.fs))
+    assert view.window.t_rel[-1] < 0
+    view.post_var.set("2.5")
+    view.schedule_compute(now=True)
     # the pre edge cannot cross the trigger; the automatic noise window (blank entries) follows it
     view.begin_drag("signal_start", -0.5)
     assert view.drag_to(0.3)["signal_start"] == 0.0 and view.pre_var.get() == "0"
@@ -865,23 +875,25 @@ def test_noise_entries_and_dragged_windows_before_the_signal(brune_app, view):
     post = view.record["post_ms"]
     drag(view, "signal_end", view.current_edges_ms()["signal_end"])
     assert view.record["post_ms"] == post
-    # a noise window too short to use (under a quarter of the signal window) is not written back by a drag
+    # a noise window too short to use (under a quarter of the signal window) stays on the plot, in red, with
+    # its handles; the status says why there is no noise spectrum, and dragged longer it counts again
     view.noise_start_var.set("-1.0"); view.noise_end_var.set("-0.6"); view.pre_var.set("0.5"); view.post_var.set("10")
     view.schedule_compute(now=True)
-    assert view.window is not None and not view.window.noise_available
-    assert set(view.handles) == {"signal_start", "signal_end"}
-    drag(view, "signal_start", view.current_edges_ms()["signal_start"], 0.0)
-    assert (view.noise_start_var.get(), view.noise_end_var.get()) == ("-1.0", "-0.6")   # left as typed
-    assert view.pre_var.get() == "0" and view.record is not None
+    assert view.window is not None and not view.window.noise_available and view.noise_span is not None
+    assert set(view.handles) == {"noise_start", "noise_end", "signal_start", "signal_end"}
+    assert "noise window too short" in view.status_var.get()
+    e = view.current_edges_ms()
+    assert (e["noise_start"], e["noise_end"]) == (-1.0, -0.6)
+    drag(view, "noise_start", -1.0, -4.0)
+    assert view.window.noise_available and view.record["noise_start_ms"] == -4.0
     # a recompute that fails keeps the top panel and its drags
-    view.noise_end_var.set("-1.0")
+    view.noise_end_var.set("-4")
     view.schedule_compute(now=True)
     assert view.record is None and "noise start must be before noise end" in view.status_var.get()
     assert view.window is not None and view.ax_time.lines and "not recomputed" in view.ax_spec.get_title()
     drag(view, "signal_end", view.current_edges_ms()["signal_end"], 5.0)
-    assert view.post_var.get() == "5" and view.record is None      # the noise entries are still wrong
-    view.noise_end_var.set("-0.6")
-    view.schedule_compute(now=True)
+    # the drag writes back the noise window on the plot, so the entries are valid again
+    assert view.post_var.get() == "5" and view.noise_end_var.get() == "-0.6"
     assert view.record is not None and view.record["post_ms"] == 5.0
 
 
